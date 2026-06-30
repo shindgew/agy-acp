@@ -10,7 +10,6 @@ import {
   type AgentApp,
   type CloseSessionRequest,
   type CloseSessionResponse,
-  type ContentBlock,
   type InitializeRequest,
   type InitializeResponse,
   type NewSessionRequest,
@@ -22,6 +21,7 @@ import {
   type SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk";
 import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./agy-cli.js";
+import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
@@ -187,7 +187,7 @@ export class AgyAcpAgent {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
 
-    const prompt = promptBlocksToText(params.prompt);
+    const prompt = await promptBlocksToAgyPrompt(params.prompt, session.cwd);
     session.activePrompt = true;
     const cancelPrompt = () => {
       session.agy.cancel().catch(() => {
@@ -265,27 +265,7 @@ export function runAcp(options: AgyAcpOptions = {}) {
   return createAgyAcpApp(options).connect(stream);
 }
 
-export function promptBlocksToText(blocks: ContentBlock[]): string {
-  const parts: string[] = [];
-  for (const block of blocks) {
-    if (block.type === "text") {
-      parts.push(block.text);
-    } else if (block.type === "resource_link") {
-      parts.push(`Referenced resource: ${block.uri}`);
-    } else if (block.type === "resource") {
-      parts.push(resourceBlockToText(block));
-    }
-  }
-  return parts.join("\n");
-}
-
-function resourceBlockToText(block: Extract<ContentBlock, { type: "resource" }>): string {
-  const resource = block.resource;
-  if ("text" in resource) {
-    return `Resource ${resource.uri}:\n${resource.text}`;
-  }
-  return `Resource ${resource.uri}: [${resource.mimeType ?? "application/octet-stream"} blob omitted]`;
-}
+export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)];
