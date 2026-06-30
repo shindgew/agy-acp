@@ -35,7 +35,7 @@ describe("initialize", () => {
       expect(response.protocolVersion).toBe(PROTOCOL_VERSION);
       expect(response.agentInfo?.name).toBe("agy-acp");
       expect(response.agentCapabilities?.promptCapabilities?.embeddedContext).toBe(true);
-      expect(response.agentCapabilities?.promptCapabilities?.image).toBe(false);
+      expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
     } finally {
       connection.close();

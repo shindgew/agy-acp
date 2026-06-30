@@ -74,7 +74,7 @@ export class AgyAcpAgent {
       agentCapabilities: {
         loadSession: false,
         promptCapabilities: {
-          image: false,
+          image: true,
           audio: false,
           embeddedContext: true
         },
