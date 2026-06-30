@@ -271,7 +271,7 @@ export class AgyCliSession {
     const executable = command[0];
     if (error.code === "ENOENT") {
       const hint = executable === this.config.agyPath && executable === "agy"
-        ? "Install the Google Antigravity CLI or set AGY_ACP_AUTO_INSTALL_AGY=1 to run the official installer when agy is missing."
+        ? "Install the Google Antigravity CLI or set AGY_ACP_AGY_PATH to the agy executable."
         : `Check the configured executable path: ${executable}.`;
       return new AgyCliError(`${executable} executable not found. ${hint}`, command, null, error.message);
     }
@@ -317,13 +317,6 @@ export class AgyCliBackend {
   }
 
   async listModels(config: AgyCliConfig): Promise<string[]> {
-    if (config.modelList.length > 0) {
-      return dedupe(config.modelList);
-    }
-    if (!config.discoverModels) {
-      return config.model ? [config.model] : [];
-    }
-
     const command = [config.agyPath, "models"];
     let child: SpawnedProcess;
     try {
@@ -379,8 +372,7 @@ export class AgyCliBackend {
     }
 
     const stdout = Buffer.concat(stdoutChunks).toString("utf8");
-    const models = parseAgyModels(stdout);
-    return config.model ? dedupe([config.model, ...models]) : models;
+    return parseAgyModels(stdout);
   }
 }
 
