@@ -12,31 +12,54 @@ avoids a separate runtime startup path.
 ```text
 Zed / ACP client
   -> agy-acp SDK NDJSON server over stdio
-  -> AgyCliBackend
-  -> agy --print --sandbox ...
+  -> AgyCliSession (spawns agy, tracks --conversation id)
+  -> agy --print --conversation <id> --sandbox ...
+       \-> writes to ~/.gemini/antigravity-cli/conversations/<id>.db
+  -> StreamPoller polls that SQLite database while agy runs
+  -> Translator decodes steps -> ACP session/update notifications
 ```
 
 The ACP SDK layer owns protocol parsing, validation, JSON-RPC framing, and
-client notifications. The adapter owns sessions, prompt conversion,
-cancellation, and `session/update` streaming. The backend owns only `agy`
-process execution.
+client notifications. `AgyAcpAgent` owns sessions, prompt conversion,
+cancellation, and persistence. `AgyCliSession` owns `agy` process execution and
+conversation-id tracking. Everything under `src/agy-db/` owns turning agy's
+conversation database into ACP updates.
 
-The first backend is intentionally conservative:
+Earlier versions of this adapter read `agy --print`'s stdout and used regex
+heuristics to guess which lines were "thinking" narration. `agy` itself
+persists every conversation turn-by-turn to an append-only SQLite database as
+it runs, with structured (reverse-engineered, since `agy` doesn't publish a
+schema) protobuf step records — tool calls, task/permission/error details, and
+titles all included. `agy-acp` now reads that database directly instead:
 
-- one `agy --print` subprocess per ACP prompt,
+- one `agy --print --conversation <id>` subprocess per ACP prompt (the
+  conversation id is learned from the first turn and reused after),
+- stdout is drained but never parsed; a `StreamPoller` polls the conversation
+  database on an interval while the process runs, translating newly-appended
+  steps into ACP updates (`agent_message_chunk`, `tool_call`,
+  `session_info_update`, ...) via `src/agy-db/translator.ts` and
+  `src/agy-db/updates.ts`,
+- `session/load` replays a conversation's full history from its database (with
+  an incremental cache keyed on file `(mtime, size)` — see
+  `src/agy-db/replay.ts`); `session/resume` restores the same session binding
+  without replaying,
+- session bindings (which agy conversation a session is bound to, last model
+  choice, etc.) persist to `~/.agy-acp-state/sessions.json` so `session/load`
+  and `session/resume` survive a server restart — see `src/session-store.ts`,
 - separate ACP session `Model` and `Reasoning Effect` pickers populated from
   `agy models` when available,
 - an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
   prompts without editing global Antigravity settings,
-- stdout chunks become ACP `agent_message_chunk` updates, with recognized
-  thinking/progress lines surfaced as a visible ACP `think` tool call,
-- cancellation sends `SIGTERM`, then `SIGKILL` if the process does not exit,
+- cancellation sends `SIGINT` (giving `agy` a chance to flush its database
+  before exiting), then `SIGKILL` if the process does not exit,
 - `--sandbox` is enabled by default,
 - `--dangerously-skip-permissions` is opt-in only.
 
-This avoids scraping an interactive terminal UI. Conversation continuity via
-`--conversation` can be added later if the CLI exposes a stable conversation ID
-that can be scoped per ACP session.
+The conversation-database wire format (`src/agy-db/step-payload.ts`,
+`src/agy-db/columns.ts`) was cross-referenced against the reverse-engineering
+done by the [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp)
+project (MIT); the decoding code itself is our own, built on a shared generic
+wire-walker rather than a generated client.
 
 ## Run
 
@@ -77,10 +100,15 @@ Example Zed custom agent shape:
 }
 ```
 
-Optional environment variable:
+Optional environment variables:
 
 - `AGY_ACP_AGY_PATH`: path to `agy`, default `agy`. Set this in Zed when the
   agent process does not inherit your shell `PATH`.
+- `AGY_ACP_CONVERSATIONS_DIR`: where `agy` writes its per-conversation SQLite
+  databases, default `~/.gemini/antigravity-cli/conversations`. Override this
+  if `agy` uses a different path on your OS.
+- `AGY_ACP_STATE_DIR`: where `agy-acp` persists session bindings (for
+  `session/load`/`session/resume`), default `~/.agy-acp-state`.
 
 ## Model Picker
 
@@ -112,6 +140,22 @@ the model name, not as a reasoning-effect suffix.
 Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
 `agy --print` session. This mirrors Antigravity CLI Fast Mode without mutating
 `~/.gemini/antigravity-cli/settings.json`.
+
+## Session Persistence
+
+`agy-acp` advertises `loadSession: true` and the `resume`/`close`
+`sessionCapabilities`:
+
+- `session/load` restores a session's working directory, model/mode
+  selection, and agy conversation binding, then replays the conversation's
+  full history as ACP updates before returning — useful when an ACP client
+  reconnects to a fresh `agy-acp` process (e.g. after an editor restart).
+- `session/resume` restores the same binding without replaying history, for
+  clients that only need to continue prompting.
+
+Both work by reading the session binding persisted after every prompt/config
+change (see `AGY_ACP_STATE_DIR` above) and, for `session/load`, replaying the
+bound agy conversation database from `AGY_ACP_CONVERSATIONS_DIR`.
 
 ## Development
 

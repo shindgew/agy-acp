@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 This project follows semantic versioning before `1.0.0` with the usual
 pre-1.0 caveat that minor versions may include breaking changes.
 
+## [Unreleased]
+
+### Changed
+
+- Replaced `agy --print` stdout scraping (regex-based "thinking" line
+  detection) with direct reads of `agy`'s per-conversation SQLite database.
+  Prompts now run with `--conversation <id>` for continuity, and a poller
+  translates decoded, structured conversation steps into ACP updates instead
+  of guessing at plain text.
+- Cancellation now sends `SIGINT` (falling back to an ungraceful kill on
+  Windows) instead of `SIGTERM`, so `agy` can flush its conversation database
+  before exiting.
+
+### Added
+
+- `session/load` and `session/resume` support, backed by a persisted session
+  store (`AGY_ACP_STATE_DIR`, default `~/.agy-acp-state`) and an incremental
+  conversation-replay cache.
+- `AGY_ACP_CONVERSATIONS_DIR` environment variable to override where `agy`'s
+  conversation databases are read from.
+
 ## [0.1.0] - 2026-07-01
 
 ### Added
