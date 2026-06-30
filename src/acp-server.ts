@@ -436,7 +436,7 @@ function initialModelSelection(
   if (!configuredModel) {
     const [firstBaseModel] = catalog.baseModels();
     if (!firstBaseModel) {
-      throw new Error("No models available. Configure AGY_ACP_MODELS or ensure agy models succeeds.");
+      throw new Error("No models available. Ensure agy models succeeds.");
     }
     return {
       baseModel: firstBaseModel,
