@@ -12,29 +12,33 @@ import {
   type CloseSessionResponse,
   type InitializeRequest,
   type InitializeResponse,
+  type LoadSessionRequest,
+  type LoadSessionResponse,
   type NewSessionRequest,
   type NewSessionResponse,
   type PromptRequest,
   type PromptResponse,
+  type ResumeSessionRequest,
+  type ResumeSessionResponse,
   type SessionConfigOption,
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk";
+import { ReplayCache } from "./agy-db/replay.js";
 import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./agy-cli.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
+import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
-const MODEL_CONFIG_ID = "agy.model";
-const REASONING_EFFECT_CONFIG_ID = "agy.reasoning_effect";
-const FAST_MODE_CONFIG_ID = "agy.fast_mode";
+const MODEL_CONFIG_ID = "model";
+const REASONING_EFFORT_CONFIG_ID = "effort";
+const FAST_MODE_CONFIG_ID = "fast-mode";
 const NO_REASONING_VALUE = "__none__";
 const REASONING_EFFECT_PATTERN = /\((low|medium|high)\)\s*$/i;
 const THINKING_SUFFIX_PATTERN = /\(thinking\)\s*$/i;
-const EXPLICIT_THOUGHT_PREFIX_PATTERN = /^\s*(?:<thinking>|<thought>|\[thinking\]|\[thought\]|thinking:|thought:)\s*/i;
-const EXPLICIT_THOUGHT_SUFFIX_PATTERN = /\s*(?:<\/thinking>|<\/thought>)\s*$/i;
-const AGY_THOUGHT_LINE_PATTERN = /^\s*(?:I\s+(?:will|need to|should|can)\b|I(?:'ll| am going to|'m going to)\b|Let me\b)/i;
-const AGY_THOUGHT_CONTINUATION_PATTERN = /^\s*[a-z]/;
+/** Conversation replays cached per conversation id before LRU eviction. */
+const REPLAY_CACHE_CAPACITY = 32;
 
 interface ModelCatalog {
   readonly entries: readonly string[];
@@ -62,26 +66,24 @@ interface SessionState {
   activePrompt: boolean;
 }
 
-export interface AgyOutputChunk {
-  kind: "message" | "thought";
-  text: string;
-}
-
 export class AgyAcpAgent {
   readonly #env: NodeJS.ProcessEnv;
   readonly #backend: AgyCliBackend;
   readonly #sessions = new Map<string, SessionState>();
+  readonly #store: SessionStore;
+  readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
 
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#backend = new AgyCliBackend(options.spawnProcess);
+    this.#store = new SessionStore(defaultStateDir(this.#env));
   }
 
   initialize(params: InitializeRequest): InitializeResponse {
     return {
       protocolVersion: params.protocolVersion === PROTOCOL_VERSION ? params.protocolVersion : PROTOCOL_VERSION,
       agentCapabilities: {
-        loadSession: false,
+        loadSession: true,
         promptCapabilities: {
           image: true,
           audio: false,
@@ -93,7 +95,9 @@ export class AgyAcpAgent {
           acp: false
         },
         sessionCapabilities: {
-          additionalDirectories: {}
+          additionalDirectories: {},
+          resume: {},
+          close: {}
         }
       },
       agentInfo: {
@@ -109,27 +113,42 @@ export class AgyAcpAgent {
     const additionalDirectories = params.additionalDirectories ?? [];
     const workspaces = dedupe([cwd, ...additionalDirectories]);
     const id = randomUUID();
-    const config = configFromEnv({ cwd, workspaces, env: this.#env });
-    const modelOptions = await this.modelOptionsForConfig(config);
-    const catalog = buildModelCatalog(modelOptions);
-    const agy = await this.#backend.startSession(config);
-    const initialSelection = initialModelSelection(config.model, catalog);
-    applyModelSelection(agy, initialSelection.baseModel, initialSelection.reasoningEffect, catalog);
-    const session: SessionState = {
-      id,
-      cwd,
-      workspaces,
-      agy,
-      catalog,
-      selectedBaseModel: initialSelection.baseModel,
-      selectedReasoningEffect: initialSelection.reasoningEffect,
-      activePrompt: false
-    };
+    const session = await this.buildSession(cwd, workspaces, null);
+    session.id = id;
     this.#sessions.set(id, session);
+    await this.persistSession(id, session);
     return {
       sessionId: id,
       configOptions: sessionConfigOptions(session)
     };
+  }
+
+  /**
+   * `session/load`: reconstruct a previously persisted session and replay its
+   * agy conversation history (if bound to one) before returning.
+   */
+  async loadSession(params: LoadSessionRequest, client: AgentContext): Promise<LoadSessionResponse> {
+    const { session, cwd, stored } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
+
+    if (stored.conversationId) {
+      const replay = this.#replayCache.get(session.agy.config.conversationsDir, stored.conversationId, {
+        skipNarration: false,
+        cwd
+      });
+      if (replay) {
+        for (const update of replay.updates) {
+          await client.notify(methods.client.session.update, { sessionId: params.sessionId, update });
+        }
+      }
+    }
+
+    return { configOptions: sessionConfigOptions(session) };
+  }
+
+  /** `session/resume`: reconstruct a previously persisted session without replaying history. */
+  async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+    const { session } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
+    return { configOptions: sessionConfigOptions(session) };
   }
 
   async setConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
@@ -150,12 +169,13 @@ export class AgyAcpAgent {
         session.selectedReasoningEffect,
         session.catalog
       );
+      await this.persistSession(params.sessionId, session);
       return {
         configOptions: sessionConfigOptions(session)
       };
     }
 
-    if (params.configId === REASONING_EFFECT_CONFIG_ID) {
+    if (params.configId === REASONING_EFFORT_CONFIG_ID) {
       if (typeof params.value !== "string") {
         throw new Error("Reasoning effect config value must be a string");
       }
@@ -171,6 +191,7 @@ export class AgyAcpAgent {
         session.selectedReasoningEffect,
         session.catalog
       );
+      await this.persistSession(params.sessionId, session);
       return {
         configOptions: sessionConfigOptions(session)
       };
@@ -182,6 +203,7 @@ export class AgyAcpAgent {
         throw new Error("Fast mode config value must be on or off");
       }
       session.agy.setFastMode(enabled);
+      await this.persistSession(params.sessionId, session);
       return {
         configOptions: sessionConfigOptions(session)
       };
@@ -205,94 +227,20 @@ export class AgyAcpAgent {
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
 
-    let thinkingTool:
-      | {
-          id: string;
-          text: string;
-          announced: boolean;
-          completed: boolean;
-        }
-      | undefined;
-    const thoughtContent = (text: string) => [
-      {
-        type: "content" as const,
-        content: {
-          type: "text" as const,
-          text
-        }
-      }
-    ];
-    const completeThinkingTool = async () => {
-      if (!thinkingTool || thinkingTool.completed) {
-        return;
-      }
-      await client.notify(methods.client.session.update, {
-        sessionId: params.sessionId,
-        update: {
-          sessionUpdate: "tool_call_update",
-          toolCallId: thinkingTool.id,
-          status: "completed",
-          content: thoughtContent(thinkingTool.text),
-          rawOutput: thinkingTool.text
-        }
-      });
-      thinkingTool.completed = true;
-    };
-
     try {
-      for await (const chunk of classifyAgyOutput(session.agy.prompt(prompt))) {
-        if (chunk.kind === "thought") {
-          if (!thinkingTool || thinkingTool.completed) {
-            thinkingTool = {
-              id: randomUUID(),
-              text: "",
-              announced: false,
-              completed: false
-            };
-          }
-          thinkingTool.text += chunk.text;
-          if (thinkingTool.announced) {
-            await client.notify(methods.client.session.update, {
-              sessionId: params.sessionId,
-              update: {
-                sessionUpdate: "tool_call_update",
-                toolCallId: thinkingTool.id,
-                status: "in_progress",
-                content: thoughtContent(thinkingTool.text),
-                rawOutput: thinkingTool.text
-              }
-            });
-          } else {
-            await client.notify(methods.client.session.update, {
-              sessionId: params.sessionId,
-              update: {
-                sessionUpdate: "tool_call",
-                toolCallId: thinkingTool.id,
-                title: "Thinking",
-                kind: "think",
-                status: "in_progress",
-                content: thoughtContent(thinkingTool.text),
-                rawOutput: thinkingTool.text
-              }
-            });
-            thinkingTool.announced = true;
-          }
-          continue;
-        }
-
-        await completeThinkingTool();
-        await client.notify(methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: {
-            sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: chunk.text }
-          }
-        });
-      }
-      await completeThinkingTool();
+      const outcome = await session.agy.prompt(prompt, async (update) => {
+        await client.notify(methods.client.session.update, { sessionId: params.sessionId, update });
+      });
+      await this.persistSession(params.sessionId, session);
       return {
-        stopReason: session.agy.wasCancelled || signal?.aborted ? "cancelled" : "end_turn"
+        stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
       };
+    } catch (error) {
+      // Persist even on failure: agy's conversation id/step position may have
+      // advanced before it errored out, and that partial progress is worth
+      // resuming from on the next prompt.
+      await this.persistSession(params.sessionId, session).catch(() => {});
+      throw error;
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
       session.activePrompt = false;
@@ -326,6 +274,75 @@ export class AgyAcpAgent {
       return config.model ? [config.model] : [];
     }
   }
+
+  /** Build a fresh session bound to `cwd`/`workspaces`, optionally resuming an
+   *  agy conversation and a caller's prior model/mode selection. */
+  private async buildSession(cwd: string, workspaces: string[], stored: StoredSession | null): Promise<SessionState> {
+    const config = configFromEnv({ cwd, workspaces, env: this.#env });
+    const modelOptions = await this.modelOptionsForConfig(config);
+    const catalog = buildModelCatalog(modelOptions);
+    const agy = await this.#backend.startSession(config);
+
+    if (stored?.conversationId) {
+      agy.restoreConversation(stored.conversationId, stored.lastStepIdx);
+    }
+
+    const selection = stored
+      ? restoredModelSelection(stored, catalog)
+      : initialModelSelection(config.model, catalog);
+    applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
+    if (stored) {
+      agy.setFastMode(stored.fastMode);
+    }
+
+    return {
+      id: "", // set by the caller once the ACP session id is known
+      cwd,
+      workspaces,
+      agy,
+      catalog,
+      selectedBaseModel: selection.baseModel,
+      selectedReasoningEffect: selection.reasoningEffect,
+      activePrompt: false
+    };
+  }
+
+  /** Shared reconstruction for `session/load` and `session/resume`: restore a
+   *  persisted session binding and re-register it in memory. */
+  private async reloadSession(
+    sessionId: string,
+    requestedCwd: string | undefined,
+    requestedDirs: string[] | undefined
+  ): Promise<{ session: SessionState; cwd: string; stored: StoredSession }> {
+    const stored = await this.#store.restore(sessionId);
+    if (!stored) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    const cwd = requestedCwd || stored.cwd;
+    const workspaces = dedupe([cwd, ...(requestedDirs ?? stored.workspaces.filter((w) => w !== stored.cwd))]);
+
+    const session = await this.buildSession(cwd, workspaces, stored);
+    session.id = sessionId;
+    this.#sessions.set(sessionId, session);
+    return { session, cwd, stored };
+  }
+
+  private sessionRecord(session: SessionState): StoredSession {
+    return {
+      cwd: session.cwd,
+      workspaces: session.workspaces,
+      conversationId: session.agy.conversationId,
+      lastStepIdx: session.agy.lastStepIdx,
+      modelId: session.selectedBaseModel,
+      reasoningEffect: session.selectedReasoningEffect,
+      fastMode: session.agy.config.fastMode,
+      updatedAt: new Date().toISOString()
+    };
+  }
+
+  private persistSession(sessionId: string, session: SessionState): Promise<void> {
+    return this.#store.persist(sessionId, this.sessionRecord(session));
+  }
 }
 
 export function createAgyAcpApp(options: AgyAcpOptions = {}): AgentApp {
@@ -333,6 +350,8 @@ export function createAgyAcpApp(options: AgyAcpOptions = {}): AgentApp {
   return acpAgent({ name: "agy-acp" })
     .onRequest(methods.agent.initialize, (ctx) => agy.initialize(ctx.params))
     .onRequest(methods.agent.session.new, (ctx) => agy.newSession(ctx.params))
+    .onRequest(methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
+    .onRequest(methods.agent.session.resume, (ctx) => agy.resumeSession(ctx.params))
     .onRequest(methods.agent.session.setConfigOption, (ctx) => agy.setConfigOption(ctx.params))
     .onRequest(methods.agent.session.prompt, (ctx) => agy.prompt(ctx.params, ctx.client, ctx.signal))
     .onRequest(methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
@@ -347,94 +366,6 @@ export function runAcp(options: AgyAcpOptions = {}) {
     Readable.toWeb(stdin) as ReadableStream<Uint8Array>
   );
   return createAgyAcpApp(options).connect(stream);
-}
-
-export async function* classifyAgyOutput(chunks: AsyncIterable<string>): AsyncGenerator<AgyOutputChunk> {
-  const classifier = new AgyOutputClassifier();
-  for await (const chunk of chunks) {
-    for (const classified of classifier.push(chunk)) {
-      yield classified;
-    }
-  }
-  for (const classified of classifier.flush()) {
-    yield classified;
-  }
-}
-
-export function classifyAgyOutputText(text: string): AgyOutputChunk[] {
-  const classifier = new AgyOutputClassifier();
-  return [
-    ...classifier.push(text),
-    ...classifier.flush()
-  ];
-}
-
-class AgyOutputClassifier {
-  #pendingLine = "";
-  #insideExplicitThought = false;
-  #previousImplicitThought = false;
-
-  push(chunk: string): AgyOutputChunk[] {
-    const next = this.#pendingLine + chunk;
-    const classified: AgyOutputChunk[] = [];
-    let start = 0;
-    let lineBreakIndex = next.indexOf("\n");
-
-    while (lineBreakIndex !== -1) {
-      classified.push(this.#classifyLine(next.slice(start, lineBreakIndex + 1)));
-      start = lineBreakIndex + 1;
-      lineBreakIndex = next.indexOf("\n", start);
-    }
-
-    this.#pendingLine = next.slice(start);
-    return classified;
-  }
-
-  flush(): AgyOutputChunk[] {
-    if (!this.#pendingLine) {
-      return [];
-    }
-    const line = this.#pendingLine;
-    this.#pendingLine = "";
-    return [this.#classifyLine(line)];
-  }
-
-  #classifyLine(line: string): AgyOutputChunk {
-    const newline = line.endsWith("\r\n")
-      ? "\r\n"
-      : line.endsWith("\n")
-        ? "\n"
-        : "";
-    let text = newline ? line.slice(0, -newline.length) : line;
-
-    const prefixMatch = text.match(EXPLICIT_THOUGHT_PREFIX_PATTERN);
-    const hasExplicitPrefix = prefixMatch !== null;
-    if (prefixMatch) {
-      text = text.slice(prefixMatch[0].length);
-      this.#insideExplicitThought = true;
-    }
-
-    const suffixMatch = text.match(EXPLICIT_THOUGHT_SUFFIX_PATTERN);
-    const hasExplicitSuffix = suffixMatch !== null;
-    if (suffixMatch) {
-      text = text.slice(0, suffixMatch.index).trimEnd();
-    }
-
-    const explicitThought = this.#insideExplicitThought || hasExplicitPrefix;
-    const implicitThought = AGY_THOUGHT_LINE_PATTERN.test(text)
-      || (this.#previousImplicitThought && AGY_THOUGHT_CONTINUATION_PATTERN.test(text));
-    const kind = explicitThought || implicitThought ? "thought" : "message";
-
-    if (hasExplicitSuffix) {
-      this.#insideExplicitThought = false;
-    }
-    this.#previousImplicitThought = implicitThought && !hasExplicitSuffix;
-
-    return {
-      kind,
-      text: `${text}${newline}`
-    };
-  }
 }
 
 export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
@@ -501,7 +432,7 @@ export function reasoningEffectConfigOption(
   catalog: ModelCatalog
 ): SessionConfigOption {
   return {
-    id: REASONING_EFFECT_CONFIG_ID,
+    id: REASONING_EFFORT_CONFIG_ID,
     name: "Reasoning Effect",
     description: "Reasoning effort suffix appended to the selected model.",
     category: "thought_level",
@@ -630,6 +561,25 @@ function initialModelSelection(
     reasoningEffect: reasoningEffect && effects.includes(reasoningEffect)
       ? reasoningEffect
       : effects[0]
+  };
+}
+
+/** Like `initialModelSelection`, but for a persisted choice: falls back to the
+ *  default selection if the model no longer appears in the current catalog. */
+function restoredModelSelection(
+  stored: StoredSession,
+  catalog: ModelCatalog
+): { baseModel: string; reasoningEffect: string } {
+  if (!catalog.baseModels().includes(stored.modelId)) {
+    return initialModelSelection(undefined, catalog);
+  }
+  const effects = catalog.effectsFor(stored.modelId);
+  if (effects.length === 0) {
+    return { baseModel: stored.modelId, reasoningEffect: NO_REASONING_VALUE };
+  }
+  return {
+    baseModel: stored.modelId,
+    reasoningEffect: effects.includes(stored.reasoningEffect) ? stored.reasoningEffect : effects[0]
   };
 }
 
