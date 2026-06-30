@@ -1,0 +1,54 @@
+{
+  "name": "agy-acp",
+  "version": "0.1.0",
+  "description": "Agent Client Protocol adapter that wraps the Google Antigravity CLI",
+  "type": "module",
+  "author": {
+    "name": "shidngew"
+  },
+  "homepage": "https://github.com/shindgew/agy-acp#readme",
+  "bugs": {
+    "url": "https://github.com/shindgew/agy-acp/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shindgew/agy-acp.git"
+  },
+  "keywords": [
+    "acp",
+    "agent",
+    "antigravity",
+    "google"
+  ],
+  "main": "dist/acp-server.js",
+  "types": "dist/acp-server.d.ts",
+  "license": "Apache-2.0",
+  "bin": {
+    "agy-acp": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "npm run typecheck && vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^1.1.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.9"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
