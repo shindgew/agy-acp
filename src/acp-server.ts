@@ -31,6 +31,10 @@ const FAST_MODE_CONFIG_ID = "agy.fast_mode";
 const NO_REASONING_VALUE = "__none__";
 const REASONING_EFFECT_PATTERN = /\((low|medium|high)\)\s*$/i;
 const THINKING_SUFFIX_PATTERN = /\(thinking\)\s*$/i;
+const EXPLICIT_THOUGHT_PREFIX_PATTERN = /^\s*(?:<thinking>|<thought>|\[thinking\]|\[thought\]|thinking:|thought:)\s*/i;
+const EXPLICIT_THOUGHT_SUFFIX_PATTERN = /\s*(?:<\/thinking>|<\/thought>)\s*$/i;
+const AGY_THOUGHT_LINE_PATTERN = /^\s*(?:I\s+(?:will|need to|should|can)\b|I(?:'ll| am going to|'m going to)\b|Let me\b)/i;
+const AGY_THOUGHT_CONTINUATION_PATTERN = /^\s*[a-z]/;
 
 interface ModelCatalog {
   readonly entries: readonly string[];
@@ -56,6 +60,11 @@ interface SessionState {
   selectedBaseModel: string;
   selectedReasoningEffect: string;
   activePrompt: boolean;
+}
+
+export interface AgyOutputChunk {
+  kind: "message" | "thought";
+  text: string;
 }
 
 export class AgyAcpAgent {
@@ -196,16 +205,91 @@ export class AgyAcpAgent {
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
 
+    let thinkingTool:
+      | {
+          id: string;
+          text: string;
+          announced: boolean;
+          completed: boolean;
+        }
+      | undefined;
+    const thoughtContent = (text: string) => [
+      {
+        type: "content" as const,
+        content: {
+          type: "text" as const,
+          text
+        }
+      }
+    ];
+    const completeThinkingTool = async () => {
+      if (!thinkingTool || thinkingTool.completed) {
+        return;
+      }
+      await client.notify(methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: thinkingTool.id,
+          status: "completed",
+          content: thoughtContent(thinkingTool.text),
+          rawOutput: thinkingTool.text
+        }
+      });
+      thinkingTool.completed = true;
+    };
+
     try {
-      for await (const chunk of session.agy.prompt(prompt)) {
+      for await (const chunk of classifyAgyOutput(session.agy.prompt(prompt))) {
+        if (chunk.kind === "thought") {
+          if (!thinkingTool || thinkingTool.completed) {
+            thinkingTool = {
+              id: randomUUID(),
+              text: "",
+              announced: false,
+              completed: false
+            };
+          }
+          thinkingTool.text += chunk.text;
+          if (thinkingTool.announced) {
+            await client.notify(methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId: thinkingTool.id,
+                status: "in_progress",
+                content: thoughtContent(thinkingTool.text),
+                rawOutput: thinkingTool.text
+              }
+            });
+          } else {
+            await client.notify(methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: "tool_call",
+                toolCallId: thinkingTool.id,
+                title: "Thinking",
+                kind: "think",
+                status: "in_progress",
+                content: thoughtContent(thinkingTool.text),
+                rawOutput: thinkingTool.text
+              }
+            });
+            thinkingTool.announced = true;
+          }
+          continue;
+        }
+
+        await completeThinkingTool();
         await client.notify(methods.client.session.update, {
           sessionId: params.sessionId,
           update: {
             sessionUpdate: "agent_message_chunk",
-            content: { type: "text", text: chunk }
+            content: { type: "text", text: chunk.text }
           }
         });
       }
+      await completeThinkingTool();
       return {
         stopReason: session.agy.wasCancelled || signal?.aborted ? "cancelled" : "end_turn"
       };
@@ -263,6 +347,94 @@ export function runAcp(options: AgyAcpOptions = {}) {
     Readable.toWeb(stdin) as ReadableStream<Uint8Array>
   );
   return createAgyAcpApp(options).connect(stream);
+}
+
+export async function* classifyAgyOutput(chunks: AsyncIterable<string>): AsyncGenerator<AgyOutputChunk> {
+  const classifier = new AgyOutputClassifier();
+  for await (const chunk of chunks) {
+    for (const classified of classifier.push(chunk)) {
+      yield classified;
+    }
+  }
+  for (const classified of classifier.flush()) {
+    yield classified;
+  }
+}
+
+export function classifyAgyOutputText(text: string): AgyOutputChunk[] {
+  const classifier = new AgyOutputClassifier();
+  return [
+    ...classifier.push(text),
+    ...classifier.flush()
+  ];
+}
+
+class AgyOutputClassifier {
+  #pendingLine = "";
+  #insideExplicitThought = false;
+  #previousImplicitThought = false;
+
+  push(chunk: string): AgyOutputChunk[] {
+    const next = this.#pendingLine + chunk;
+    const classified: AgyOutputChunk[] = [];
+    let start = 0;
+    let lineBreakIndex = next.indexOf("\n");
+
+    while (lineBreakIndex !== -1) {
+      classified.push(this.#classifyLine(next.slice(start, lineBreakIndex + 1)));
+      start = lineBreakIndex + 1;
+      lineBreakIndex = next.indexOf("\n", start);
+    }
+
+    this.#pendingLine = next.slice(start);
+    return classified;
+  }
+
+  flush(): AgyOutputChunk[] {
+    if (!this.#pendingLine) {
+      return [];
+    }
+    const line = this.#pendingLine;
+    this.#pendingLine = "";
+    return [this.#classifyLine(line)];
+  }
+
+  #classifyLine(line: string): AgyOutputChunk {
+    const newline = line.endsWith("\r\n")
+      ? "\r\n"
+      : line.endsWith("\n")
+        ? "\n"
+        : "";
+    let text = newline ? line.slice(0, -newline.length) : line;
+
+    const prefixMatch = text.match(EXPLICIT_THOUGHT_PREFIX_PATTERN);
+    const hasExplicitPrefix = prefixMatch !== null;
+    if (prefixMatch) {
+      text = text.slice(prefixMatch[0].length);
+      this.#insideExplicitThought = true;
+    }
+
+    const suffixMatch = text.match(EXPLICIT_THOUGHT_SUFFIX_PATTERN);
+    const hasExplicitSuffix = suffixMatch !== null;
+    if (suffixMatch) {
+      text = text.slice(0, suffixMatch.index).trimEnd();
+    }
+
+    const explicitThought = this.#insideExplicitThought || hasExplicitPrefix;
+    const implicitThought = AGY_THOUGHT_LINE_PATTERN.test(text)
+      || (this.#previousImplicitThought && AGY_THOUGHT_CONTINUATION_PATTERN.test(text));
+    const kind = explicitThought || implicitThought ? "thought" : "message";
+
+    if (hasExplicitSuffix) {
+      this.#insideExplicitThought = false;
+    }
+    this.#previousImplicitThought = implicitThought && !hasExplicitSuffix;
+
+    return {
+      kind,
+      text: `${text}${newline}`
+    };
+  }
 }
 
 export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";

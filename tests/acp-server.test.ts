@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import {
   buildModelCatalog,
+  classifyAgyOutputText,
   createAgyAcpApp,
   modelConfigOption,
   promptBlocksToText,
@@ -20,6 +21,73 @@ describe("promptBlocksToText", () => {
       { type: "text", text: "first" },
       { type: "text", text: "second" }
     ])).toBe("first\nsecond");
+  });
+});
+
+describe("classifyAgyOutputText", () => {
+  it("marks agy progress lines as thought chunks", () => {
+    expect(classifyAgyOutputText([
+      "I will search the web for Agent Chat Protocol.\n",
+      "I will run the agy changelog command.\n",
+      "I will view .gitignore in the agy-acp project.\n",
+      "I will import mkdtemp, rm, os, and path in tests/acp-server.test.ts.\n",
+      "ACP uses session updates for streaming.\n"
+    ].join(""))).toEqual([
+      {
+        kind: "thought",
+        text: "I will search the web for Agent Chat Protocol.\n"
+      },
+      {
+        kind: "thought",
+        text: "I will run the agy changelog command.\n"
+      },
+      {
+        kind: "thought",
+        text: "I will view .gitignore in the agy-acp project.\n"
+      },
+      {
+        kind: "thought",
+        text: "I will import mkdtemp, rm, os, and path in tests/acp-server.test.ts.\n"
+      },
+      {
+        kind: "message",
+        text: "ACP uses session updates for streaming.\n"
+      }
+    ]);
+  });
+
+  it("keeps lowercase progress continuations inside the active thought chunk", () => {
+    expect(classifyAgyOutputText([
+      "I will test the server prompt interface.\n",
+      "the server prompt interface is tested.\n",
+      "Final answer.\n"
+    ].join(""))).toEqual([
+      {
+        kind: "thought",
+        text: "I will test the server prompt interface.\n"
+      },
+      {
+        kind: "thought",
+        text: "the server prompt interface is tested.\n"
+      },
+      {
+        kind: "message",
+        text: "Final answer.\n"
+      }
+    ]);
+  });
+
+  it("strips explicit thought markers", () => {
+    expect(classifyAgyOutputText("<thinking>I will inspect the adapter.</thinking>\nDone")).toEqual([
+      {
+        kind: "thought",
+        text: "I will inspect the adapter.\n"
+      },
+      {
+        kind: "message",
+        text: "Done"
+      }
+    ]);
   });
 });
 
@@ -68,6 +136,80 @@ describe("session prompt", () => {
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text: "hello" }
       });
+      expect(response.stopReason).toBe("end_turn");
+    } finally {
+      connection.close();
+    }
+  });
+
+  it("streams recognized agy progress output as a visible thinking tool call", async () => {
+    const updates: unknown[] = [];
+    const client = acpClient({ name: "test-client" })
+      .onNotification(methods.client.session.update, (ctx) => {
+        updates.push(ctx.params.update);
+      });
+    const connection = client.connect(createAgyAcpApp({
+      spawnProcess: spawnAgyProcess([
+        "I will test ",
+        "the server prompt interface.\nthe server prompt interface is tested.\nFinal answer.\n"
+      ])
+    }));
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+      const response = await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "hi" }]
+      });
+
+      const thoughtText = [
+        "I will test the server prompt interface.\n",
+        "the server prompt interface is tested.\n"
+      ].join("");
+      expect(updates).toMatchObject([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: expect.any(String),
+          title: "Thinking",
+          kind: "think",
+          status: "in_progress",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: "I will test the server prompt interface.\n" }
+            }
+          ]
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: expect.any(String),
+          status: "in_progress",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: thoughtText }
+            }
+          ]
+        },
+        {
+          sessionUpdate: "tool_call_update",
+          toolCallId: expect.any(String),
+          status: "completed",
+          content: [
+            {
+              type: "content",
+              content: { type: "text", text: thoughtText }
+            }
+          ]
+        },
+        {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "Final answer.\n" }
+        }
+      ]);
       expect(response.stopReason).toBe("end_turn");
     } finally {
       connection.close();
