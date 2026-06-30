@@ -45,18 +45,13 @@ describe("initialize", () => {
 
 describe("session prompt", () => {
   it("streams agy output as ACP message chunks", async () => {
-    const fake = new FakeProcess(["hello"]);
     const updates: unknown[] = [];
     const client = acpClient({ name: "test-client" })
       .onNotification(methods.client.session.update, (ctx) => {
         updates.push(ctx.params.update);
       });
     const connection = client.connect(createAgyAcpApp({
-      env: {
-        AGY_ACP_DISCOVER_MODELS: "0",
-        AGY_ACP_MODELS: "Gemini 3.5 Flash (Medium)"
-      },
-      spawnProcess: fake.spawnFactory() as unknown as SpawnFactory
+      spawnProcess: spawnAgyProcess(["hello"])
     }));
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -231,6 +226,17 @@ describe("session model config", () => {
     }
   });
 });
+
+const TEST_MODELS_OUTPUT = "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n";
+
+function spawnAgyProcess(promptChunks: string[]): SpawnFactory {
+  return ((command: string, args: string[]) => {
+    if (args[0] === "models") {
+      return new FakeProcess([TEST_MODELS_OUTPUT]);
+    }
+    return new FakeProcess(promptChunks);
+  }) as unknown as SpawnFactory;
+}
 
 class FakeProcess extends EventEmitter {
   stdin = new Writable({ write: (_chunk, _encoding, callback) => callback() });
