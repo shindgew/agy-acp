@@ -1,17 +1,36 @@
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
+import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { describe, expect, it } from "vitest";
 import {
   AgyCliBackend,
   AgyCliSession,
   DEFAULT_AGY_INSTALL_COMMAND,
   DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
+  DEFAULT_CONVERSATIONS_DIR,
   configFromEnv,
   parseAgyModels,
   type AgyCliConfig,
   type SpawnFactory,
   type SpawnOptions
 } from "../src/agy-cli.js";
+import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
+import { encodeStepPayload } from "./fixtures/step-encoder.js";
+
+/** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
+async function collectUpdates(
+  session: AgyCliSession,
+  prompt: string
+): Promise<{ updates: SessionUpdate[]; stopReason: "end_turn" | "cancelled" }> {
+  const updates: SessionUpdate[] = [];
+  const outcome = await session.prompt(prompt, async (update) => {
+    updates.push(update);
+  });
+  return { updates, stopReason: outcome.stopReason };
+}
 
 describe("commandForPrompt", () => {
   it("uses agy print mode and safe defaults", () => {
@@ -86,17 +105,17 @@ Claude Sonnet 4.6 (Thinking)
 });
 
 describe("prompt", () => {
-  it("streams stdout chunks", async () => {
+  it("runs the prompt in argv mode and drains stdout without reading it", async () => {
     const fake = new FakeProcess(["hello ", "world"]);
     const calls: SpawnCall[] = [];
     const session = new AgyCliSession(defaultConfig(), fake.spawnFactory(calls));
 
-    const chunks: string[] = [];
-    for await (const chunk of session.prompt("hello")) {
-      chunks.push(chunk);
-    }
+    const { updates, stopReason } = await collectUpdates(session, "hello");
 
-    expect(chunks).toEqual(["hello ", "world"]);
+    // No conversation database was written, so nothing is streamed — agy's
+    // stdout is drained but never interpreted as ACP updates.
+    expect(updates).toEqual([]);
+    expect(stopReason).toBe("end_turn");
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).toBe("hello");
     expect(fake.stdinText).toBe("");
     expect(fake.stdinEnded).toBe(true);
@@ -107,12 +126,8 @@ describe("prompt", () => {
     const calls: SpawnCall[] = [];
     const session = new AgyCliSession({ ...defaultConfig(), promptInArgv: false }, fake.spawnFactory(calls));
 
-    const chunks: string[] = [];
-    for await (const chunk of session.prompt("hello")) {
-      chunks.push(chunk);
-    }
+    await collectUpdates(session, "hello");
 
-    expect(chunks).toEqual(["ok"]);
     expect(fake.stdinText).toBe("hello");
     expect(fake.stdinEnded).toBe(true);
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).not.toBe("hello");
@@ -123,12 +138,8 @@ describe("prompt", () => {
     const calls: SpawnCall[] = [];
     const session = new AgyCliSession({ ...defaultConfig(), fastMode: true }, fake.spawnFactory(calls));
 
-    const chunks: string[] = [];
-    for await (const chunk of session.prompt("hello")) {
-      chunks.push(chunk);
-    }
+    await collectUpdates(session, "hello");
 
-    expect(chunks).toEqual(["ok"]);
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).toBe("/fast\nhello");
   });
 
@@ -139,22 +150,46 @@ describe("prompt", () => {
       fake.spawnFactory([])
     );
 
-    for await (const _chunk of session.prompt("hello")) {
-      // consume stream
-    }
+    await collectUpdates(session, "hello");
 
     expect(fake.stdinText).toBe("/fast\nhello");
+  });
+
+  it("binds the conversation id agy creates, then passes --conversation on the next turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-test-"));
+    try {
+      const calls: SpawnCall[] = [];
+      let turn = 0;
+      const session = new AgyCliSession(
+        { ...defaultConfig(), conversationsDir: dir },
+        (command, args, options) => {
+          calls.push({ command, args, options });
+          turn += 1;
+          if (turn === 1) {
+            const db = createConversationDb(dir, "conv-123");
+            insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
+            db.close();
+          }
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      await collectUpdates(session, "first");
+      expect(calls[0].args).not.toContain("--conversation");
+      expect(session.conversationId).toBe("conv-123");
+
+      await collectUpdates(session, "second");
+      expect(calls[1].args[calls[1].args.indexOf("--conversation") + 1]).toBe("conv-123");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("raises when agy exits nonzero", async () => {
     const fake = new FakeProcess([], { stderr: ["not logged in"], exitCode: 2 });
     const session = new AgyCliSession(defaultConfig(), fake.spawnFactory([]));
 
-    await expect(async () => {
-      for await (const _chunk of session.prompt("hello")) {
-        // consume stream
-      }
-    }).rejects.toThrow(/not logged in/);
+    await expect(collectUpdates(session, "hello")).rejects.toThrow(/not logged in/);
   });
 
   it("can install agy on demand when the default executable is missing", async () => {
@@ -175,12 +210,9 @@ describe("prompt", () => {
       }
     );
 
-    const chunks: string[] = [];
-    for await (const chunk of session.prompt("hello")) {
-      chunks.push(chunk);
-    }
+    const { stopReason } = await collectUpdates(session, "hello");
 
-    expect(chunks).toEqual(["ok"]);
+    expect(stopReason).toBe("end_turn");
     expect(calls.map((call) => call.command)).toEqual(["agy", "sh", "agy"]);
     expect(calls[1].args).toEqual(["-c", DEFAULT_AGY_INSTALL_COMMAND]);
   });
@@ -208,12 +240,8 @@ describe("prompt", () => {
       }
     );
 
-    const chunks: string[] = [];
-    for await (const chunk of session.prompt("hello")) {
-      chunks.push(chunk);
-    }
+    await collectUpdates(session, "hello");
 
-    expect(chunks).toEqual(["ok"]);
     expect(calls[2].options.env?.PATH).toBe("/home/user/.local/bin:/usr/bin");
   });
 
@@ -224,27 +252,22 @@ describe("prompt", () => {
       new FakeProcess([], { spawnError: missing, exitCode: null }).spawnFactory([])
     );
 
-    await expect(async () => {
-      for await (const _chunk of session.prompt("hello")) {
-        // consume stream
-      }
-    }).rejects.toThrow(/Install the Google Antigravity CLI/);
+    await expect(collectUpdates(session, "hello")).rejects.toThrow(/Install the Google Antigravity CLI/);
   });
 });
 
 describe("cancel", () => {
-  it("terminates an active agy process", async () => {
+  it("sends SIGINT (not SIGTERM) so agy can flush its conversation database", async () => {
     const fake = new FakeProcess([], { blockStdout: true, exitCode: null });
     const session = new AgyCliSession(defaultConfig(), fake.spawnFactory([]));
-    const stream = session.prompt("hello");
-    const pending = stream.next();
+    const pending = collectUpdates(session, "hello");
 
     await new Promise((resolve) => setImmediate(resolve));
     await session.cancel();
 
-    expect(fake.killedWith).toBe("SIGTERM");
+    expect(fake.killedWith).toBe("SIGINT");
     expect(session.wasCancelled).toBe(true);
-    expect(await pending).toEqual({ done: true, value: undefined });
+    expect((await pending).stopReason).toBe("cancelled");
   });
 });
 
@@ -268,7 +291,8 @@ function defaultConfig(): AgyCliConfig {
     installCommand: DEFAULT_AGY_INSTALL_COMMAND,
     modelList: [],
     discoverModels: true,
-    modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS
+    modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
+    conversationsDir: DEFAULT_CONVERSATIONS_DIR
   };
 }
 

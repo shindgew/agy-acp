@@ -1,16 +1,20 @@
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import {
   buildModelCatalog,
-  classifyAgyOutputText,
   createAgyAcpApp,
   modelConfigOption,
   promptBlocksToText,
   reasoningEffectConfigOption
 } from "../src/acp-server.js";
 import type { SpawnFactory } from "../src/agy-cli.js";
+import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
+import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -21,73 +25,6 @@ describe("promptBlocksToText", () => {
       { type: "text", text: "first" },
       { type: "text", text: "second" }
     ])).toBe("first\nsecond");
-  });
-});
-
-describe("classifyAgyOutputText", () => {
-  it("marks agy progress lines as thought chunks", () => {
-    expect(classifyAgyOutputText([
-      "I will search the web for Agent Chat Protocol.\n",
-      "I will run the agy changelog command.\n",
-      "I will view .gitignore in the agy-acp project.\n",
-      "I will import mkdtemp, rm, os, and path in tests/acp-server.test.ts.\n",
-      "ACP uses session updates for streaming.\n"
-    ].join(""))).toEqual([
-      {
-        kind: "thought",
-        text: "I will search the web for Agent Chat Protocol.\n"
-      },
-      {
-        kind: "thought",
-        text: "I will run the agy changelog command.\n"
-      },
-      {
-        kind: "thought",
-        text: "I will view .gitignore in the agy-acp project.\n"
-      },
-      {
-        kind: "thought",
-        text: "I will import mkdtemp, rm, os, and path in tests/acp-server.test.ts.\n"
-      },
-      {
-        kind: "message",
-        text: "ACP uses session updates for streaming.\n"
-      }
-    ]);
-  });
-
-  it("keeps lowercase progress continuations inside the active thought chunk", () => {
-    expect(classifyAgyOutputText([
-      "I will test the server prompt interface.\n",
-      "the server prompt interface is tested.\n",
-      "Final answer.\n"
-    ].join(""))).toEqual([
-      {
-        kind: "thought",
-        text: "I will test the server prompt interface.\n"
-      },
-      {
-        kind: "thought",
-        text: "the server prompt interface is tested.\n"
-      },
-      {
-        kind: "message",
-        text: "Final answer.\n"
-      }
-    ]);
-  });
-
-  it("strips explicit thought markers", () => {
-    expect(classifyAgyOutputText("<thinking>I will inspect the adapter.</thinking>\nDone")).toEqual([
-      {
-        kind: "thought",
-        text: "I will inspect the adapter.\n"
-      },
-      {
-        kind: "message",
-        text: "Done"
-      }
-    ]);
   });
 });
 
@@ -112,108 +49,192 @@ describe("initialize", () => {
 });
 
 describe("session prompt", () => {
-  it("streams agy output as ACP message chunks", async () => {
-    const updates: unknown[] = [];
-    const client = acpClient({ name: "test-client" })
-      .onNotification(methods.client.session.update, (ctx) => {
-        updates.push(ctx.params.update);
-      });
-    const connection = client.connect(createAgyAcpApp({
-      spawnProcess: spawnAgyProcess(["hello"])
-    }));
-    try {
-      const session = await connection.agent.request(methods.agent.session.new, {
-        cwd: "/repo",
-        additionalDirectories: [],
-        mcpServers: []
-      });
-      const response = await connection.agent.request(methods.agent.session.prompt, {
-        sessionId: session.sessionId,
-        prompt: [{ type: "text", text: "hi" }]
-      });
+  it("streams agy's conversation database as ACP message chunks", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpClient({ name: "test-client" })
+        .onNotification(methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const connection = client.connect(createAgyAcpApp({
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-1", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) }
+        ])
+      }));
+      try {
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          additionalDirectories: [],
+          mcpServers: []
+        });
+        const response = await connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
 
-      expect(updates[0]).toMatchObject({
-        sessionUpdate: "agent_message_chunk",
-        content: { type: "text", text: "hello" }
-      });
-      expect(response.stopReason).toBe("end_turn");
-    } finally {
-      connection.close();
-    }
+        expect(updates[0]).toMatchObject({
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text: "hello" }
+        });
+        expect(response.stopReason).toBe("end_turn");
+      } finally {
+        connection.close();
+      }
+    });
   });
 
-  it("streams recognized agy progress output as a visible thinking tool call", async () => {
-    const updates: unknown[] = [];
-    const client = acpClient({ name: "test-client" })
-      .onNotification(methods.client.session.update, (ctx) => {
-        updates.push(ctx.params.update);
-      });
-    const connection = client.connect(createAgyAcpApp({
-      spawnProcess: spawnAgyProcess([
-        "I will test ",
-        "the server prompt interface.\nthe server prompt interface is tested.\nFinal answer.\n"
-      ])
-    }));
-    try {
-      const session = await connection.agent.request(methods.agent.session.new, {
-        cwd: "/repo",
-        additionalDirectories: [],
-        mcpServers: []
-      });
-      const response = await connection.agent.request(methods.agent.session.prompt, {
-        sessionId: session.sessionId,
-        prompt: [{ type: "text", text: "hi" }]
-      });
+  it("renders a structured tool-run step as an ACP tool_call", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpClient({ name: "test-client" })
+        .onNotification(methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const connection = client.connect(createAgyAcpApp({
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-2", [
+          {
+            idx: 1,
+            stepType: 21,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({ namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo hi"}' })
+              })
+            })
+          },
+          { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "done" }) }
+        ])
+      }));
+      try {
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          additionalDirectories: [],
+          mcpServers: []
+        });
+        const response = await connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
 
-      const thoughtText = [
-        "I will test the server prompt interface.\n",
-        "the server prompt interface is tested.\n"
-      ].join("");
-      expect(updates).toMatchObject([
-        {
-          sessionUpdate: "tool_call",
-          toolCallId: expect.any(String),
-          title: "Thinking",
-          kind: "think",
-          status: "in_progress",
-          content: [
-            {
-              type: "content",
-              content: { type: "text", text: "I will test the server prompt interface.\n" }
-            }
-          ]
-        },
-        {
-          sessionUpdate: "tool_call_update",
-          toolCallId: expect.any(String),
-          status: "in_progress",
-          content: [
-            {
-              type: "content",
-              content: { type: "text", text: thoughtText }
-            }
-          ]
-        },
-        {
-          sessionUpdate: "tool_call_update",
-          toolCallId: expect.any(String),
-          status: "completed",
-          content: [
-            {
-              type: "content",
-              content: { type: "text", text: thoughtText }
-            }
-          ]
-        },
-        {
-          sessionUpdate: "agent_message_chunk",
-          content: { type: "text", text: "Final answer.\n" }
+        expect(updates).toMatchObject([
+          {
+            sessionUpdate: "tool_call",
+            kind: "execute",
+            title: "echo hi",
+            status: "completed"
+          },
+          {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "done" }
+          }
+        ]);
+        expect(response.stopReason).toBe("end_turn");
+      } finally {
+        connection.close();
+      }
+    });
+  });
+});
+
+describe("session/load and session/resume", () => {
+  it("replays prior conversation history on load, but not on resume, after a simulated restart", async () => {
+    await withConversationsDir(async (dir) => {
+      const appOptions = {
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
+        ])
+      };
+
+      // First "process": create a session, run a prompt, then disconnect —
+      // simulating the ACP client reconnecting to a fresh server instance.
+      let sessionId: string;
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        try {
+          const session = await connection.agent.request(methods.agent.session.new, {
+            cwd: "/repo",
+            additionalDirectories: [],
+            mcpServers: []
+          });
+          sessionId = session.sessionId;
+          await connection.agent.request(methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: "text", text: "hi" }]
+          });
+        } finally {
+          connection.close();
         }
-      ]);
-      expect(response.stopReason).toBe("end_turn");
-    } finally {
-      connection.close();
-    }
+      }
+
+      // session/load: a brand-new AgyAcpAgent (no in-memory state) should
+      // restore the binding from disk and replay the prior turn.
+      {
+        const updates: unknown[] = [];
+        const client = acpClient({ name: "test-client" })
+          .onNotification(methods.client.session.update, (ctx) => {
+            updates.push(ctx.params.update);
+          });
+        const connection = client.connect(createAgyAcpApp(appOptions));
+        try {
+          const response = await connection.agent.request(methods.agent.session.load, {
+            sessionId,
+            cwd: "/repo",
+            mcpServers: []
+          });
+          expect(updates).toContainEqual(
+            expect.objectContaining({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "hello from before" }
+            })
+          );
+          expect(response.configOptions?.length).toBeGreaterThan(0);
+        } finally {
+          connection.close();
+        }
+      }
+
+      // session/resume: same restoration, but no history replay.
+      {
+        const updates: unknown[] = [];
+        const client = acpClient({ name: "test-client" })
+          .onNotification(methods.client.session.update, (ctx) => {
+            updates.push(ctx.params.update);
+          });
+        const connection = client.connect(createAgyAcpApp(appOptions));
+        try {
+          const response = await connection.agent.request(methods.agent.session.resume, {
+            sessionId,
+            cwd: "/repo"
+          });
+          expect(updates).toEqual([]);
+          expect(response.configOptions?.length).toBeGreaterThan(0);
+        } finally {
+          connection.close();
+        }
+      }
+    });
+  });
+
+  it("rejects loading a session that was never persisted", async () => {
+    await withConversationsDir(async (dir) => {
+      const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp({
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "unused", [])
+      }));
+      try {
+        await expect(
+          connection.agent.request(methods.agent.session.load, {
+            sessionId: "does-not-exist",
+            cwd: "/repo",
+            mcpServers: []
+          })
+        ).rejects.toThrow();
+      } finally {
+        connection.close();
+      }
+    });
   });
 });
 
@@ -301,9 +322,9 @@ describe("session model config", () => {
         mcpServers: []
       });
       const configOptions = session.configOptions ?? [];
-      const modelConfig = configOptions.find((option) => option.id === "agy.model") as SelectConfigOption | undefined;
-      const reasoningConfig = configOptions.find((option) => option.id === "agy.reasoning_effect") as SelectConfigOption | undefined;
-      const fastConfig = configOptions.find((option) => option.id === "agy.fast_mode") as SelectConfigOption | undefined;
+      const modelConfig = configOptions.find((option) => option.id === "model") as SelectConfigOption | undefined;
+      const reasoningConfig = configOptions.find((option) => option.id === "effort") as SelectConfigOption | undefined;
+      const fastConfig = configOptions.find((option) => option.id === "fast-mode") as SelectConfigOption | undefined;
 
       expect(modelConfig?.category).toBe("model");
       expect(modelConfig?.currentValue).toBe("Gemini 3.5 Flash");
@@ -324,7 +345,7 @@ describe("session model config", () => {
 
       const modelResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "agy.model",
+        configId: "model",
         value: "Gemini 3.5 Flash"
       });
       expect(modelResponse.configOptions[0].currentValue).toBe("Gemini 3.5 Flash");
@@ -333,21 +354,21 @@ describe("session model config", () => {
 
       const reasoningResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "agy.reasoning_effect",
+        configId: "effort",
         value: "High"
       });
       expect(reasoningResponse.configOptions[1].currentValue).toBe("High");
 
       const fastResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "agy.fast_mode",
+        configId: "fast-mode",
         value: "on"
       });
       expect(fastResponse.configOptions[2].currentValue).toBe("on");
 
       const thinkingResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "agy.model",
+        configId: "model",
         value: "Claude Sonnet 4.6 (Thinking)"
       });
       expect(thinkingResponse.configOptions[0].currentValue).toBe("Claude Sonnet 4.6 (Thinking)");
@@ -362,7 +383,6 @@ describe("session model config", () => {
       const promptCall = calls.find((call) => call.args.includes("--print"));
       expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("/fast\nhi");
       expect(flagValue(promptCall!.args, "--model")).toBe("Claude Sonnet 4.6 (Thinking)");
-      expect(updates[0].content.text).toBe("ok");
     } finally {
       connection.close();
     }
@@ -371,12 +391,35 @@ describe("session model config", () => {
 
 const TEST_MODELS_OUTPUT = "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n";
 
-function spawnAgyProcess(promptChunks: string[]): SpawnFactory {
+/** Run `fn` with a throwaway conversations directory, cleaned up afterwards. */
+async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-test-"));
+  try {
+    await fn(dir);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/**
+ * A spawn factory simulating agy: on `agy models` it returns the test model
+ * list; on a real prompt turn it writes the given steps into a conversation
+ * database (as agy itself would) before exiting, so the ACP server's poller
+ * picks them up.
+ */
+function spawnAgyWritingConversation(
+  dir: string,
+  conversationId: string,
+  steps: Parameters<typeof insertStep>[1][]
+): SpawnFactory {
   return ((command: string, args: string[]) => {
     if (args[0] === "models") {
       return new FakeProcess([TEST_MODELS_OUTPUT]);
     }
-    return new FakeProcess(promptChunks);
+    const db = createConversationDb(dir, conversationId);
+    for (const step of steps) insertStep(db, step);
+    db.close();
+    return new FakeProcess([]);
   }) as unknown as SpawnFactory;
 }
 
