@@ -1,9 +1,18 @@
+import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import * as os from "node:os";
 import path from "node:path";
+import { conversationSnapshot } from "./agy-db/scan.js";
+import { StreamPoller } from "./agy-db/streaming.js";
 
 export const DEFAULT_AGY_INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
+export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
+const POLL_INTERVAL_MS = 200;
+/** Trailing polls after the process exits, to catch rows flushed right around exit. */
+const TRAILING_POLL_ATTEMPTS = 3;
+const TRAILING_POLL_DELAY_MS = 100;
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
 
@@ -36,7 +45,13 @@ export interface AgyCliConfig {
   modelList: string[];
   discoverModels: boolean;
   modelListTimeoutMs: number;
+  /** Directory where agy writes its per-conversation SQLite databases. */
+  conversationsDir: string;
   env?: NodeJS.ProcessEnv;
+}
+
+export interface AgyPromptOutcome {
+  stopReason: "end_turn" | "cancelled";
 }
 
 export interface AgyCliConfigInput {
@@ -68,6 +83,8 @@ export class AgyCliSession {
   #process: SpawnedProcess | undefined;
   #cancelled = false;
   #extraPath: string | undefined;
+  #conversationId: string | null = null;
+  #lastStepIdx = -1;
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
 
@@ -81,6 +98,22 @@ export class AgyCliSession {
 
   get wasCancelled(): boolean {
     return this.#cancelled;
+  }
+
+  /** The agy conversation id this session is bound to, once known (after the first prompt). */
+  get conversationId(): string | null {
+    return this.#conversationId;
+  }
+
+  /** Highest conversation-database step idx already delivered to the ACP client. */
+  get lastStepIdx(): number {
+    return this.#lastStepIdx;
+  }
+
+  /** Seed the conversation binding from persisted state (for session/load and session/resume). */
+  restoreConversation(conversationId: string | null, lastStepIdx: number): void {
+    this.#conversationId = conversationId;
+    this.#lastStepIdx = lastStepIdx;
   }
 
   setModel(model: string | undefined): void {
@@ -119,6 +152,9 @@ export class AgyCliSession {
     if (this.config.logFile) {
       command.push("--log-file", this.config.logFile);
     }
+    if (this.#conversationId) {
+      command.push("--conversation", this.#conversationId);
+    }
 
     const cwd = path.resolve(this.config.cwd);
     for (const workspace of this.config.workspaces) {
@@ -131,16 +167,21 @@ export class AgyCliSession {
     return command;
   }
 
-  async *prompt(prompt: string): AsyncGenerator<string> {
+  /**
+   * Run one prompt turn: spawn agy, poll its conversation database for newly
+   * appended steps while the process runs, and invoke `onUpdate` with the
+   * translated ACP updates in order. Resolves once the process exits and a few
+   * trailing polls have drained any steps flushed right around exit.
+   */
+  async prompt(prompt: string, onUpdate: (update: SessionUpdate) => Promise<void>): Promise<AgyPromptOutcome> {
     const effectivePrompt = this.effectivePrompt(prompt);
     const command = this.commandForPrompt(prompt);
     try {
-      yield* this.runPromptCommand(command, effectivePrompt);
+      return await this.runPromptCommand(command, effectivePrompt, onUpdate);
     } catch (error) {
       if (this.shouldInstallAfterError(error)) {
         await this.installAgy();
-        yield* this.runPromptCommand(this.commandForPrompt(prompt), effectivePrompt);
-        return;
+        return await this.runPromptCommand(this.commandForPrompt(prompt), effectivePrompt, onUpdate);
       }
       throw error;
     }
@@ -150,9 +191,19 @@ export class AgyCliSession {
     return this.config.fastMode ? `/fast\n${prompt}` : prompt;
   }
 
-  private async *runPromptCommand(command: string[], prompt: string): AsyncGenerator<string> {
+  private async runPromptCommand(
+    command: string[],
+    prompt: string,
+    onUpdate: (update: SessionUpdate) => Promise<void>
+  ): Promise<AgyPromptOutcome> {
     const [program, ...args] = command;
     this.#cancelled = false;
+
+    // Snapshot existing conversation ids *before* spawning, so the file agy
+    // creates for a fresh prompt is guaranteed to look "new" once it appears —
+    // spawning after the snapshot would risk racing agy's own DB creation.
+    const snapshot = this.#conversationId === null ? conversationSnapshot(this.config.conversationsDir) : null;
+
     let child: SpawnedProcess;
     try {
       child = this.spawnProcess(program, args, this.spawnOptions());
@@ -164,20 +215,55 @@ export class AgyCliSession {
     const errorPromise = once(child, "error") as Promise<[NodeJS.ErrnoException]>;
     const stderrChunks: Buffer[] = [];
 
+    // agy persists its output to its own conversation database; stdout carries
+    // nothing we read, but it must still be drained so the child can't block on
+    // a full pipe.
+    child.stdout.on("data", () => {});
     child.stderr.on("data", (chunk: Buffer | string) => {
       stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+
+    const poller = new StreamPoller({
+      dir: this.config.conversationsDir,
+      conversationId: this.#conversationId,
+      baseStepIdx: this.#lastStepIdx,
+      skipNarration: false,
+      cwd: this.config.cwd,
+      snapshot
     });
 
     try {
       child.stdin.end(this.config.promptInArgv ? undefined : prompt);
 
-      for await (const chunk of child.stdout) {
-        yield Buffer.isBuffer(chunk) ? chunk.toString("utf8") : String(chunk);
-      }
+      const pollOnce = async () => {
+        for (const update of poller.poll()) {
+          await onUpdate(update);
+        }
+      };
+
+      let polling = true;
+      const pollLoop = (async () => {
+        while (polling) {
+          await pollOnce();
+          if (!polling) break;
+          await sleep(POLL_INTERVAL_MS);
+        }
+      })();
 
       const [exitCode] = child.exitCode === null
         ? await this.raceProcessError(exitPromise, errorPromise, command)
         : [child.exitCode, null];
+      polling = false;
+      await pollLoop;
+
+      for (let attempt = 0; attempt < TRAILING_POLL_ATTEMPTS; attempt++) {
+        await pollOnce();
+        if (attempt < TRAILING_POLL_ATTEMPTS - 1) await sleep(TRAILING_POLL_DELAY_MS);
+      }
+
+      this.#conversationId = poller.conversationId;
+      this.#lastStepIdx = poller.lastStepIdx;
+
       if (exitCode && !this.#cancelled) {
         const stderr = Buffer.concat(stderrChunks).toString("utf8");
         throw new AgyCliError(
@@ -187,7 +273,10 @@ export class AgyCliSession {
           stderr
         );
       }
+
+      return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } finally {
+      poller.close();
       if (this.#process === child) {
         this.#process = undefined;
       }
@@ -285,7 +374,14 @@ export class AgyCliSession {
     }
     this.#cancelled = true;
     const exitPromise = once(child, "exit");
-    child.kill("SIGTERM");
+    // SIGINT (rather than SIGTERM) gives agy a chance to flush its last
+    // conversation-database write before exiting. Windows has no real SIGINT,
+    // so fall back to an ungraceful kill there.
+    if (process.platform === "win32") {
+      child.kill();
+    } else {
+      child.kill("SIGINT");
+    }
     const timeout = setTimeout(() => {
       if (child.exitCode === null) {
         child.kill("SIGKILL");
@@ -396,8 +492,13 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     modelList: [],
     discoverModels: true,
     modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
+    conversationsDir: optional(env.AGY_ACP_CONVERSATIONS_DIR) ?? DEFAULT_CONVERSATIONS_DIR,
     env
   };
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function defaultSpawnFactory(command: string, args: string[], options: SpawnOptions): SpawnedProcess {
