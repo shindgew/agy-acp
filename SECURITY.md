@@ -19,7 +19,7 @@ Include enough information to reproduce the issue safely:
 - affected `agy-acp` version or commit;
 - operating system and Node.js version;
 - ACP client and `agy` CLI version/path;
-- relevant `AGY_ACP_*` configuration;
+- `AGY_ACP_AGY_PATH` when set;
 - a minimal reproduction that avoids secrets and private source code.
 
 ## Security Model
@@ -28,10 +28,8 @@ Include enough information to reproduce the issue safely:
 inside the workspace provided by the ACP client. The `agy` CLI may read files,
 edit files, or run commands according to its own runtime policy.
 
-`--sandbox` is enabled by default. Do not set
-`AGY_ACP_AGY_SKIP_PERMISSIONS=1` outside a trusted workspace. The optional
-`AGY_ACP_AUTO_INSTALL_AGY=1` path runs a shell installer command, so only enable
-it in environments where bootstrapping the latest Antigravity CLI is expected.
+`--sandbox` is enabled by default and `--dangerously-skip-permissions` is not
+used by this adapter.
 
 Never share API keys, credentials, private source code, or confidential logs in
 public issues or pull requests.

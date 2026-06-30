@@ -28,7 +28,8 @@ The first backend is intentionally conservative:
   `agy models` when available,
 - an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
   prompts without editing global Antigravity settings,
-- stdout chunks become ACP `agent_message_chunk` updates,
+- stdout chunks become ACP `agent_message_chunk` updates, with recognized
+  thinking/progress lines surfaced as a visible ACP `think` tool call,
 - cancellation sends `SIGTERM`, then `SIGKILL` if the process does not exit,
 - `--sandbox` is enabled by default,
 - `--dangerously-skip-permissions` is opt-in only.
@@ -76,35 +77,10 @@ Example Zed custom agent shape:
 }
 ```
 
-Useful environment variables:
+Optional environment variable:
 
-- `AGY_ACP_AGY_PATH`: path to `agy`, default `agy`.
-- `AGY_ACP_MODEL`: initial model selection, passed through as `agy --model`
-  after the session model picker selects it.
-- `AGY_ACP_MODELS`: comma- or newline-separated model list override for the
-  dynamic ACP model picker.
-- `AGY_ACP_DISCOVER_MODELS`: defaults to `1`; set `0`/`false` to skip
-  `agy models` discovery and use only `AGY_ACP_MODELS`/`AGY_ACP_MODEL`.
-- `AGY_ACP_MODEL_LIST_TIMEOUT_MS`: timeout for `agy models`, default `15000`.
-- `AGY_ACP_FAST_MODE`: defaults to `0`; set `1` to enable the initial
-  session `Fast Mode` selector.
-- `AGY_ACP_PROJECT`: passed through as `agy --project`.
-- `AGY_ACP_AGY_PRINT_TIMEOUT`: passed through as `agy --print-timeout`, default `5m0s`.
-- `AGY_ACP_AGY_SANDBOX`: defaults to `1`; set `0`/`false` to omit `--sandbox`.
-- `AGY_ACP_AGY_SKIP_PERMISSIONS`: set `1` only when you explicitly want `--dangerously-skip-permissions`.
-- `AGY_ACP_AGY_LOG_FILE`: passed through as `agy --log-file`.
-- `AGY_ACP_AGY_PROMPT_IN_ARGV`: defaults to `1`; set `0` to send the prompt on stdin instead of argv.
-- `AGY_ACP_AUTO_INSTALL_AGY`: defaults to `0`; set `1` to let `agy-acp`
-  run the official installer once when the default `agy` executable is missing.
-- `AGY_ACP_AGY_INSTALL_COMMAND`: installer shell command used by
-  `AGY_ACP_AUTO_INSTALL_AGY`, default
-  `curl -fsSL https://antigravity.google/cli/install.sh | bash`.
-- `AGY_ACP_AGY_INSTALL_BIN_DIR`: directory prepended to `PATH` after an
-  opt-in install succeeds, default `$HOME/.local/bin`.
-
-`agy-acp` does not install or update `agy` by default. The opt-in installer is
-intended for container and ephemeral agent environments where pulling the latest
-Antigravity CLI during startup is expected.
+- `AGY_ACP_AGY_PATH`: path to `agy`, default `agy`. Set this in Zed when the
+  agent process does not inherit your shell `PATH`.
 
 ## Model Picker
 
@@ -128,7 +104,7 @@ prompts include:
 agy --print "..." --model "<base model> (<reasoning effect>)"
 ```
 
-The first discovered model is selected by default when `AGY_ACP_MODEL` is unset.
+The first discovered model is selected by default for new sessions.
 Models ending in `(Low)`, `(Medium)`, or `(High)` are split into a base
 model picker plus a reasoning-effect picker. `(Thinking)` is treated as part of
 the model name, not as a reasoning-effect suffix.
