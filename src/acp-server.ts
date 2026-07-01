@@ -54,6 +54,7 @@ interface AgyAcpOptions {
   stdout?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   spawnProcess?: SpawnFactory;
+  argv?: string[];
 }
 
 interface SessionState {
@@ -69,6 +70,7 @@ interface SessionState {
 
 export class AgyAcpAgent {
   readonly #env: NodeJS.ProcessEnv;
+  readonly #argv: string[];
   readonly #backend: AgyCliBackend;
   readonly #sessions = new Map<string, SessionState>();
   readonly #store: SessionStore;
@@ -77,6 +79,7 @@ export class AgyAcpAgent {
 
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
+    this.#argv = options.argv ?? [];
     this.#backend = new AgyCliBackend(options.spawnProcess);
     this.#store = new SessionStore(defaultStateDir(this.#env));
   }
@@ -289,7 +292,7 @@ export class AgyAcpAgent {
   /** Build a fresh session bound to `cwd`/`workspaces`, optionally resuming an
    *  agy conversation and a caller's prior model/mode selection. */
   private async buildSession(cwd: string, workspaces: string[], stored: StoredSession | null): Promise<SessionState> {
-    const config = configFromEnv({ cwd, workspaces, env: this.#env });
+    const config = configFromEnv({ cwd, workspaces, env: this.#env, argv: this.#argv });
     const modelOptions = await this.modelOptionsForConfig(config);
     const catalog = buildModelCatalog(modelOptions);
     const agy = await this.#backend.startSession(config);

@@ -52,7 +52,7 @@ describe("commandForPrompt", () => {
     expect(command).toContain("--sandbox");
     expect(flagValue(command, "--model")).toBe("gemini-test");
     expect(flagValue(command, "--project")).toBe("project-1");
-    expect(flagValue(command, "--add-dir")).toBe("/extra");
+    expect(command.filter((_, i) => command[i - 1] === "--add-dir")).toEqual(["/repo", "/extra"]);
   });
 });
 
@@ -71,6 +71,42 @@ describe("configFromEnv", () => {
     expect(config.skipPermissions).toBe(false);
     expect(config.promptInArgv).toBe(true);
     expect(config.autoInstall).toBe(false);
+  });
+
+  it("configures sandbox and skipPermissions based on argv and env", () => {
+    const config1 = configFromEnv({
+      cwd: "/repo",
+      argv: ["--no-sandbox", "--dangerously-skip-permissions"]
+    });
+    expect(config1.sandbox).toBe(false);
+    expect(config1.skipPermissions).toBe(true);
+
+    const config2 = configFromEnv({
+      cwd: "/repo",
+      env: {
+        AGY_ACP_NO_SANDBOX: "1",
+        AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1"
+      }
+    });
+    expect(config2.sandbox).toBe(false);
+    expect(config2.skipPermissions).toBe(true);
+
+    const config3 = configFromEnv({
+      cwd: "/repo",
+      env: {
+        AGY_ACP_SANDBOX: "false"
+      }
+    });
+    expect(config3.sandbox).toBe(false);
+
+    const config4 = configFromEnv({
+      cwd: "/repo",
+      argv: ["--sandbox"],
+      env: {
+        AGY_ACP_NO_SANDBOX: "1"
+      }
+    });
+    expect(config4.sandbox).toBe(true);
   });
 });
 

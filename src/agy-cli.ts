@@ -56,6 +56,7 @@ export interface AgyCliConfigInput {
   cwd: string;
   workspaces?: string[];
   env?: NodeJS.ProcessEnv;
+  argv?: string[];
 }
 
 export class AgyCliError extends Error {
@@ -154,12 +155,14 @@ export class AgyCliSession {
       command.push("--conversation", this.#conversationId);
     }
 
-    const cwd = path.resolve(this.config.cwd);
+    const seen = new Set<string>();
     for (const workspace of this.config.workspaces) {
       const resolved = path.resolve(workspace);
-      if (resolved !== cwd) {
-        command.push("--add-dir", resolved);
+      if (seen.has(resolved)) {
+        continue;
       }
+      seen.add(resolved);
+      command.push("--add-dir", resolved);
     }
 
     return command;
@@ -461,6 +464,24 @@ export class AgyCliBackend {
 
 export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const env = input.env ?? process.env;
+  const argv = input.argv ?? [];
+
+  let sandbox = true;
+  if (env.AGY_ACP_SANDBOX === "false" || env.AGY_ACP_NO_SANDBOX) {
+    sandbox = false;
+  }
+  if (argv.includes("--no-sandbox")) {
+    sandbox = false;
+  }
+  if (argv.includes("--sandbox")) {
+    sandbox = true;
+  }
+
+  let skipPermissions = false;
+  if (env.AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS || argv.includes("--dangerously-skip-permissions")) {
+    skipPermissions = true;
+  }
+
   return {
     cwd: input.cwd,
     workspaces: input.workspaces ?? [input.cwd],
@@ -469,8 +490,8 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     fastMode: false,
     project: undefined,
     printTimeout: "5m0s",
-    sandbox: true,
-    skipPermissions: false,
+    sandbox,
+    skipPermissions,
     logFile: undefined,
     promptInArgv: true,
     autoInstall: false,
