@@ -100,10 +100,26 @@ export class ConversationDb {
     }
   }
 
-  /** Read decoded step rows with idx > afterStepIdx, in order. */
+  /** Read decoded step rows with idx > afterStepIdx, in order.
+   *
+   * A row whose blob fails to decode (e.g. a torn read of a row agy is still
+   * writing to) is logged and dropped rather than thrown — one bad row must
+   * not take down the whole poll loop. Since it's dropped, not consumed, its
+   * idx isn't advanced past, so it's naturally retried on the next read once
+   * the write settles. */
   readAfter(afterStepIdx: number): StepRow[] {
     const rows = this.stmt.all(afterStepIdx) as RawRow[];
-    return rows.map(rowToStep);
+    const out: StepRow[] = [];
+    for (const r of rows) {
+      try {
+        out.push(rowToStep(r));
+      } catch (error) {
+        console.error(
+          `[agy-acp] WARN: failed to decode step ${r.idx}, skipping: ${(error as Error).message}`
+        );
+      }
+    }
+    return out;
   }
 
   close(): void {
