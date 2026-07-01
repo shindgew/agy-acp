@@ -4,11 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as installer from "../src/agy-installer.js";
 import {
   AgyCliBackend,
   AgyCliSession,
-  DEFAULT_AGY_INSTALL_COMMAND,
   DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
   DEFAULT_CONVERSATIONS_DIR,
   configFromEnv,
@@ -57,16 +57,16 @@ describe("commandForPrompt", () => {
 });
 
 describe("configFromEnv", () => {
-  it("reads the agy executable path from AGY_ACP_AGY_PATH", () => {
+  it("always invokes agy by name and relies on PATH resolution", () => {
     const config = configFromEnv({
       cwd: "/repo",
       workspaces: ["/repo"],
       env: {
-        AGY_ACP_AGY_PATH: "/bin/agy"
+        PATH: "/bin"
       }
     });
 
-    expect(config.agyPath).toBe("/bin/agy");
+    expect(config.agyPath).toBe("agy");
     expect(config.sandbox).toBe(true);
     expect(config.skipPermissions).toBe(false);
     expect(config.promptInArgv).toBe(true);
@@ -193,15 +193,20 @@ describe("prompt", () => {
   });
 
   it("can install agy on demand when the default executable is missing", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockImplementation(async (options = {}) => {
+      if (options.env) {
+        options.env.PATH = `/home/user/.local/bin:${options.env.PATH ?? ""}`;
+      }
+      return "/home/user/.local/bin/agy";
+    });
     const missing = Object.assign(new Error("spawn agy ENOENT"), { code: "ENOENT" });
     const processes = [
       new FakeProcess([], { spawnError: missing, exitCode: null }),
-      new FakeProcess([], { exitCode: 0 }),
       new FakeProcess(["ok"])
     ];
     const calls: Array<{ command: string; args: string[] }> = [];
     const session = new AgyCliSession(
-      { ...defaultConfig(), autoInstall: true },
+      { ...defaultConfig(), autoInstall: true, env: {} },
       (command, args, options) => {
         calls.push({ command, args });
         const process = processes.shift();
@@ -213,36 +218,9 @@ describe("prompt", () => {
     const { stopReason } = await collectUpdates(session, "hello");
 
     expect(stopReason).toBe("end_turn");
-    expect(calls.map((call) => call.command)).toEqual(["agy", "sh", "agy"]);
-    expect(calls[1].args).toEqual(["-c", DEFAULT_AGY_INSTALL_COMMAND]);
-  });
-
-  it("retries through the installer bin directory after auto install", async () => {
-    const missing = Object.assign(new Error("spawn agy ENOENT"), { code: "ENOENT" });
-    const processes = [
-      new FakeProcess([], { spawnError: missing, exitCode: null }),
-      new FakeProcess([], { exitCode: 0 }),
-      new FakeProcess(["ok"])
-    ];
-    const calls: SpawnCall[] = [];
-    const session = new AgyCliSession(
-      {
-        ...defaultConfig(),
-        autoInstall: true,
-        installBinDir: "/home/user/.local/bin",
-        env: { PATH: "/usr/bin" }
-      },
-      (command, args, options) => {
-        calls.push({ command, args, options });
-        const process = processes.shift();
-        expect(process, `unexpected spawn: ${command}`).toBeDefined();
-        return process!.spawnFactory([])(command, args, options);
-      }
-    );
-
-    await collectUpdates(session, "hello");
-
-    expect(calls[2].options.env?.PATH).toBe("/home/user/.local/bin:/usr/bin");
+    expect(installSpy).toHaveBeenCalledOnce();
+    expect(calls.map((call) => call.command)).toEqual(["agy", "agy"]);
+    installSpy.mockRestore();
   });
 
   it("includes install guidance when agy is missing without auto install", async () => {
@@ -288,7 +266,6 @@ function defaultConfig(): AgyCliConfig {
     skipPermissions: false,
     promptInArgv: true,
     autoInstall: false,
-    installCommand: DEFAULT_AGY_INSTALL_COMMAND,
     modelList: [],
     discoverModels: true,
     modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,

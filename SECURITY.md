@@ -19,7 +19,7 @@ Include enough information to reproduce the issue safely:
 - affected `agy-acp` version or commit;
 - operating system and Node.js version;
 - ACP client and `agy` CLI version/path;
-- `AGY_ACP_AGY_PATH` when set;
+- `PATH` when customized for the agent process;
 - a minimal reproduction that avoids secrets and private source code.
 
 ## Security Model

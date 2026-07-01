@@ -1,0 +1,76 @@
+name: Platform smoke
+
+# Verifies the exact thing `npx agy-acp` depends on: that `npm install`
+# resolves a working better-sqlite3 native binary (prebuilt, or compiled on
+# the fly) on every OS/arch we claim to support, and that the packed CLI can
+# complete a real ACP `initialize` handshake over its actual stdio.
+#
+# Runs on push to main (post-merge signal) and manually, not on every PR —
+# several of these runners (macOS Intel, Linux arm64, Windows arm64) are
+# non-default GitHub-hosted runners with limited/paid availability.
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            name: darwin-arm64
+          - os: macos-14-large
+            name: darwin-x64
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+          - os: windows-latest
+            name: windows-x64
+          - os: windows-11-arm
+            name: windows-arm64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        id: setup-node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        shell: bash
+        run: npm ci
+
+      - name: Build package
+        shell: bash
+        run: npm run build
+
+      - name: Pack published artifact
+        shell: bash
+        run: npm pack --pack-destination "$RUNNER_TEMP"
+
+      - name: Install packed artifact into a clean project
+        shell: bash
+        run: |
+          mkdir "$RUNNER_TEMP/install-check"
+          cd "$RUNNER_TEMP/install-check"
+          npm init -y >/dev/null
+          npm install --foreground-scripts "$RUNNER_TEMP"/agy-acp-*.tgz 2>&1 | tee install.log
+          if grep -q "node-gyp rebuild" install.log; then
+            echo "::warning::better-sqlite3 had no prebuilt binary for ${{ matrix.name }} (node ${{ steps.setup-node.outputs.node-version }}) and compiled from source instead — users without a C++ toolchain would fail to install here"
+          fi
+
+      - name: Run ACP initialize smoke test
+        shell: bash
+        run: node scripts/smoke-install.mjs "$RUNNER_TEMP/install-check/node_modules/agy-acp/dist/cli.js"

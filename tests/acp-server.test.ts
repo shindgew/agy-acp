@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import * as installer from "../src/agy-installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import {
   buildModelCatalog,
@@ -30,6 +31,7 @@ describe("promptBlocksToText", () => {
 
 describe("initialize", () => {
   it("returns SDK-validated ACP capabilities", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
     const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp());
     try {
       const response = await connection.agent.request(methods.agent.initialize, {
@@ -42,7 +44,9 @@ describe("initialize", () => {
       expect(response.agentCapabilities?.promptCapabilities?.embeddedContext).toBe(true);
       expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
+      expect(installSpy).toHaveBeenCalledOnce();
     } finally {
+      installSpy.mockRestore();
       connection.close();
     }
   });

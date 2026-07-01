@@ -4,9 +4,8 @@ import { once } from "node:events";
 import * as os from "node:os";
 import path from "node:path";
 import { conversationSnapshot } from "./agy-db/scan.js";
+import { defaultInstallBinDir, ensureAgyInstalled } from "./agy-installer.js";
 import { StreamPoller } from "./agy-db/streaming.js";
-
-export const DEFAULT_AGY_INSTALL_COMMAND = "curl -fsSL https://antigravity.google/cli/install.sh | bash";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
@@ -40,7 +39,6 @@ export interface AgyCliConfig {
   logFile?: string;
   promptInArgv: boolean;
   autoInstall: boolean;
-  installCommand: string;
   installBinDir?: string;
   modelList: string[];
   discoverModels: boolean;
@@ -311,37 +309,20 @@ export class AgyCliSession {
   }
 
   private async installAgy(): Promise<void> {
-    const command = ["sh", "-c", this.config.installCommand];
-    let child: SpawnedProcess;
-    try {
-      child = this.spawnProcess(command[0], command.slice(1), this.spawnOptions());
-    } catch (error) {
-      throw this.errorForSpawnFailure(command, error as NodeJS.ErrnoException);
-    }
-    const exitPromise = waitForExit(child);
-    const errorPromise = once(child, "error") as Promise<[NodeJS.ErrnoException]>;
-    const stderrChunks: Buffer[] = [];
-
-    child.stdout.on("data", () => {
-      // Drain installer stdout so the subprocess cannot block on a full pipe.
+    const installed = await ensureAgyInstalled({
+      env: this.config.env,
+      installBinDir: this.config.installBinDir,
+      warn: (message) => console.error(message)
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderrChunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-
-    const [exitCode] = child.exitCode === null
-      ? await this.raceProcessError(exitPromise, errorPromise, command)
-      : [child.exitCode, null];
-    if (exitCode) {
-      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+    if (!installed) {
       throw new AgyCliError(
-        `agy installer exited with status ${exitCode}: ${stderr.trim() || "<no stderr>"}`,
-        command,
-        exitCode,
-        stderr
+        "agy executable not found and auto-install failed. Install the Google Antigravity CLI " +
+          "or add its directory to PATH.",
+        [this.config.agyPath],
+        null,
+        ""
       );
     }
-    this.#extraPath = this.config.installBinDir;
   }
 
   private spawnOptions(): SpawnOptions {
@@ -366,7 +347,7 @@ export class AgyCliSession {
     const executable = command[0];
     if (error.code === "ENOENT") {
       const hint = executable === this.config.agyPath && executable === "agy"
-        ? "Install the Google Antigravity CLI or set AGY_ACP_AGY_PATH to the agy executable."
+        ? "Install the Google Antigravity CLI or add its directory to PATH."
         : `Check the configured executable path: ${executable}.`;
       return new AgyCliError(`${executable} executable not found. ${hint}`, command, null, error.message);
     }
@@ -483,7 +464,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   return {
     cwd: input.cwd,
     workspaces: input.workspaces ?? [input.cwd],
-    agyPath: optional(env.AGY_ACP_AGY_PATH) ?? "agy",
+    agyPath: "agy",
     model: undefined,
     fastMode: false,
     project: undefined,
@@ -493,7 +474,6 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     logFile: undefined,
     promptInArgv: true,
     autoInstall: false,
-    installCommand: DEFAULT_AGY_INSTALL_COMMAND,
     installBinDir: defaultInstallBinDir(env),
     modelList: [],
     discoverModels: true,
@@ -513,11 +493,6 @@ function defaultSpawnFactory(command: string, args: string[], options: SpawnOpti
     env: options.env,
     stdio: ["pipe", "pipe", "pipe"]
   });
-}
-
-function defaultInstallBinDir(env: NodeJS.ProcessEnv): string | undefined {
-  const home = optional(env.HOME);
-  return home ? path.join(home, ".local", "bin") : undefined;
 }
 
 function optional(value: string | undefined): string | undefined {

@@ -25,6 +25,7 @@ import {
   type SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk";
 import { ReplayCache } from "./agy-db/replay.js";
+import { ensureAgyInstalled } from "./agy-installer.js";
 import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./agy-cli.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
@@ -72,6 +73,7 @@ export class AgyAcpAgent {
   readonly #sessions = new Map<string, SessionState>();
   readonly #store: SessionStore;
   readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
+  #ensureAgyPromise: Promise<string | null> | undefined;
 
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -79,7 +81,8 @@ export class AgyAcpAgent {
     this.#store = new SessionStore(defaultStateDir(this.#env));
   }
 
-  initialize(params: InitializeRequest): InitializeResponse {
+  async initialize(params: InitializeRequest): Promise<InitializeResponse> {
+    await this.ensureAgyReady();
     return {
       protocolVersion: params.protocolVersion === PROTOCOL_VERSION ? params.protocolVersion : PROTOCOL_VERSION,
       agentCapabilities: {
@@ -106,6 +109,14 @@ export class AgyAcpAgent {
         version: packageJson.version ?? "0.0.0"
       }
     };
+  }
+
+  private ensureAgyReady(): Promise<string | null> {
+    this.#ensureAgyPromise ??= ensureAgyInstalled({
+      env: this.#env,
+      warn: (message) => console.error(message)
+    });
+    return this.#ensureAgyPromise;
   }
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {

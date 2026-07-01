@@ -63,9 +63,13 @@ wire-walker rather than a generated client.
 
 ## Run
 
-Install the Antigravity CLI first. The installer fetches the latest release when
-`agy` is not already installed; existing installs are left in place because the
-CLI self-updates during normal use.
+`agy-acp` installs the Antigravity CLI automatically during `initialize` when
+`agy` is not already on `PATH`.
+The adapter downloads the latest release asset from
+[google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli/releases/latest)
+into `~/.local/bin/agy`.
+
+You can still install `agy` yourself if you prefer:
 
 ```sh
 curl -fsSL https://antigravity.google/cli/install.sh | bash
@@ -93,7 +97,7 @@ Example Zed custom agent shape:
       "command": "npx",
       "args": ["agy-acp"],
       "env": {
-        "AGY_ACP_AGY_PATH": "/opt/homebrew/bin/agy"
+        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
       }
     }
   }
@@ -102,8 +106,10 @@ Example Zed custom agent shape:
 
 Optional environment variables:
 
-- `AGY_ACP_AGY_PATH`: path to `agy`, default `agy`. Set this in Zed when the
-  agent process does not inherit your shell `PATH`.
+- `PATH`: include the directory that contains `agy` when the agent process does
+  not inherit your shell `PATH` (common in editor-launched agents). When `agy`
+  is missing, `agy-acp` installs it to `~/.local/bin` and prepends that
+  directory to `PATH` for the adapter process.
 - `AGY_ACP_CONVERSATIONS_DIR`: where `agy` writes its per-conversation SQLite
   databases, default `~/.gemini/antigravity-cli/conversations`. Override this
   if `agy` uses a different path on your OS.

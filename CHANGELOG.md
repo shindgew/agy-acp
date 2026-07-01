@@ -7,6 +7,28 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-01
+
+### Added
+
+- Automatic `agy` installation during `initialize` when no executable is found
+  on `PATH`. Downloads the platform-matching asset from
+  `google-antigravity/antigravity-cli` GitHub Releases (latest), verifies the
+  published SHA256 digest when available, installs to `~/.local/bin/agy`, and
+  prepends that directory to `PATH`.
+- Platform smoke CI workflow and `scripts/smoke-install.mjs` for cross-OS
+  install and ACP `initialize` verification.
+
+### Breaking
+
+- Removed `AGY_ACP_AGY_PATH`. Point `agy` via the standard `PATH` environment
+  variable instead.
+
+### Changed
+
+- Prompt-time auto-install now uses the same GitHub Releases installer instead
+  of the legacy `curl | bash` script.
+
 ## [0.2.0] - 2026-07-01
 
 ### Added
