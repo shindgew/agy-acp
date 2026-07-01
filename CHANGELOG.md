@@ -7,6 +7,21 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-01
+
+### Added
+
+- `session/load` and `session/resume` support, backed by a persisted session
+  store (`AGY_ACP_STATE_DIR`, default `~/.agy-acp-state`) and an incremental
+  conversation-replay cache.
+- Structured ACP streaming from agy's conversation database: real
+  `tool_call` / `tool_call_update` events, `session_info_update` titles, and
+  agent text deltas decoded from protobuf step records.
+- `AGY_ACP_CONVERSATIONS_DIR` environment variable to override where `agy`'s
+  conversation databases are read from.
+- `better-sqlite3` and `@bufbuild/protobuf` dependencies for read-only
+  conversation-database access and step-payload decoding.
+
 ### Changed
 
 - Replaced `agy --print` stdout scraping (regex-based "thinking" line
@@ -17,14 +32,15 @@ pre-1.0 caveat that minor versions may include breaking changes.
 - Cancellation now sends `SIGINT` (falling back to an ungraceful kill on
   Windows) instead of `SIGTERM`, so `agy` can flush its conversation database
   before exiting.
+- `loadSession` is now advertised as `true`.
 
-### Added
+### Breaking
 
-- `session/load` and `session/resume` support, backed by a persisted session
-  store (`AGY_ACP_STATE_DIR`, default `~/.agy-acp-state`) and an incremental
-  conversation-replay cache.
-- `AGY_ACP_CONVERSATIONS_DIR` environment variable to override where `agy`'s
-  conversation databases are read from.
+- ACP session config option ids renamed: `agy.model` → `model`,
+  `agy.reasoning_effect` → `effort`, `agy.fast_mode` → `fast-mode`.
+- Prompt turns are now conversation-bound across ACP prompts in the same
+  session; 0.1.0 treated every prompt as a fresh `agy --print` invocation with
+  no `--conversation` continuity.
 
 ## [0.1.0] - 2026-07-01
 
