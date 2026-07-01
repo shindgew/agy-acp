@@ -143,6 +143,11 @@ Models ending in `(Low)`, `(Medium)`, or `(High)` are split into a base
 model picker plus a reasoning-effect picker. `(Thinking)` is treated as part of
 the model name, not as a reasoning-effect suffix.
 
+ACP config values use lowercase slugs: model options look like
+`gemini-3.5-flash` and effort options are `low`, `medium`, or `high`. The
+adapter resolves those back to agy's native `--model` display names when
+spawning prompts.
+
 Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
 `agy --print` session. This mirrors Antigravity CLI Fast Mode without mutating
 `~/.gemini/antigravity-cli/settings.json`.

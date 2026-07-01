@@ -7,6 +7,30 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-01
+
+### Added
+
+- `agy-acp` command-line flags `--no-sandbox`, `--sandbox`, and
+  `--dangerously-skip-permissions`, plus `AGY_ACP_SANDBOX`, `AGY_ACP_NO_SANDBOX`,
+  and `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS` environment-variable overrides.
+
+### Changed
+
+- Pass `--add-dir` for every ACP workspace, including the primary `cwd`, so
+  `agy --sandbox` runs commands in the Zed project instead of the internal
+  scratch directory.
+- ACP `model` config values now use lowercase hyphenated slugs (for example
+  `gemini-3.5-flash`) and `effort` values use lowercase (`low`, `medium`,
+  `high`). `agy --model` still receives agy's native display names internally.
+- Persisted sessions with legacy capitalized model or effort values are
+  normalized on `session/load` and `session/resume`.
+
+### Fixed
+
+- Platform smoke workflow now uses the standard `macos-15-intel` runner instead
+  of the unavailable `macos-14-large` paid runner.
+
 ## [0.2.1] - 2026-07-01
 
 ### Added
