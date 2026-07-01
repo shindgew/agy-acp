@@ -7,7 +7,7 @@ name: Platform smoke
 #
 # Runs on push to main (post-merge signal) and manually, not on every PR —
 # several of these runners (macOS Intel, Linux arm64, Windows arm64) are
-# non-default GitHub-hosted runners with limited/paid availability.
+# non-default GitHub-hosted runners.
 on:
   push:
     branches:
@@ -27,7 +27,7 @@ jobs:
         include:
           - os: macos-14
             name: darwin-arm64
-          - os: macos-14-large
+          - os: macos-15-intel
             name: darwin-x64
           - os: ubuntu-latest
             name: linux-x64
