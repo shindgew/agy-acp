@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationDb } from "../src/agy-db/database.js";
 import { ReplayCache } from "../src/agy-db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy-db/scan.js";
@@ -47,6 +47,34 @@ describe("ConversationDb", () => {
 
   it("returns null for a missing conversation", () => {
     expect(ConversationDb.open(dir, "does-not-exist")).toBeNull();
+  });
+
+  it("skips a row whose payload fails to decode instead of throwing, and retries it once fixed", () => {
+    const db = createConversationDb(dir, "conv-corrupt");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
+    const goodPayload = encodeStepPayload({
+      toolRun: encodeToolRun({ call: encodeToolCall({ namePrimary: "run_command", rawInputJson: "{}" }) })
+    });
+    // Simulate a torn read of a row agy is still writing to: a submessage
+    // truncated mid-field, which throws "premature EOF" while decoding.
+    insertStep(db, { idx: 2, stepType: 21, stepPayload: goodPayload.slice(0, goodPayload.length - 2) });
+
+    const conn = ConversationDb.open(dir, "conv-corrupt")!;
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const rows = conn.readAfter(0);
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining("failed to decode step 2"));
+    errorSpy.mockRestore();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].idx).toBe(1);
+
+    updateStepPayload(db, 2, goodPayload);
+    const retried = conn.readAfter(1);
+    expect(retried).toHaveLength(1);
+    expect(retried[0].stepPayload.toolRun?.call?.namePrimary).toBe("run_command");
+
+    conn.close();
+    db.close();
   });
 });
 
