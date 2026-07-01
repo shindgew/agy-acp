@@ -35,7 +35,7 @@ const packageJson = require("../package.json") as { version?: string };
 const MODEL_CONFIG_ID = "model";
 const REASONING_EFFORT_CONFIG_ID = "effort";
 const FAST_MODE_CONFIG_ID = "fast-mode";
-const NO_REASONING_VALUE = "__none__";
+const NO_REASONING_VALUE = "none";
 const REASONING_EFFECT_PATTERN = /\((low|medium|high)\)\s*$/i;
 const THINKING_SUFFIX_PATTERN = /\(thinking\)\s*$/i;
 /** Conversation replays cached per conversation id before LRU eviction. */
@@ -47,6 +47,10 @@ interface ModelCatalog {
   effectsFor(baseModel: string): string[];
   resolve(baseModel: string, reasoningEffect: string): string;
   split(fullModel: string): { base: string; reasoningEffect?: string };
+  /** Map a legacy agy display name to its ACP slug, if known. */
+  slugForAgyBase(agyBase: string): string | undefined;
+  /** Resolve an ACP model slug back to the agy display name for --model. */
+  agyBaseName(slug: string): string;
 }
 
 interface AgyAcpOptions {
@@ -392,12 +396,14 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   const uniqueEntries = dedupe(entries);
   const baseOrder: string[] = [];
   const effectsByBase = new Map<string, string[]>();
+  const agyBaseBySlug = new Map<string, string>();
 
   for (const entry of uniqueEntries) {
-    const { base, reasoningEffect } = splitModelEntry(entry);
+    const { agyBase, base, reasoningEffect } = splitModelEntry(entry);
     if (!effectsByBase.has(base)) {
       baseOrder.push(base);
       effectsByBase.set(base, []);
+      agyBaseBySlug.set(base, agyBase);
     }
     if (reasoningEffect) {
       const effects = effectsByBase.get(base)!;
@@ -421,7 +427,21 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
       }
       return resolved;
     },
-    split: (fullModel: string) => splitModelEntry(fullModel)
+    split: (fullModel: string) => {
+      const { base, reasoningEffect } = splitModelEntry(fullModel);
+      return { base, reasoningEffect };
+    },
+    slugForAgyBase: (agyBase: string) => {
+      const slug = toModelSlug(agyBase);
+      return agyBaseBySlug.has(slug) ? slug : undefined;
+    },
+    agyBaseName: (slug: string) => {
+      const agyBase = agyBaseBySlug.get(slug);
+      if (!agyBase) {
+        throw new Error(`Unknown model slug: ${slug}`);
+      }
+      return agyBase;
+    }
   };
 }
 
@@ -429,7 +449,7 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
-    description: "Antigravity model base name passed to agy --model.",
+    description: "ACP model slug resolved to the matching agy --model value.",
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
@@ -489,30 +509,32 @@ function sessionConfigOptions(session: SessionState): SessionConfigOption[] {
   ];
 }
 
-function splitModelEntry(model: string): { base: string; reasoningEffect?: string } {
+function splitModelEntry(model: string): { agyBase: string; base: string; reasoningEffect?: string } {
   if (THINKING_SUFFIX_PATTERN.test(model)) {
-    return { base: model };
+    return { agyBase: model, base: toModelSlug(model) };
   }
 
   const match = model.match(REASONING_EFFECT_PATTERN);
   if (!match || match.index === undefined) {
-    return { base: model };
+    return { agyBase: model, base: toModelSlug(model) };
   }
 
+  const agyBase = model.slice(0, match.index).trim();
   return {
-    base: model.slice(0, match.index).trim(),
-    reasoningEffect: reasoningEffectLabel(match[1])
+    agyBase,
+    base: toModelSlug(agyBase),
+    reasoningEffect: match[1].toLowerCase()
   };
 }
 
-function reasoningEffectLabel(value: string): string {
-  const normalized = value.toLowerCase();
-  const labels: Record<string, string> = {
-    low: "Low",
-    medium: "Medium",
-    high: "High"
-  };
-  return labels[normalized] ?? value;
+/** Convert an agy display name to an ACP-style model slug. */
+export function toModelSlug(model: string): string {
+  return model
+    .toLowerCase()
+    .replace(/[()]/g, "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-");
 }
 
 function reasoningEffectOptions(
@@ -524,7 +546,7 @@ function reasoningEffectOptions(
     return [
       {
         value: NO_REASONING_VALUE,
-        name: "N/A"
+        name: NO_REASONING_VALUE
       }
     ];
   }
@@ -584,17 +606,48 @@ function restoredModelSelection(
   stored: StoredSession,
   catalog: ModelCatalog
 ): { baseModel: string; reasoningEffect: string } {
-  if (!catalog.baseModels().includes(stored.modelId)) {
+  const baseModel = normalizeStoredBaseModel(stored.modelId, catalog);
+  if (!baseModel) {
     return initialModelSelection(undefined, catalog);
   }
-  const effects = catalog.effectsFor(stored.modelId);
+  const effects = catalog.effectsFor(baseModel);
   if (effects.length === 0) {
-    return { baseModel: stored.modelId, reasoningEffect: NO_REASONING_VALUE };
+    return { baseModel, reasoningEffect: NO_REASONING_VALUE };
   }
   return {
-    baseModel: stored.modelId,
-    reasoningEffect: effects.includes(stored.reasoningEffect) ? stored.reasoningEffect : effects[0]
+    baseModel,
+    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffect, effects)
   };
+}
+
+function normalizeStoredBaseModel(modelId: string, catalog: ModelCatalog): string | undefined {
+  if (catalog.baseModels().includes(modelId)) {
+    return modelId;
+  }
+  return catalog.slugForAgyBase(modelId);
+}
+
+function normalizeStoredReasoningEffect(storedEffect: string, effects: string[]): string {
+  if (effects.includes(storedEffect)) {
+    return storedEffect;
+  }
+  const lower = storedEffect.toLowerCase();
+  if (effects.includes(lower)) {
+    return lower;
+  }
+  const legacyEffects: Record<string, string> = {
+    Low: "low",
+    Medium: "medium",
+    High: "high"
+  };
+  const mapped = legacyEffects[storedEffect];
+  if (mapped && effects.includes(mapped)) {
+    return mapped;
+  }
+  if (storedEffect === "__none__" || storedEffect === NO_REASONING_VALUE) {
+    return NO_REASONING_VALUE;
+  }
+  return effects[0];
 }
 
 function applyModelSelection(
@@ -605,7 +658,7 @@ function applyModelSelection(
 ): void {
   const effects = catalog.effectsFor(selectedBaseModel);
   if (effects.length === 0) {
-    agy.setModel(selectedBaseModel);
+    agy.setModel(catalog.agyBaseName(selectedBaseModel));
     return;
   }
 
