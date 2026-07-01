@@ -7,7 +7,11 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 ## [Unreleased]
 
-## [0.2.2] - 2026-07-01
+## [0.2.3] - 2026-07-01
+
+Published as `0.2.3` because npm permanently blocks republishing a version
+number after it has been published, even if that release is later
+unpublished.
 
 ### Added
 
@@ -32,6 +36,11 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 - Platform smoke workflow now uses the standard `macos-15-intel` runner instead
   of the unavailable `macos-14-large` paid runner.
+
+## [0.2.2] - 2026-07-01
+
+Git tag only. An npm release was briefly published and then unpublished; npm
+does not allow that version number to be reused. Use `0.2.3` on npm instead.
 
 ## [0.2.1] - 2026-07-01
 
