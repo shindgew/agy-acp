@@ -293,7 +293,7 @@ describe("buildModelCatalog", () => {
       "none",
       catalog
     ) as SelectConfigOption;
-    expect(reasoningConfig.options.map((option) => option.name)).toEqual(["none"]);
+    expect(reasoningConfig.options).toEqual([{ value: "none", name: "N/A" }]);
   });
 
   it("exposes separate model and reasoning effect config options", () => {
@@ -305,10 +305,13 @@ describe("buildModelCatalog", () => {
       catalog
     ) as SelectConfigOption;
 
-    expect(modelConfig.options.map((option) => option.name)).toEqual([
-      "gemini-3.5-flash"
+    expect(modelConfig.options).toEqual([
+      { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" }
     ]);
-    expect(reasoningConfig.options.map((option) => option.name)).toEqual(["medium", "high"]);
+    expect(reasoningConfig.options).toEqual([
+      { value: "medium", name: "Medium" },
+      { value: "high", name: "High" }
+    ]);
   });
 });
 
@@ -341,17 +344,16 @@ describe("session model config", () => {
 
       expect(modelConfig?.category).toBe("model");
       expect(modelConfig?.currentValue).toBe("gemini-3.5-flash");
-      expect(modelConfig?.options.map((option) => option.name)).toEqual([
-        "gemini-3.5-flash",
-        "claude-sonnet-4.6-thinking"
-      ]);
-      expect(optionValues(modelConfig!)).toEqual([
-        "gemini-3.5-flash",
-        "claude-sonnet-4.6-thinking"
+      expect(modelConfig?.options).toEqual([
+        { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" },
+        { value: "claude-sonnet-4.6-thinking", name: "Claude Sonnet 4.6 (Thinking)" }
       ]);
       expect(reasoningConfig?.category).toBe("thought_level");
       expect(reasoningConfig?.currentValue).toBe("medium");
-      expect(reasoningConfig?.options.map((option) => option.name)).toEqual(["medium", "high"]);
+      expect(reasoningConfig?.options).toEqual([
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" }
+      ]);
       expect(fastConfig?.category).toBe("model_config");
       expect(fastConfig?.type).toBe("select");
       expect(fastConfig?.currentValue).toBe("off");
@@ -386,7 +388,7 @@ describe("session model config", () => {
       });
       expect(thinkingResponse.configOptions[0].currentValue).toBe("claude-sonnet-4.6-thinking");
       expect(thinkingResponse.configOptions[1].currentValue).toBe("none");
-      expect(optionNames(thinkingResponse.configOptions[1] as SelectConfigOption)).toEqual(["none"]);
+      expect(optionNames(thinkingResponse.configOptions[1] as SelectConfigOption)).toEqual(["N/A"]);
 
       await connection.agent.request(methods.agent.session.prompt, {
         sessionId: session.sessionId,

@@ -453,9 +453,9 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
-    options: catalog.baseModels().map((baseModel) => ({
-      value: baseModel,
-      name: baseModel
+    options: catalog.baseModels().map((slug) => ({
+      value: slug,
+      name: catalog.agyBaseName(slug)
     }))
   };
 }
@@ -546,15 +546,24 @@ function reasoningEffectOptions(
     return [
       {
         value: NO_REASONING_VALUE,
-        name: NO_REASONING_VALUE
+        name: "N/A"
       }
     ];
   }
 
   return effects.map((effect) => ({
     value: effect,
-    name: effect
+    name: reasoningEffectDisplayName(effect)
   }));
+}
+
+function reasoningEffectDisplayName(value: string): string {
+  const labels: Record<string, string> = {
+    low: "Low",
+    medium: "Medium",
+    high: "High"
+  };
+  return labels[value] ?? value;
 }
 
 function reasoningEffectValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {

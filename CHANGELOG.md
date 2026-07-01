@@ -22,7 +22,9 @@ pre-1.0 caveat that minor versions may include breaking changes.
   scratch directory.
 - ACP `model` config values now use lowercase hyphenated slugs (for example
   `gemini-3.5-flash`) and `effort` values use lowercase (`low`, `medium`,
-  `high`). `agy --model` still receives agy's native display names internally.
+  `high`), while picker labels stay human-readable (`Gemini 3.5 Flash`,
+  `Medium`, `N/A`, and so on). `agy --model` still receives agy's native
+  display names internally.
 - Persisted sessions with legacy capitalized model or effort values are
   normalized on `session/load` and `session/resume`.
 
