@@ -249,6 +249,12 @@ export class AgyCliSession {
           await sleep(POLL_INTERVAL_MS);
         }
       })();
+      // pollLoop runs unawaited while we wait on the child process below; if it
+      // rejects in that window Node would otherwise treat it as an unhandled
+      // rejection and crash the whole server. Attaching a no-op handler here
+      // marks it handled — the real rejection still surfaces from the `await
+      // pollLoop` a few lines down, inside this try/catch.
+      pollLoop.catch(() => {});
 
       const [exitCode] = child.exitCode === null
         ? await this.raceProcessError(exitPromise, errorPromise, command)
