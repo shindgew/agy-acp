@@ -97,7 +97,7 @@ Example Zed custom agent shape:
       "command": "npx",
       "args": ["agy-acp"],
       "env": {
-        "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+        "PATH": "/path/to/agy/bin" // Optional
       }
     }
   }
