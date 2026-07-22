@@ -6,8 +6,14 @@ import { ConversationDb } from "../src/db/database.js";
 import { ReplayCache } from "../src/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/db/scan.js";
 import { Translator } from "../src/db/translator.js";
-import { createConversationDb, insertStep, updateStepPayload } from "./fixtures/conversation-db.js";
-import { encodeAgentText, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
+import {
+  encodeAgentText,
+  encodeCommandResult,
+  encodeStepPayload,
+  encodeToolCall,
+  encodeToolRun
+} from "./fixtures/step-encoder.js";
 
 let dir: string;
 
@@ -101,11 +107,12 @@ describe("Translator", () => {
     db.close();
   });
 
-  it("dedupes tool-call steps across repeated polls in stream mode", () => {
+  it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {
       idx: 1,
       stepType: 21,
+      status: 3,
       stepPayload: encodeStepPayload({
         toolRun: encodeToolRun({ call: encodeToolCall({ namePrimary: "run_command", rawInputJson: "{}" }) })
       })
@@ -119,6 +126,147 @@ describe("Translator", () => {
 
     conn.close();
     db.close();
+  });
+
+
+  it("emits tool_call then tool_call_update when status progresses on the same idx", () => {
+    const db = createConversationDb(dir, "conv-tool-progress");
+    const call = encodeToolCall({
+      callId: "cmd-1",
+      namePrimary: "run_command",
+      rawInputJson: '{"CommandLine":"echo hi"}'
+    });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2, // in_progress
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-tool-progress")!;
+
+    const first = translator.translate(conn.readAfter(0));
+    expect(first).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "cmd-1",
+        kind: "execute",
+        status: "in_progress",
+        title: "echo hi"
+      }
+    ]);
+
+    updateStep(db, 1, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call }),
+        commandResult: encodeCommandResult({
+          cwd: "/repo",
+          exitCode: 0,
+          output: "hi\n",
+          command: "echo hi"
+        })
+      })
+    });
+
+    const second = translator.translate(conn.readAfter(0));
+    expect(second).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "cmd-1",
+        kind: "execute",
+        status: "completed",
+        title: "echo hi"
+      }
+    ]);
+    const content = (second[0] as { content?: Array<{ content?: { text?: string } }> }).content ?? [];
+    const texts = content.map((c) => c.content?.text ?? "").join("\n");
+    expect(texts).toContain("hi");
+
+    // Unchanged snapshot: no third emission.
+    expect(translator.translate(conn.readAfter(0))).toHaveLength(0);
+
+    conn.close();
+    db.close();
+  });
+
+
+  it("emits agent_thought_chunk for title-attached Think narration", () => {
+    const db = createConversationDb(dir, "conv-thought");
+    insertStep(db, {
+      idx: 1,
+      stepType: 23,
+      stepPayload: encodeStepPayload({
+        titleUpdate: "My session\n\nI will inspect the repo structure first."
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-thought")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      { sessionUpdate: "session_info_update", title: "My session" },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "title-thought-1",
+        content: { type: "text", text: "I will inspect the repo structure first." }
+      }
+    ]);
+
+    // Second poll: no duplicate thought/title.
+    const conn2 = ConversationDb.open(dir, "conv-thought")!;
+    expect(translator.translate(conn2.readAfter(0))).toHaveLength(0);
+    conn2.close();
+  });
+
+
+  it("surfaces commandResult output on execute tool calls", () => {
+    const db = createConversationDb(dir, "conv-exec-out");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c-out",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls","Cwd":"/repo"}'
+          })
+        }),
+        commandResult: encodeCommandResult({
+          cwd: "/repo",
+          exitCode: 0,
+          output: "README.md\n",
+          command: "ls"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-out")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      sessionUpdate: string;
+      kind: string;
+      rawOutput?: { exitCode?: number; output?: string };
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.sessionUpdate).toBe("tool_call");
+    expect(update.kind).toBe("execute");
+    expect(update.rawOutput).toMatchObject({ exitCode: 0, output: "README.md\n" });
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("README.md");
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
