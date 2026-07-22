@@ -42,6 +42,10 @@ stdio `initialize` path and at least one real session with an ACP client.
 Pushing a version tag triggers [`.github/workflows/release.yml`](.github/workflows/release.yml),
 which runs the test suite, creates a GitHub Release, and publishes to npm.
 
+**Only tags whose commit is already on `main` are released.** Tagging a
+feature-branch tip fails the workflow and does not publish. Merging a PR alone
+does not publish; you must push a tag after the release commit is on `main`.
+
 | Tag example | GitHub | npm dist-tag | Install |
 |-------------|--------|--------------|---------|
 | `v0.2.5` | Full release | `latest` | `npx agy-acp` |
@@ -61,12 +65,14 @@ One-time setup: store an npm automation token as the repository secret
 1. Update `CHANGELOG.md` with a `## [X.Y.Z] - YYYY-MM-DD` section (move items
    out of `[Unreleased]`).
 2. Bump `version` in `package.json` and `package-lock.json` to `X.Y.Z`.
-3. Commit on `main` (for example `Release X.Y.Z`).
-4. Tag and push:
+3. Land that commit on `main` (merge PR or push).
+4. Tag **that** commit and push the tag:
 
 ```sh
+git checkout main
+git pull origin main
 git tag -a "vX.Y.Z" -m "Release X.Y.Z"
-git push origin main "vX.Y.Z"
+git push origin "vX.Y.Z"
 ```
 
 ### Pre-release (alpha / beta / rc) checklist
@@ -74,12 +80,14 @@ git push origin main "vX.Y.Z"
 1. Update `CHANGELOG.md` with a `## [X.Y.Z-alpha.N] - YYYY-MM-DD` section.
 2. Bump `version` in `package.json` and `package-lock.json` to that pre-release
    (for example `1.0.0-alpha.0`).
-3. Commit on `main`.
-4. Tag and push with the **exact** pre-release version:
+3. Land that commit on `main` (merge PR or push).
+4. Tag **that** commit and push the tag:
 
 ```sh
+git checkout main
+git pull origin main
 git tag -a "v1.0.0-alpha.0" -m "Release 1.0.0-alpha.0"
-git push origin main "v1.0.0-alpha.0"
+git push origin "v1.0.0-alpha.0"
 ```
 
 CI marks the GitHub Release as a pre-release and runs

@@ -1,12 +1,15 @@
 name: Release
 
 # Push a version tag (vX.Y.Z matching package.json) to create a GitHub Release
-# and publish the package to npm.
+# and publish the package to npm — only if the tagged commit is already on main.
 #
 # Stable:     v1.2.3           → GitHub Release + npm --tag latest
 # Pre-release: v1.0.0-alpha.0  → GitHub pre-release + npm --tag alpha
 #              v1.0.0-beta.1   → GitHub pre-release + npm --tag beta
 #              v1.0.0-rc.1     → GitHub pre-release + npm --tag rc
+#
+# Tags on feature branches (or any commit not reachable from origin/main) fail
+# the "must be on main" check and do not publish.
 on:
   push:
     tags:
@@ -22,6 +25,26 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # Full history so we can verify the tag is an ancestor of main.
+          fetch-depth: 0
+
+      - name: Require tagged commit is on main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          tag_sha="$(git rev-parse "${GITHUB_REF_NAME}^{}")"
+          main_sha="$(git rev-parse origin/main)"
+          echo "Tag ${GITHUB_REF_NAME} → ${tag_sha}"
+          echo "origin/main         → ${main_sha}"
+
+          # A commit is "on main" if it is origin/main or an ancestor of it.
+          if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points to ${tag_sha}, which is not on origin/main."
+            echo "Merge the release commit into main first, then tag and push the tag."
+            exit 1
+          fi
+          echo "OK: tagged commit is on main"
 
       - name: Set up Node
         uses: actions/setup-node@v4
