@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import * as installer from "../src/agy-installer.js";
+import * as installer from "../src/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import {
   buildModelCatalog,
@@ -14,7 +14,7 @@ import {
   reasoningEffectConfigOption,
   toModelSlug
 } from "../src/acp-server.js";
-import type { SpawnFactory } from "../src/agy-cli.js";
+import type { SpawnFactory } from "../src/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import type { SessionConfigOption } from "@agentclientprotocol/sdk";

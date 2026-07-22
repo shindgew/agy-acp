@@ -24,9 +24,9 @@ import {
   type SetSessionConfigOptionRequest,
   type SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk";
-import { ReplayCache } from "./agy-db/replay.js";
-import { ensureAgyInstalled } from "./agy-installer.js";
-import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./agy-cli.js";
+import { ReplayCache } from "./db/replay.js";
+import { ensureAgyInstalled } from "./installer.js";
+import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./cli.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
 

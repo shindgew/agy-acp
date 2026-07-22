@@ -9,7 +9,7 @@ import {
   installedAgyPath,
   releaseAssetName,
   resolveAgyExecutable
-} from "../src/agy-installer.js";
+} from "../src/installer.js";
 
 describe("releaseAssetName", () => {
   it("maps platform and arch to GitHub asset names", () => {
