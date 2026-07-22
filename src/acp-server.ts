@@ -41,7 +41,16 @@ import type {
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./db/replay.js";
 import { ensureAgyInstalled } from "./installer.js";
-import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./cli.js";
+import {
+  AgyCliBackend,
+  AGY_EXECUTION_MODES,
+  configFromEnv,
+  isAgyExecutionMode,
+  type AgyCliConfig,
+  type AgyCliSession,
+  type AgyExecutionMode,
+  type SpawnFactory
+} from "./cli.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
 import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
@@ -55,8 +64,9 @@ export type AgentContext = V1AgentContext;
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
+const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
-const REASONING_EFFORT_CONFIG_ID = "effort";
+const REASONING_EFFORT_CONFIG_ID = "reasoningEffort";
 const NO_REASONING_VALUE = "none";
 /** Legacy `agy models` lines: `Gemini 3.5 Flash (Medium)`. */
 const LEGACY_EFFORT_PATTERN = /\((low|medium|high)\)\s*$/i;
@@ -434,6 +444,15 @@ export class AgyAcpAgent {
 
   private async applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
     const session = this.requireSession(sessionId);
+    if (configId === MODE_CONFIG_ID) {
+      if (typeof value !== "string" || !isAgyExecutionMode(value)) {
+        throw new Error(`Mode must be one of: ${AGY_EXECUTION_MODES.join(", ")}`);
+      }
+      session.agy.setMode(value);
+      await this.persistSession(sessionId, session);
+      return;
+    }
+
     if (configId === MODEL_CONFIG_ID) {
       if (typeof value !== "string") {
         throw new Error("Model config value must be a string");
@@ -456,11 +475,11 @@ export class AgyAcpAgent {
 
     if (configId === REASONING_EFFORT_CONFIG_ID) {
       if (typeof value !== "string") {
-        throw new Error("Reasoning effect config value must be a string");
+        throw new Error("reasoningEffort config value must be a string");
       }
       const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
       if (!allowedEffects.includes(value)) {
-        throw new Error(`Unknown reasoning effect: ${value}`);
+        throw new Error(`Unknown reasoningEffort: ${value}`);
       }
 
       session.selectedReasoningEffect = value;
@@ -596,6 +615,9 @@ export class AgyAcpAgent {
       ? restoredModelSelection(stored, catalog)
       : initialModelSelection(config.model, catalog);
     applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
+    if (stored?.mode && isAgyExecutionMode(stored.mode)) {
+      agy.setMode(stored.mode);
+    }
 
     return {
       id: "", // set by the caller once the ACP session id is known
@@ -635,8 +657,9 @@ export class AgyAcpAgent {
       workspaces: session.workspaces,
       conversationId: session.agy.conversationId,
       lastStepIdx: session.agy.lastStepIdx,
-      modelId: session.selectedBaseModel,
-      reasoningEffect: session.selectedReasoningEffect,
+      model: session.selectedBaseModel,
+      reasoningEffort: session.selectedReasoningEffect,
+      mode: session.agy.config.mode,
       updatedAt: new Date().toISOString()
     };
   }
@@ -772,11 +795,40 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   };
 }
 
+export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
+  return {
+    id: MODE_CONFIG_ID,
+    name: "mode",
+    description:
+      "agy execution mode (--mode). Default reviews writes; Accept Edits applies file changes; Plan focuses on planning.",
+    category: "mode",
+    type: "select",
+    currentValue: mode,
+    options: [
+      {
+        value: "default",
+        name: "Default",
+        description: "Request review before file writes (agy default; omits --mode)."
+      },
+      {
+        value: "accept-edits",
+        name: "Accept Edits",
+        description: "Apply file edits without interactive write review (agy --mode accept-edits)."
+      },
+      {
+        value: "plan",
+        name: "Plan",
+        description: "Plan-oriented execution (agy --mode plan)."
+      }
+    ]
+  };
+}
+
 export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): V1SessionConfigOption {
   return {
     id: MODEL_CONFIG_ID,
-    name: "Model",
-    description: "ACP model slug passed to agy --model (effort is selected separately).",
+    name: "model",
+    description: "ACP model slug passed to agy --model (reasoningEffort is selected separately).",
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
@@ -794,7 +846,7 @@ export function reasoningEffectConfigOption(
 ): V1SessionConfigOption {
   return {
     id: REASONING_EFFORT_CONFIG_ID,
-    name: "Reasoning Effort",
+    name: "reasoningEffort",
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
@@ -805,6 +857,7 @@ export function reasoningEffectConfigOption(
 
 function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] {
   return [
+    modeConfigOption(session.agy.config.mode),
     modelConfigOption(session.selectedBaseModel, session.catalog),
     reasoningEffectConfigOption(
       session.selectedBaseModel,
@@ -1014,7 +1067,7 @@ function restoredModelSelection(
   stored: StoredSession,
   catalog: ModelCatalog
 ): { baseModel: string; reasoningEffect: string } {
-  const baseModel = normalizeStoredBaseModel(stored.modelId, catalog);
+  const baseModel = normalizeStoredBaseModel(stored.model, catalog);
   if (!baseModel) {
     return initialModelSelection(undefined, catalog);
   }
@@ -1024,7 +1077,7 @@ function restoredModelSelection(
   }
   return {
     baseModel,
-    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffect, effects)
+    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffort, effects)
   };
 }
 
