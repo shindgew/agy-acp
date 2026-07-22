@@ -19,7 +19,11 @@ import {
 import type { SpawnFactory } from "../src/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import { sessionUpdateToV2 } from "../src/session-updates.js";
+import {
+  expandSessionUpdateToV2,
+  sessionUpdateToV2,
+  terminalIdForToolCall
+} from "../src/session-updates.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -705,6 +709,72 @@ describe("ACP v2 (experimental draft)", () => {
       type: "diff",
       changes: [{ operation: "add", path: "/tmp/a.ts", fileType: "text" }],
       patch: { format: "git_patch" }
+    });
+  });
+
+  it("expands execute tool calls into terminal_update + tool_call_update", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-1",
+      title: "ls",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "ls", Cwd: "/repo" },
+      rawOutput: { exitCode: 0, output: "README.md\n" },
+      content: [
+        { type: "content", content: { type: "text", text: "```\nls\n```" } },
+        { type: "content", content: { type: "text", text: "```\nREADME.md\n```" } }
+      ]
+    } as SessionUpdate;
+
+    const expanded = expandSessionUpdateToV2(update) as Array<Record<string, unknown>>;
+    expect(expanded).toHaveLength(2);
+
+    const terminalId = terminalIdForToolCall("cmd-1");
+    expect(expanded[0]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId,
+      command: "ls",
+      cwd: "/repo",
+      exitStatus: { exitCode: 0 }
+    });
+    expect((expanded[0].output as { data?: string })?.data).toBe(
+      Buffer.from("README.md\n", "utf8").toString("base64")
+    );
+
+    expect(expanded[1]).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "cmd-1",
+      kind: "execute",
+      status: "completed"
+    });
+    const content = expanded[1].content as Array<Record<string, unknown>>;
+    expect(content[0]).toEqual({ type: "terminal", terminalId });
+    expect(content.some((item) => item.type === "content")).toBe(true);
+  });
+
+  it("emits in-progress terminal_update without exitStatus", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-2",
+      title: "sleep 1",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "sleep 1" }
+    } as SessionUpdate;
+
+    const [terminal, tool] = expandSessionUpdateToV2(update) as Array<Record<string, unknown>>;
+    expect(terminal).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId: terminalIdForToolCall("cmd-2"),
+      command: "sleep 1"
+    });
+    expect(terminal.exitStatus).toBeUndefined();
+    expect(terminal.output).toBeUndefined();
+    expect(tool).toMatchObject({
+      sessionUpdate: "tool_call_update",
+      status: "in_progress",
+      content: [{ type: "terminal", terminalId: terminalIdForToolCall("cmd-2") }]
     });
   });
 });
