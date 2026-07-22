@@ -318,25 +318,91 @@ export class AgyAcpAgent {
   }
 
   async setConfigOptionV1(
-    params: V1SetSessionConfigOptionRequest
+    params: V1SetSessionConfigOptionRequest,
+    client?: V1AgentContext
   ): Promise<V1SetSessionConfigOptionResponse> {
-    await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
-    return { configOptions: sessionConfigOptionsV1(this.requireSession(params.sessionId)) };
+    const configId = params.configId;
+    const previousMode = this.requireSession(params.sessionId).agy.config.mode;
+    await this.applyConfigOption(params.sessionId, configId, readConfigValue(params));
+    const session = this.requireSession(params.sessionId);
+
+    // Keep native modes UI in sync when mode changes via config option.
+    if (client && configId === MODE_CONFIG_ID && session.agy.config.mode !== previousMode) {
+      await this.notifyCurrentModeUpdate(client, params.sessionId, session.agy.config.mode);
+    }
+
+    return { configOptions: sessionConfigOptionsV1(session) };
   }
 
   async setConfigOptionV2(
     params: V2SetSessionConfigOptionRequest
   ): Promise<V2SetSessionConfigOptionResponse> {
     await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
+    // Draft v2 has no set_mode; the response carries the full option list.
+    // Out-of-band `config_option_update` is emitted on the v1 set_mode path (outside
+    // this RPC) so config UIs stay aligned with native modes.
     return { configOptions: sessionConfigOptionsV2(this.requireSession(params.sessionId)) };
   }
 
   /** @deprecated Prefer setConfigOptionV1. */
   async setConfigOption(
-    params: V1SetSessionConfigOptionRequest
+    params: V1SetSessionConfigOptionRequest,
+    client?: V1AgentContext
   ): Promise<V1SetSessionConfigOptionResponse> {
-    return this.setConfigOptionV1(params);
+    return this.setConfigOptionV1(params, client);
   }
+
+  /**
+   * v1 `session/set_mode`: mirrors the `mode` config option onto agy `--mode`.
+   * Pushes `config_option_update` so clients that only watch config options stay
+   * aligned (set_mode is outside set_config_option).
+   */
+  async setSessionMode(
+    params: SetSessionModeRequest,
+    client: V1AgentContext
+  ): Promise<SetSessionModeResponse> {
+    const previousMode = this.requireSession(params.sessionId).agy.config.mode;
+    await this.applyConfigOption(params.sessionId, MODE_CONFIG_ID, params.modeId);
+    const session = this.requireSession(params.sessionId);
+    const mode = session.agy.config.mode;
+
+    if (mode !== previousMode) {
+      await this.notifyCurrentModeUpdate(client, params.sessionId, mode);
+      await this.notifyConfigOptionUpdateV1(client, params.sessionId, session);
+    }
+
+    return {};
+  }
+
+  private async notifyCurrentModeUpdate(
+    client: V1AgentContext,
+    sessionId: string,
+    mode: AgyExecutionMode
+  ): Promise<void> {
+    await client.notify(v1.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "current_mode_update",
+        currentModeId: mode
+      }
+    });
+  }
+
+  private async notifyConfigOptionUpdateV1(
+    client: V1AgentContext,
+    sessionId: string,
+    session: SessionState
+  ): Promise<void> {
+    await client.notify(v1.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: sessionConfigOptionsV1(session)
+      }
+    });
+  }
+
+
 
   /**
    * v1 prompt lifecycle: response carries stopReason after the full turn.
@@ -722,7 +788,10 @@ export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
     .onRequest(v1.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
     .onRequest(v1.methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.resume, (ctx) => agy.resumeSessionV1(ctx.params))
-    .onRequest(v1.methods.agent.session.setConfigOption, (ctx) => agy.setConfigOptionV1(ctx.params))
+    .onRequest(v1.methods.agent.session.setMode, (ctx) => agy.setSessionMode(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.setConfigOption, (ctx) =>
+      agy.setConfigOptionV1(ctx.params, ctx.client)
+    )
     .onRequest(v1.methods.agent.session.prompt, (ctx) => agy.promptV1(ctx.params, ctx.client, ctx.signal))
     .onRequest(v1.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
     .onNotification(v1.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
