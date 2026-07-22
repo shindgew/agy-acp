@@ -60,8 +60,6 @@ titles all included. `agy-acp` now reads that database directly instead:
 - `session/list` is advertised on both protocol versions,
 - separate ACP session `Model` and `Reasoning Effort` pickers populated from
   `agy models` when available (effort maps to `agy --effort`),
-- an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
-  prompts without editing global Antigravity settings,
 - cancellation sends `SIGINT` (giving `agy` a chance to flush its database
   before exiting), then `SIGKILL` if the process does not exit,
 - `--sandbox` is enabled by default,
@@ -147,11 +145,10 @@ Optional environment variables:
 ## Model Picker
 
 When the ACP client supports session configuration options, `agy-acp` returns
-three options during `session/new`:
+two options during `session/new`:
 
 - `Model`: a select option with ACP category `model`.
 - `Reasoning Effort`: a select option with ACP category `thought_level` (config id `effort`).
-- `Fast Mode`: an `Off`/`On` select option with ACP category `model_config`.
 
 The adapter discovers model choices by running:
 
@@ -184,10 +181,6 @@ Legacy display-name lists (`Gemini 3.5 Flash (Medium)`) are still parsed for
 compatibility. Picker labels stay human-readable (`Gemini 3.5 Flash`,
 `Medium`, …).
 
-Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
-`agy --print` session. This mirrors Antigravity CLI Fast Mode without mutating
-`~/.gemini/antigravity-cli/settings.json`.
-
 ## Session Persistence
 
 `agy-acp` advertises `loadSession: true` and the `resume`/`close`
@@ -216,7 +209,7 @@ conversation database rather than driving agy as a full interactive agent.
 
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
-- [x] `session/set_config_option` (`model`, `effort`, `fast-mode`)
+- [x] `session/set_config_option` (`model`, `effort`)
 - [x] `additionalDirectories` → `agy --add-dir`
 - [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
 - [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
@@ -250,7 +243,7 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [ ] Optional `session/delete` from the session store
 - [ ] `session/fork` if/when useful for clients
 - [ ] Session modes (`session/set_mode`, `modes`, `current_mode_update`) if they map
-      cleanly onto agy — today config options cover model/effort/fast-mode
+      cleanly onto agy — today config options cover model/effort
 - [ ] `available_commands_update` for slash-command discovery in the client UI
 - [ ] Push `config_option_update` when options change outside `set_config_option`
 - [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)
