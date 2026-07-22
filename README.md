@@ -3,11 +3,11 @@
 ACP adapter for Google Antigravity's `agy` CLI.
 
 The implementation is a TypeScript, `npx`-runnable ACP server built on
-`@agentclientprotocol/sdk` that wraps the public `agy --print` command. This
-keeps the adapter aligned with the logged-in Antigravity CLI experience and
-avoids a separate runtime startup path.
+`@agentclientprotocol/sdk` that wraps the public `agy` CLI. It uses a persistent
+interactive `agy` process by default so ACP clients can answer permission
+requests while retaining the logged-in Antigravity CLI experience.
 
-**Current package:** `0.2.6` (`latest`). Supports **ACP v1** and
+**Current package:** `0.2.7` (`latest`). Supports **ACP v1** and
 **experimental draft ACP v2** side by side via version negotiation on
 `initialize`. Draft ACP v2 work continues on the `alpha` dist-tag
 (`1.0.0-alpha.*`). See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
@@ -20,8 +20,8 @@ Draft v2 may still change before stabilization.
 Zed / ACP client
   -> agy-acp dual protocol router (v1 or draft v2 from initialize)
   -> AgyAcpAgent (sessions, config, prompt lifecycle)
-  -> AgyCliSession (spawns agy, tracks --conversation id)
-  -> agy --print --conversation <id> --sandbox ...
+  -> AgyCliSession (keeps an interactive agy PTY, tracks --conversation id)
+  -> agy --prompt-interactive ... --conversation <id> --sandbox ...
        \-> writes to ~/.gemini/antigravity-cli/conversations/<id>.db
   -> StreamPoller polls that SQLite database while agy runs
   -> Translator decodes steps -> ACP session/update notifications
@@ -40,9 +40,10 @@ it runs, with structured (reverse-engineered, since `agy` doesn't publish a
 schema) protobuf step records — tool calls, task/permission/error details, and
 titles all included. `agy-acp` now reads that database directly instead:
 
-- one `agy --print --conversation <id>` subprocess per ACP prompt (the
-  conversation id is learned from the first turn and reused after),
-- stdout is drained but never parsed; a `StreamPoller` polls the conversation
+- one persistent interactive `agy` PTY per ACP session (the conversation id is
+  learned from the first turn and reused after),
+- PTY output is retained only as a bounded diagnostic tail and never parsed as
+  agent output; a `StreamPoller` polls the conversation
   database on an interval while the process runs, translating newly-appended
   steps into ACP updates (`agent_message_chunk`, `agent_thought_chunk`,
   progressive `tool_call` → `tool_call_update`, `session_info_update`, ...)
@@ -58,14 +59,34 @@ titles all included. `agy-acp` now reads that database directly instead:
   choice, etc.) persist to `~/.agy-acp-state/sessions.json` so list/load/resume
   survive a server restart — see `src/session-store.ts`,
 - `session/list` is advertised on both protocol versions,
-- separate ACP session `Model` and `Reasoning Effort` pickers populated from
-  `agy models` when available (effort maps to `agy --effort`),
-- an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
-  prompts without editing global Antigravity settings,
+- ACP session config options in order: `mode`, `model`, `reasoningEffort`
+  (mode → `agy --mode`; model → `agy --model`; reasoningEffort → `agy --effort`),
 - cancellation sends `SIGINT` (giving `agy` a chance to flush its database
   before exiting), then `SIGKILL` if the process does not exit,
 - `--sandbox` is enabled by default,
 - `--dangerously-skip-permissions` is opt-in only.
+
+### Interactive permission bridge
+
+The adapter runs agy in a persistent PTY by default and forwards its permission
+menu through ACP. The bridge is coupled to the observed **agy 1.1.5**
+TUI/database behavior. It offers **Yes** (once), allow for this conversation,
+always allow (writes `settings.json`), and **No** (once). “Conversation” means
+the lifetime of the same interactive agy process. Cancellation or changing
+model/mode restarts that process before the next turn, resumes the conversation
+database, and resets process-scoped grants. PTY output is retained only as a
+bounded diagnostic tail and is never sent to stdout.
+
+Passing `--dangerously-skip-permissions` (or setting its environment equivalent)
+turns off the interactive bridge and uses `agy --print` because agy auto-approves
+instead of presenting permission requests in that mode.
+For troubleshooting or compatibility with another agy version, set
+`AGY_ACP_INTERACTIVE_PERMISSIONS=0` or pass `--no-interactive-permissions` to use
+print mode without auto-approval.
+
+Only the four-choice permission menu for `run_command` is currently bridged.
+Other requested interactions, including `ask_question`, fail closed with an
+unsupported-interaction error; the bridge does not send guessed menu keys.
 
 The conversation-database wire format (`src/db/step-payload.ts`,
 `src/db/columns.ts`) was cross-referenced against the reverse-engineering
@@ -98,7 +119,7 @@ node dist/main.js
 Published package / Zed:
 
 ```sh
-npx agy-acp                 # latest stable (0.2.5)
+npx agy-acp                 # latest stable (0.2.7)
 npx agy-acp@alpha           # latest alpha pre-release channel
 npx agy-acp@1.0.0-alpha.0   # pin a specific pre-release
 ```
@@ -143,15 +164,57 @@ Optional environment variables:
   if `agy` uses a different path on your OS.
 - `AGY_ACP_STATE_DIR`: where `agy-acp` persists session bindings (for
   `session/load`/`session/resume`), default `~/.agy-acp-state`.
+- `AGY_ACP_MODE`: default execution mode for new sessions (`default`,
+  `accept-edits`, or `plan`). Overridden by the session Mode picker or the
+  `agy-acp --mode <value>` argv flag.
+- `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS`: when set, passes
+  `--dangerously-skip-permissions` to `agy` (auto-approve tool permissions) and
+  selects non-interactive print mode instead of the default permission bridge.
+- `AGY_ACP_INTERACTIVE_PERMISSIONS=0`: disables the default permission bridge
+  and uses non-interactive print mode. The equivalent argv flag is
+  `--no-interactive-permissions`.
+
+### File writes denied in Zed?
+
+Under `agy --print` (agy ≥ 1.1.3), tools that need interactive confirmation are
+**soft-denied** rather than prompting a TTY. Messages like
+`User denied permission for write_file(...)` usually mean agy refused the tool —
+not that the ACP client blocked the editor filesystem.
+
+Workarounds (prefer earlier ones):
+
+1. Set session **Mode** to **Accept Edits** (`accept-edits`), or start with
+   `AGY_ACP_MODE=accept-edits` / `agy-acp --mode accept-edits`.
+2. Allowlist tools in `~/.gemini/antigravity-cli/settings.json` under
+   `permissions.allow` (agy honors this in print mode as of 1.1.1–1.1.4).
+3. As a broad auto-approve fallback, opt in to
+   `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS=1` or
+   `--dangerously-skip-permissions` (broad auto-approve).
+
+Interactive `session/request_permission` is available experimentally for the
+observed four-choice `run_command` menu. Other agy interaction types remain
+post-hoc in print mode; interactive mode fails closed on them because their TUI
+layouts and response channels have not been verified.
 
 ## Model Picker
 
 When the ACP client supports session configuration options, `agy-acp` returns
-three options during `session/new`:
+three options during `session/new` (this order). Wire **ids** are stable;
+**names** are human-facing labels in the client UI:
 
-- `Model`: a select option with ACP category `model`.
-- `Reasoning Effort`: a select option with ACP category `thought_level` (config id `effort`).
-- `Fast Mode`: an `Off`/`On` select option with ACP category `model_config`.
+| Order | id | name | Category |
+|---|---|---|---|
+| 1 | `mode` | Mode | `mode` |
+| 2 | `model` | Model | `model` |
+| 3 | `reasoningEffort` | Reasoning Effort | `thought_level` |
+
+`mode` values:
+
+- `default` — agy request-review behavior (omits `--mode`; write tools may soft-deny under `--print`)
+- `accept-edits` — `agy --mode accept-edits` (apply file edits without interactive write review)
+- `plan` — `agy --mode plan`
+
+`reasoningEffort` maps to `agy --effort`.
 
 The adapter discovers model choices by running:
 
@@ -184,10 +247,6 @@ Legacy display-name lists (`Gemini 3.5 Flash (Medium)`) are still parsed for
 compatibility. Picker labels stay human-readable (`Gemini 3.5 Flash`,
 `Medium`, …).
 
-Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
-`agy --print` session. This mirrors Antigravity CLI Fast Mode without mutating
-`~/.gemini/antigravity-cli/settings.json`.
-
 ## Session Persistence
 
 `agy-acp` advertises `loadSession: true` and the `resume`/`close`
@@ -216,7 +275,7 @@ conversation database rather than driving agy as a full interactive agent.
 
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
-- [x] `session/set_config_option` (`model`, `effort`, `fast-mode`)
+- [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`)
 - [x] `additionalDirectories` → `agy --add-dir`
 - [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
 - [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
@@ -228,15 +287,16 @@ conversation database rather than driving agy as a full interactive agent.
 - [x] Decode/show fetch and web-search result bodies when present in the DB
       (search_web hit lists are not persisted by agy; query metadata only)
 - [x] Full-file write diffs with prior content when known from earlier view/write steps
-- [x] Permission notes map decision varint to granted/denied labels (still not interactive)
+- [x] Permission notes map decision varint to granted/denied labels
+- [x] Experimental four-choice `run_command` permission bridge via persistent PTY
 
 ### High priority
 
 These need more than conversation-DB polling (interactive agy control plane or
 client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
-- [ ] Interactive `session/request_permission` (today: post-hoc granted/denied text;
-      agy still owns allow/deny under `--print`)
+- [ ] Expand interactive `session/request_permission` beyond the verified
+      `run_command` menu (unsupported status-9 interactions currently fail closed)
 - [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
       prose tool content with Plan titles — not ACP plan updates)
 - [ ] Client terminals: `type: "terminal"` content + `terminal/*` (today: execute tools
@@ -249,8 +309,8 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
 - [ ] Optional `session/delete` from the session store
 - [ ] `session/fork` if/when useful for clients
-- [ ] Session modes (`session/set_mode`, `modes`, `current_mode_update`) if they map
-      cleanly onto agy — today config options cover model/effort/fast-mode
+- [ ] Native ACP session modes (`session/set_mode`, `modes`, `current_mode_update`)
+      in addition to the `mode` config option that already maps to `agy --mode`
 - [ ] `available_commands_update` for slash-command discovery in the client UI
 - [ ] Push `config_option_update` when options change outside `set_config_option`
 - [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)

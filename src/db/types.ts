@@ -9,8 +9,9 @@ export type StepRow = {
   stepType: number;
   /**
    * agy step status enum (from the `status` column):
-   *   2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed.
-   * Mapped to ACP tool_call status by `toolCallStatus` in updates/utils.
+   *   1/2 = active, 3 = completed, 6 = cancelled/aborted, 7 = failed,
+   *   9 = RequestedInteraction (generic; not necessarily a permission menu).
+   * Only status-9 run_command rows are currently bridged to ACP permissions.
    */
   status: number;
   stepPayload: StepPayload;

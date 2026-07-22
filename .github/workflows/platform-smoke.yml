@@ -74,3 +74,21 @@ jobs:
       - name: Run ACP initialize smoke test
         shell: bash
         run: node scripts/smoke-install.mjs "$RUNNER_TEMP/install-check/node_modules/agy-acp/dist/main.js"
+
+      - name: Smoke test node-pty
+        shell: bash
+        working-directory: ${{ runner.temp }}/install-check
+        run: |
+          node --input-type=module <<'EOF'
+          import { defaultPtyFactory } from 'agy-acp/dist/cli.js';
+          const { spawn } = await defaultPtyFactory();
+          const windows = process.platform === 'win32';
+          const child = spawn(windows ? 'cmd.exe' : '/bin/sh', windows ? ['/c', 'echo node-pty-ok'] : ['-c', 'echo node-pty-ok'], {
+            cwd: process.cwd(), env: process.env, cols: 80, rows: 24
+          });
+          let output = '';
+          child.onData(data => output += data);
+          child.onExit(({ exitCode }) => {
+            if (exitCode !== 0 || !output.includes('node-pty-ok')) process.exit(1);
+          });
+          EOF

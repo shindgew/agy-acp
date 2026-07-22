@@ -27,9 +27,12 @@ export interface StoredSession {
   workspaces: string[];
   conversationId: string | null;
   lastStepIdx: number;
-  modelId: string;
-  reasoningEffect: string;
-  fastMode: boolean;
+  /** Matches ACP config option `model` (base slug for agy --model). */
+  model: string;
+  /** Matches ACP config option `reasoningEffort` (maps to agy --effort). */
+  reasoningEffort: string;
+  /** Matches ACP config option `mode` (`default` | `accept-edits` | `plan`). Absent on older store files. */
+  mode?: string;
   updatedAt: string;
 }
 
@@ -75,9 +78,13 @@ export class SessionStore {
   private async load(): Promise<DiskStore> {
     try {
       const parsed = JSON.parse(await fs.promises.readFile(this.file, "utf-8")) as {
-        sessions?: Record<string, StoredSession>;
+        sessions?: Record<string, LegacyStoredSession>;
       };
-      return { sessions: parsed.sessions ?? {} };
+      const sessions: Record<string, StoredSession> = {};
+      for (const [id, raw] of Object.entries(parsed.sessions ?? {})) {
+        sessions[id] = normalizeStoredSession(raw);
+      }
+      return { sessions };
     } catch {
       return { sessions: {} };
     }
@@ -91,6 +98,27 @@ export class SessionStore {
     await fs.promises.writeFile(tmp, JSON.stringify(store, null, 2));
     await fs.promises.rename(tmp, this.file);
   }
+}
+
+/** Legacy disk keys from older agy-acp builds. */
+type LegacyStoredSession = Partial<StoredSession> & {
+  modelId?: string;
+  reasoningEffect?: string;
+};
+
+/** Map legacy disk keys (`modelId`, `reasoningEffect`) to current field names. */
+function normalizeStoredSession(raw: LegacyStoredSession): StoredSession {
+  const { modelId, reasoningEffect, ...rest } = raw;
+  return {
+    cwd: rest.cwd ?? "",
+    workspaces: rest.workspaces ?? [],
+    conversationId: rest.conversationId ?? null,
+    lastStepIdx: rest.lastStepIdx ?? -1,
+    model: rest.model ?? modelId ?? "",
+    reasoningEffort: rest.reasoningEffort ?? reasoningEffect ?? "",
+    mode: rest.mode,
+    updatedAt: rest.updatedAt ?? new Date(0).toISOString()
+  };
 }
 
 function optional(value: string | undefined): string | undefined {
