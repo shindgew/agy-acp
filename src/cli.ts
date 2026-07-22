@@ -34,7 +34,6 @@ export interface AgyCliConfig {
   model?: string;
   /** Value for `--effort` (`low` | `medium` | `high`), when applicable. */
   effort?: string;
-  fastMode: boolean;
   project?: string;
   printTimeout: string;
   sandbox: boolean;
@@ -126,19 +125,14 @@ export class AgyCliSession {
     this.config.effort = effort;
   }
 
-  setFastMode(enabled: boolean): void {
-    this.config.fastMode = enabled;
-  }
-
   commandForPrompt(prompt: string): string[] {
-    const effectivePrompt = this.effectivePrompt(prompt);
     const command = [
       this.config.agyPath,
       "--print"
     ];
 
     if (this.config.promptInArgv) {
-      command.push(effectivePrompt);
+      command.push(prompt);
     }
 
     command.push("--print-timeout", this.config.printTimeout);
@@ -185,21 +179,16 @@ export class AgyCliSession {
    * trailing polls have drained any steps flushed right around exit.
    */
   async prompt(prompt: string, onUpdate: (update: SessionUpdate) => Promise<void>): Promise<AgyPromptOutcome> {
-    const effectivePrompt = this.effectivePrompt(prompt);
     const command = this.commandForPrompt(prompt);
     try {
-      return await this.runPromptCommand(command, effectivePrompt, onUpdate);
+      return await this.runPromptCommand(command, prompt, onUpdate);
     } catch (error) {
       if (this.shouldInstallAfterError(error)) {
         await this.installAgy();
-        return await this.runPromptCommand(this.commandForPrompt(prompt), effectivePrompt, onUpdate);
+        return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate);
       }
       throw error;
     }
-  }
-
-  private effectivePrompt(prompt: string): string {
-    return this.config.fastMode ? `/fast\n${prompt}` : prompt;
   }
 
   private async runPromptCommand(
@@ -498,7 +487,6 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     agyPath: "agy",
     model: undefined,
     effort: undefined,
-    fastMode: false,
     project: undefined,
     printTimeout: "5m0s",
     sandbox,

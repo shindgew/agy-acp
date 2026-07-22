@@ -181,28 +181,6 @@ describe("prompt", () => {
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).not.toBe("hello");
   });
 
-  it("prepends the transient /fast command in fast mode", async () => {
-    const fake = new FakeProcess(["ok"]);
-    const calls: SpawnCall[] = [];
-    const session = new AgyCliSession({ ...defaultConfig(), fastMode: true }, fake.spawnFactory(calls));
-
-    await collectUpdates(session, "hello");
-
-    expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).toBe("/fast\nhello");
-  });
-
-  it("prefixes stdin prompts when prompt argv is disabled in fast mode", async () => {
-    const fake = new FakeProcess(["ok"]);
-    const session = new AgyCliSession(
-      { ...defaultConfig(), fastMode: true, promptInArgv: false },
-      fake.spawnFactory([])
-    );
-
-    await collectUpdates(session, "hello");
-
-    expect(fake.stdinText).toBe("/fast\nhello");
-  });
-
   it("binds the conversation id agy creates, then passes --conversation on the next turn", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-test-"));
     try {
@@ -309,7 +287,6 @@ function defaultConfig(): AgyCliConfig {
     workspaces: ["/repo"],
     agyPath: "agy",
     printTimeout: "5m0s",
-    fastMode: false,
     effort: undefined,
     sandbox: true,
     skipPermissions: false,
