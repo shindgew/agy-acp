@@ -55,7 +55,7 @@ import {
 import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
-import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
+import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
 
 /** Prefer re-exporting stable v1 symbols used by existing tests and consumers. */
 export const methods = v1.methods;
@@ -293,10 +293,12 @@ export class AgyAcpAgent {
       }
       if (stored.conversationId) {
         await this.replayConversation(params.sessionId, session, stored.conversationId, cwd, async (update) => {
-          await client.notify(v2.methods.client.session.update, {
-            sessionId: params.sessionId,
-            update: sessionUpdateToV2(update)
-          });
+          for (const v2Update of expandSessionUpdateToV2(update)) {
+            await client.notify(v2.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: v2Update
+            });
+          }
         });
       }
     }
@@ -561,10 +563,17 @@ export class AgyAcpAgent {
 
       try {
         const outcome = await session.agy.prompt(promptText, async (update) => {
-          await notify(sessionUpdateToV2(update));
+          for (const v2Update of expandSessionUpdateToV2(update)) {
+            await notify(v2Update);
+          }
         }, async (toolCall) => {
           if (signal.aborted) return "cancelled";
-          const converted = sessionUpdateToV2(toolCall) as unknown as Record<string, unknown>;
+          // Permission subject uses the tool_call_update only (skip terminal_update).
+          const expanded = expandSessionUpdateToV2(toolCall);
+          const converted = (expanded.find((item) => {
+            const kind = (item as unknown as { sessionUpdate?: string }).sessionUpdate;
+            return kind === "tool_call_update" || kind === "tool_call";
+          }) ?? sessionUpdateToV2(toolCall)) as unknown as Record<string, unknown>;
           const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
           const response = await racePermissionCancellation(client.request(v2.methods.client.session.requestPermission, {
             sessionId: params.sessionId,
