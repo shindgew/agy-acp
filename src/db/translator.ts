@@ -45,7 +45,7 @@ function thoughtChunk(text: string, messageId: string): SessionUpdate {
   };
 }
 
-/** Stable signature of a tool/thought update for progressive re-emission. */
+/** Stable signature of a tool/plan/thought update for progressive re-emission. */
 function updateSnapshot(update: SessionUpdate): string {
   const raw = update as unknown as Record<string, unknown>;
   return JSON.stringify({
@@ -59,6 +59,10 @@ function updateSnapshot(update: SessionUpdate): string {
     rawInput: raw.rawInput,
     rawOutput: raw.rawOutput,
     messageId: raw.messageId,
+    entries: raw.entries,
+    plan: raw.plan,
+    planId: raw.planId,
+    _meta: raw._meta,
     text: raw.content && typeof raw.content === "object" ? (raw.content as { text?: string }).text : undefined
   });
 }
@@ -154,8 +158,9 @@ export class Translator {
   }
 
   /**
-   * Emit a tool/thought update, converting subsequent emissions for the same
-   * step idx into `tool_call_update` when the snapshot changes.
+   * Emit a tool/plan/thought update. Tools re-emit as `tool_call_update` when
+   * the snapshot changes; plans re-emit as a full `plan` replacement when the
+   * markdown-derived entries change. Unrelated update kinds pass through.
    */
   private emitProgressive(stepIdx: number, update: SessionUpdate, out: SessionUpdate[]): void {
     const raw = update as unknown as Record<string, unknown>;
@@ -163,6 +168,15 @@ export class Translator {
 
     if (kind === "agent_thought_chunk") {
       this.emitThought(update, out);
+      return;
+    }
+
+    if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
+      const snapshot = updateSnapshot(update);
+      const previous = this.toolSnapshots.get(stepIdx);
+      if (previous === snapshot) return;
+      this.toolSnapshots.set(stepIdx, snapshot);
+      out.push(update);
       return;
     }
 
