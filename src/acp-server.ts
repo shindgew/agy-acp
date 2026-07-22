@@ -355,13 +355,13 @@ export class AgyAcpAgent {
           sessionId: params.sessionId,
           update: sessionUpdateToV1(update)
         });
-      }, async (toolCall) => {
+      }, async (toolCall, { toolName }) => {
         if (signal?.aborted) return "cancelled";
         const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
         const response = await racePermissionCancellation(client.request(v1.methods.client.session.requestPermission, {
           sessionId: params.sessionId,
           toolCall: requestToolCall as v1.ToolCallUpdate,
-          options: permissionOptions(toolCall)
+          options: permissionOptions(toolCall, toolName)
         }), signal);
         return selectedPermission(response, signal);
       });
@@ -566,7 +566,7 @@ export class AgyAcpAgent {
           for (const v2Update of expandSessionUpdateToV2(update)) {
             await notify(v2Update);
           }
-        }, async (toolCall) => {
+        }, async (toolCall, { toolName }) => {
           if (signal.aborted) return "cancelled";
           // Permission subject uses the tool_call_update only (skip terminal_update).
           const expanded = expandSessionUpdateToV2(toolCall);
@@ -579,7 +579,7 @@ export class AgyAcpAgent {
             sessionId: params.sessionId,
             title: String(requestToolCall.title ?? "Permission required"),
             subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
-            options: permissionOptions(toolCall)
+            options: permissionOptions(toolCall, toolName)
           }), signal);
           return selectedPermission(response, signal);
         });
@@ -761,8 +761,22 @@ function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermiss
   const outcome = (response as { outcome?: unknown }).outcome;
   if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
   const id = (outcome as { optionId?: string }).optionId;
-  return id === "agy-allow-once" || id === "agy-allow-conversation" || id === "agy-allow-settings" || id === "agy-reject-once"
-    ? id : "cancelled";
+  if (typeof id !== "string" || !id.trim()) return "cancelled";
+  // Standard ACP ids, legacy agy-* ids, and ask_question option ids.
+  if (
+    id === "allow-once" ||
+    id === "allow-always" ||
+    id === "reject-once" ||
+    id === "agy-allow-once" ||
+    id === "agy-allow-conversation" ||
+    id === "agy-allow-settings" ||
+    id === "agy-reject-once" ||
+    id === "agy-q-skip" ||
+    /^agy-q-\d+$/.test(id)
+  ) {
+    return id;
+  }
+  return "cancelled";
 }
 
 async function racePermissionCancellation<T>(request: Promise<T>, signal?: AbortSignal): Promise<T | null> {
