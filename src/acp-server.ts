@@ -43,6 +43,7 @@ import type {
   SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./db/replay.js";
+import type { EditFsBridge } from "./edit-fs-bridge.js";
 import { ensureAgyInstalled } from "./installer.js";
 import {
   AgyCliBackend,
@@ -131,6 +132,8 @@ export class AgyAcpAgent {
   readonly #store: SessionStore;
   readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
   #ensureAgyPromise: Promise<string | null> | undefined;
+  /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
+  #clientFs = { readTextFile: false, writeTextFile: false };
 
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -141,6 +144,10 @@ export class AgyAcpAgent {
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
+    this.#clientFs = {
+      readTextFile: params.clientCapabilities?.fs?.readTextFile ?? false,
+      writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
+    };
     return {
       protocolVersion:
         params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
@@ -206,6 +213,24 @@ export class AgyAcpAgent {
       warn: (message) => console.error(message)
     });
     return this.#ensureAgyPromise;
+  }
+
+  /**
+   * When the client advertises `fs.readTextFile` + `fs.writeTextFile`, route
+   * already-applied edits through those methods so the client's own
+   * diff/review UI (e.g. Zed's Review Changes panel) tracks them. Draft v2
+   * has no fs/* client methods, so this is v1-only.
+   */
+  private editFsBridgeV1(client: V1AgentContext, sessionId: string): EditFsBridge | undefined {
+    if (!this.#clientFs.readTextFile || !this.#clientFs.writeTextFile) return undefined;
+    return {
+      readTextFile: async (path) => {
+        await client.request(v1.methods.client.fs.readTextFile, { sessionId, path });
+      },
+      writeTextFile: async (path, content) => {
+        await client.request(v1.methods.client.fs.writeTextFile, { sessionId, path, content });
+      }
+    };
   }
 
   async newSessionV1(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
@@ -441,7 +466,7 @@ export class AgyAcpAgent {
           options: permissionOptions(toolCall, toolName)
         }), signal);
         return selectedPermission(response, signal);
-      });
+      }, this.editFsBridgeV1(client, params.sessionId));
       await this.persistSession(params.sessionId, session);
       return {
         stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
