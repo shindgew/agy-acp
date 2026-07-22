@@ -8,6 +8,7 @@ import * as installer from "../src/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import {
+  AgyAcpAgent,
   buildModelCatalog,
   createAgyAcpApp,
   createAgyAcpV2App,
@@ -16,7 +17,7 @@ import {
   reasoningEffectConfigOption,
   toModelSlug
 } from "../src/acp-server.js";
-import type { SpawnFactory } from "../src/cli.js";
+import type { PtyFactory, SpawnFactory } from "../src/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import {
@@ -58,6 +59,148 @@ describe("initialize", () => {
       installSpy.mockRestore();
       connection.close();
     }
+  });
+});
+
+describe("editFsBridgeV1", () => {
+  type FsBridgeAgent = {
+    editFsBridgeV1(
+      client: { request: (...args: unknown[]) => Promise<unknown> },
+      sessionId: string
+    ): { readTextFile(path: string): Promise<void>; writeTextFile(path: string, content: string): Promise<void> } | undefined;
+  };
+
+  it("is undefined when the client doesn't advertise both fs capabilities", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const agent = new AgyAcpAgent();
+    await agent.initializeV1({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: true } } });
+    const bridge = (agent as unknown as FsBridgeAgent).editFsBridgeV1({ request: vi.fn() }, "s1");
+    expect(bridge).toBeUndefined();
+    vi.restoreAllMocks();
+  });
+
+  it("routes read/write through client.request with fs/read_text_file and fs/write_text_file", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const agent = new AgyAcpAgent();
+    await agent.initializeV1({
+      protocolVersion: PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
+    });
+    const request = vi.fn().mockResolvedValue({});
+    const bridge = (agent as unknown as FsBridgeAgent).editFsBridgeV1({ request }, "s1")!;
+    expect(bridge).toBeDefined();
+
+    await bridge.readTextFile("/repo/a.txt");
+    expect(request).toHaveBeenCalledWith(methods.client.fs.readTextFile, { sessionId: "s1", path: "/repo/a.txt" });
+
+    await bridge.writeTextFile("/repo/a.txt", "new content");
+    expect(request).toHaveBeenCalledWith(methods.client.fs.writeTextFile, {
+      sessionId: "s1",
+      path: "/repo/a.txt",
+      content: "new content"
+    });
+    vi.restoreAllMocks();
+  });
+});
+
+class FakePty {
+  writes: string[] = [];
+  killed = false;
+  private dataListeners: Array<(data: string) => void> = [];
+  private exitListeners: Array<(event: { exitCode: number }) => void> = [];
+  constructor(private readonly onSpawn?: (pty: FakePty) => void) {}
+  start() {
+    this.onSpawn?.(this);
+    queueMicrotask(() => this.emitData("? for shortcuts"));
+  }
+  write(data: string) { this.writes.push(data); }
+  kill() { this.killed = true; for (const listener of this.exitListeners) listener({ exitCode: 0 }); }
+  onData(listener: (data: string) => void) { this.dataListeners.push(listener); return { dispose() {} }; }
+  onExit(listener: (event: { exitCode: number }) => void) { this.exitListeners.push(listener); return { dispose() {} }; }
+  emitData(data: string) { for (const listener of this.dataListeners) listener(data); }
+}
+
+describe("edit fs write-through (full ACP round trip)", () => {
+  it("routes an already-applied edit through fs/read_text_file + fs/write_text_file instead of session/request_permission", async () => {
+    await withConversationsDir(async (dir) => {
+      const targetFile = path.join(dir, "target.txt");
+      fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+      const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+
+      const pty = new FakePty((self) => {
+        const db = createConversationDb(dir, "fs-bridge-e2e");
+        insertStep(db, {
+          idx: 1,
+          stepType: 5,
+          status: 3,
+          stepPayload: encodeStepPayload({
+            toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+          })
+        });
+        db.close();
+        setTimeout(async () => {
+          const Database = (await import("better-sqlite3")).default;
+          const db2 = new Database(path.join(dir, "fs-bridge-e2e.db"));
+          insertStep(db2, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+          db2.close();
+          self.emitData("? for shortcuts");
+        }, 300);
+      });
+
+      const readCalls: string[] = [];
+      const writeCalls: Array<{ path: string; content: string }> = [];
+      let permissionCalls = 0;
+
+      const testClient = acpClient({ name: "test-client" })
+        .onRequest(methods.client.fs.readTextFile, (ctx) => {
+          readCalls.push(ctx.params.path);
+          return { content: fs.readFileSync(ctx.params.path, "utf8") };
+        })
+        .onRequest(methods.client.fs.writeTextFile, (ctx) => {
+          writeCalls.push({ path: ctx.params.path, content: ctx.params.content });
+          fs.writeFileSync(ctx.params.path, ctx.params.content, "utf8");
+          return {};
+        })
+        .onRequest(methods.client.session.requestPermission, () => {
+          permissionCalls++;
+          return { outcome: { outcome: "selected", optionId: "allow-once" } };
+        })
+        .onNotification(methods.client.session.update, () => {});
+
+      const connection = testClient.connect(createAgyAcpApp({
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: ((_command: string, args: string[]) => {
+          if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+          return new FakeProcess([]);
+        }) as unknown as SpawnFactory,
+        ptyFactory: { spawn: () => { pty.start(); return pty; } } as unknown as PtyFactory
+      }));
+
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: dir,
+          additionalDirectories: [],
+          mcpServers: []
+        });
+
+        const response = await connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "edit it" }]
+        });
+
+        expect(response.stopReason).toBe("end_turn");
+        expect(permissionCalls).toBe(0);
+        expect(readCalls).toEqual([targetFile]);
+        expect(writeCalls).toEqual([{ path: targetFile, content: "before\nNEW\nafter" }]);
+        expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nNEW\nafter");
+      } finally {
+        connection.close();
+      }
+    });
   });
 });
 
