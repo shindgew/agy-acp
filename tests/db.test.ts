@@ -10,9 +10,13 @@ import { createConversationDb, insertStep, updateStep, updateStepPayload } from 
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodePermissions,
   encodeStepPayload,
   encodeToolCall,
-  encodeToolRun
+  encodeToolRun,
+  encodeUrlContentResult,
+  encodeViewFileResult,
+  encodeWebSearchResult
 } from "./fixtures/step-encoder.js";
 
 let dir: string;
@@ -267,6 +271,292 @@ describe("Translator", () => {
     expect(update.rawOutput).toMatchObject({ exitCode: 0, output: "README.md\n" });
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("README.md");
+  });
+
+  it("surfaces web search query metadata from field 42", () => {
+    const db = createConversationDb(dir, "conv-web-search");
+    insertStep(db, {
+      idx: 1,
+      stepType: 33,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "ws-1",
+            namePrimary: "search_web",
+            rawInputJson: '{"query":"agy acp adapter"}'
+          })
+        }),
+        webSearch: encodeWebSearchResult({
+          query: "agy acp adapter",
+          refinedQueryOrUrl: "https://www.google.com/search?q=agy+acp+adapter"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-web-search")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      kind: string;
+      title: string;
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.kind).toBe("search");
+    expect(update.title).toContain("agy acp adapter");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("Query: agy acp adapter");
+    expect(body).toContain("https://www.google.com/search");
+  });
+
+  it("surfaces fetched URL body from field 40", () => {
+    const db = createConversationDb(dir, "conv-fetch");
+    insertStep(db, {
+      idx: 1,
+      stepType: 31,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "fetch-1",
+            namePrimary: "read_url_content",
+            rawInputJson: '{"Url":"https://example.com/doc"}'
+          })
+        }),
+        urlContent: encodeUrlContentResult({
+          url: "https://example.com/doc",
+          title: "Example Doc",
+          description: "Fetched live",
+          body: "# Hello\n\nBody from the page."
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-fetch")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      kind: string;
+      title: string;
+      rawOutput?: { title?: string; truncated?: boolean };
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.kind).toBe("fetch");
+    expect(update.title).toBe("Fetch Example Doc");
+    expect(update.rawOutput).toMatchObject({ title: "Example Doc" });
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("https://example.com/doc");
+    expect(body).toContain("Body from the page.");
+  });
+
+  it("uses prior view_file content as oldText on full-file writes", () => {
+    const db = createConversationDb(dir, "conv-write-diff");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-1",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"/repo/a.ts"}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///repo/a.ts",
+          content: "export const x = 1;\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "/repo/a.ts",
+              CodeContent: "export const x = 2;\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-diff")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: "/repo" });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-1"
+    ) as {
+      content?: Array<{ type?: string; path?: string; oldText?: string | null; newText?: string }>;
+    };
+    expect(write).toBeTruthy();
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({
+      type: "diff",
+      path: "/repo/a.ts",
+      oldText: "export const x = 1;\n",
+      newText: "export const x = 2;\n"
+    });
+  });
+
+  it("does not use ranged view_file slices as oldText for full-file writes", () => {
+    const db = createConversationDb(dir, "conv-write-ranged");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-range",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"/repo/a.ts","StartLine":10,"EndLine":20}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///repo/a.ts",
+          startLine: 10,
+          endLine: 20,
+          content: "partial slice\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "/repo/a.ts",
+              CodeContent: "full file\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-ranged")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-2"
+    ) as {
+      content?: Array<{ type?: string; oldText?: string | null; newText?: string }>;
+    };
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({ oldText: null, newText: "full file\n" });
+  });
+
+  it("labels permission decisions as granted or denied", () => {
+    const db = createConversationDb(dir, "conv-perm");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-deny",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"rm -rf /"}'
+          })
+        })
+      }),
+      permissions: encodePermissions({ kind: "command", value: "rm -rf /", decision: 0 })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-ok",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls"}'
+          })
+        })
+      }),
+      permissions: encodePermissions({ kind: "unsandboxed", value: "ls", decision: 1 })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-perm")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    const texts = updates.map((u) =>
+      ((u as { content?: Array<{ content?: { text?: string } }> }).content ?? [])
+        .map((c) => c.content?.text ?? "")
+        .join("\n")
+    );
+    expect(texts[0]).toContain("Permission denied: command (rm -rf /)");
+    expect(texts[1]).toContain("Permission granted: unsandboxed (ls)");
+  });
+
+  it("presents brain plan writes as Plan titles with prose content", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "# Plan\n\n1. Do the thing\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      title: string;
+      content?: Array<{ type?: string; content?: { text?: string } }>;
+    };
+    expect(update.title).toBe("implementation_plan.md");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("# Plan");
+    expect((update.content ?? []).some((c) => c.type === "diff")).toBe(false);
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {

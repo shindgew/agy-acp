@@ -16,6 +16,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { filterNarration, isNarration } from "./narration.js";
+import type { FileContentCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 import { buildUpdatefromStepPayload } from "./updates.js";
 
@@ -76,6 +77,8 @@ export class Translator {
   private readonly thoughtTextLengths = new Map<string, number>();
   // Stream + replay: last emitted snapshot keyed by step idx (tool progressive lifecycle).
   private readonly toolSnapshots = new Map<number, string>();
+  // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
+  private readonly fileContents: FileContentCache = new Map();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
   private readonly pendingAgentParts: string[] = [];
   // Replay: message id for the current buffered agent-text group.
@@ -139,7 +142,10 @@ export class Translator {
   }
 
   private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
-    const update = buildUpdatefromStepPayload(row, this.opts.cwd);
+    const update = buildUpdatefromStepPayload(row, {
+      cwd: this.opts.cwd,
+      fileContents: this.fileContents
+    });
     if (Array.isArray(update)) {
       for (const item of update) this.emitProgressive(row.idx, item, out);
     } else if (update) {

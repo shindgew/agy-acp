@@ -9,6 +9,30 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-07-22
+
+Stable ACP v1 fidelity release: richer tool result bodies and better editor diffs,
+without interactive permission / terminal / MCP control-plane work (still blocked
+on wrapping `agy --print`).
+
+### Added
+
+- Decode `search_web` result metadata (step field 42): query and refined query /
+  search URL when present. Hit lists are not persisted by agy.
+- Decode `read_url_content` results (step field 40): URL, title, description, and
+  body text (truncated for display) plus optional brain `contentPath`.
+- Full-file write diffs use prior `view_file` / write content as `oldText` when
+  the same translator pass has seen that path (stream + full replay).
+
+### Changed
+
+- Permission notes label outcomes from the decision varint (`granted` / `denied`
+  instead of only “requested”).
+- Brain plan artifact writes use clearer `Plan:` titles when the filename does
+  not already contain “plan”.
+- Fetch titles prefer the URL when agy only stores the generic “Live Content”
+  label; full-file write cache ignores ranged `view_file` slices.
+
 ## [0.2.5] - 2026-07-22
 
 Stable release focused on ACP v1 editor UX. Dual-protocol draft ACP v2 support
