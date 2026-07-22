@@ -19,7 +19,13 @@ import {
   type SpawnFactory,
   type SpawnOptions
 } from "../src/cli.js";
-import { permissionKeys, permissionOptions } from "../src/permissions.js";
+import {
+  canBridgeInteraction,
+  interactionKeys,
+  isBridgeablePermissionTool,
+  permissionKeys,
+  permissionOptions
+} from "../src/permissions.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
@@ -108,6 +114,51 @@ describe("permission bridge", () => {
       { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow for commands that start with 'whoami' (Persist to settings.json)" },
       { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
     ]);
+    expect(permissionOptions({
+      sessionUpdate: "tool_call",
+      toolCallId: "y",
+      title: "Edit src/cli.ts",
+      kind: "edit",
+      status: "pending",
+      rawInput: { TargetFile: "/repo/src/cli.ts" }
+    }, "replace_file_content")).toEqual([
+      { optionId: "allow-once", kind: "allow_once", name: "Allow" },
+      { optionId: "allow-always", kind: "allow_always", name: "Always allow" },
+      { optionId: "reject-once", kind: "reject_once", name: "Reject" }
+    ]);
+    expect(interactionKeys("allow-once", "replace_file_content")).toBe("\r");
+    expect(interactionKeys("reject-once", "replace_file_content")).toBe("\x1b[B\x1b[B\x1b[B\r");
+    expect(isBridgeablePermissionTool("run_command")).toBe(true);
+    expect(isBridgeablePermissionTool("replace_file_content")).toBe(true);
+    expect(isBridgeablePermissionTool("write_to_file")).toBe(true);
+    expect(isBridgeablePermissionTool("view_file")).toBe(true);
+    expect(isBridgeablePermissionTool("ask_question")).toBe(false);
+
+    const askCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q1",
+      title: "Pick one",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [{
+          question: "Which approach?",
+          options: ["Option A", "Option B", "Option C"],
+          is_multi_select: false
+        }]
+      }
+    };
+    expect(canBridgeInteraction("ask_question", askCall)).toBe(true);
+    expect(permissionOptions(askCall, "ask_question")).toEqual([
+      { optionId: "agy-q-0", kind: "allow_once", name: "Option A" },
+      { optionId: "agy-q-1", kind: "allow_once", name: "Option B" },
+      { optionId: "agy-q-2", kind: "allow_once", name: "Option C" },
+      { optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }
+    ]);
+    expect(interactionKeys("agy-q-0", "ask_question", askCall)).toBe("\r");
+    expect(interactionKeys("agy-q-1", "ask_question", askCall)).toBe("\x1b[B\r");
+    expect(interactionKeys("agy-q-2", "ask_question", askCall)).toBe("\x1b[B\x1b[B\r");
+    expect(interactionKeys("agy-q-skip", "ask_question", askCall)).toBe("\x1b");
   });
 
   for (const [choice, keys] of [
@@ -204,14 +255,77 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("fails closed for ask_question without writing menu keys", async () => {
+  it("bridges single-select ask_question via PTY option keys", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
-    const pty = new FakePty(() => { const db = createConversationDb(dir, "ask"); insertStep(db, pendingToolRow("ask_question")); db.close(); });
+    const askInput = JSON.stringify({
+      questions: [{
+        question: "Which approach?",
+        options: ["Option A", "Option B", "Option C"],
+        is_multi_select: false
+      }]
+    });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "ask");
+      insertStep(db, pendingToolRow("ask_question", askInput, 138));
+      db.close();
+    });
     const session = interactiveSession(dir, pty);
-    await expect(session.prompt("go", async () => {}, async () => "agy-allow-once")).rejects.toThrow(/Unsupported agy interaction 'ask_question'/);
+    const result = session.prompt("clarify", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "ask.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "thanks" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-q-1";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\x1b[B\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fails closed for multi-select ask_question without writing keys", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const askInput = JSON.stringify({
+      questions: [{
+        question: "Pick many",
+        options: ["A", "B"],
+        is_multi_select: true
+      }]
+    });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "ask-multi");
+      insertStep(db, pendingToolRow("ask_question", askInput, 138));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    await expect(session.prompt("go", async () => {}, async () => "agy-q-0")).rejects.toThrow(/multi-select ask_question/);
     expect(pty.writes).toEqual([]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("bridges replace_file_content permission menus like run_command", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "replace");
+      insertStep(db, pendingToolRow("replace_file_content", '{"TargetFile":"/repo/src/cli.ts"}', 5));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("edit it", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "replace.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-allow-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
 
   it("cancels reliably while awaiting permission", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
@@ -558,9 +672,9 @@ class FakeProcess extends EventEmitter {
   }
 }
 
-function pendingToolRow(name: string) {
-  return { idx: 1, stepType: 21, status: 9, stepPayload: encodeStepPayload({
-    toolRun: encodeToolRun({ call: encodeToolCall({ callId: "permission-1", namePrimary: name, rawInputJson: '{"CommandLine":"echo hi"}' }) })
+function pendingToolRow(name: string, rawInputJson = '{"CommandLine":"echo hi"}', stepType = 21) {
+  return { idx: 1, stepType, status: 9, stepPayload: encodeStepPayload({
+    toolRun: encodeToolRun({ call: encodeToolCall({ callId: "permission-1", namePrimary: name, rawInputJson }) })
   }) };
 }
 
