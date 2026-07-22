@@ -287,11 +287,33 @@ function decodeWebSearchResult(bytes: Uint8Array): WebSearchResult {
   });
 }
 
-/** Walk nested url-content document wrappers to find the largest text body. */
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+/**
+ * Extract the fetched document body from the nested url-content wrapper.
+ * Observed layout: field 6 → field 3 → field 2 (string body). Falls back to
+ * the largest nested UTF-8 string when field numbers differ.
+ */
+function extractUrlContentBody(bytes: Uint8Array): string {
+  let body = "";
+  readMessage(bytes, {}, {
+    3: (_m, r) => {
+      const inner = r.bytes();
+      readMessage(inner, {}, {
+        2: (_m2, r2) => {
+          body = r2.string();
+        }
+      });
+    }
+  });
+  if (body) return body;
+  return extractLargestString(bytes);
+}
+
+/** Fallback walker: largest nested UTF-8 string (does not re-parse text as protobuf). */
 function extractLargestString(bytes: Uint8Array, depth = 0): string {
   if (depth > 6) return "";
   let best = "";
-  // Manual walk so every string field is considered (body field numbers vary).
   const reader = new BinaryReader(bytes);
   while (reader.pos < reader.len) {
     const tag = reader.uint32();
@@ -306,13 +328,15 @@ function extractLargestString(bytes: Uint8Array, depth = 0): string {
       const slice = reader.bytes();
       let asStr: string | null = null;
       try {
-        asStr = new TextDecoder("utf-8", { fatal: true }).decode(slice);
+        asStr = utf8Decoder.decode(slice);
       } catch {
         asStr = null;
       }
-      if (asStr !== null && !asStr.includes("\0") && asStr.length > best.length) {
-        // Prefer printable document bodies over tiny labels.
-        best = asStr;
+      if (asStr !== null && !asStr.includes("\0")) {
+        // Valid UTF-8 text: take it if longest, but do not re-walk as a message
+        // (re-parsing HTML/JSON as protobuf is expensive and meaningless).
+        if (asStr.length > best.length) best = asStr;
+        continue;
       }
       if (slice.length > 32) {
         const nested = extractLargestString(slice, depth + 1);
@@ -333,9 +357,8 @@ function decodeUrlContentDocument(bytes: Uint8Array): {
   const doc = readMessage(bytes, { title: "", description: "", body: "" }, {
     4: (m, r) => (m.title = r.string()),
     6: (m, r) => {
-      // Nested content wrapper: dig for the largest embedded string as body.
       const nested = r.bytes();
-      const body = extractLargestString(nested);
+      const body = extractUrlContentBody(nested);
       if (body.length > m.body.length) m.body = body;
     },
     7: (m, r) => (m.description = r.string())
