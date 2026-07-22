@@ -2,10 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
-This project follows semantic versioning before `1.0.0` with the usual
-pre-1.0 caveat that minor versions may include breaking changes.
+This project follows semantic versioning. Pre-1.0 releases used the usual
+pre-1.0 caveat that minor versions may include breaking changes. Starting with
+`1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
+for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
+
+## [1.0.0-alpha.0] - 2026-07-22
+
+Pre-release: dual ACP **v1** + experimental draft **v2** support.
+
+After this commit is on `main`, publish with:
+
+```sh
+git tag -a v1.0.0-alpha.0 -m "Release 1.0.0-alpha.0"
+git push origin v1.0.0-alpha.0
+```
+
+That creates a GitHub **pre-release** and publishes npm under dist-tag **`alpha`**
+(`npx agy-acp@alpha`). Tags must point at a commit already on `main`.
+
+### Added
+
+- Dual-protocol router (`agentProtocolRouter`) negotiates ACP v1 or draft v2 from
+  the client's `initialize.protocolVersion`. Runtime entry (`runAcp`) serves both.
+- Experimental draft ACP v2 surface via `@agentclientprotocol/sdk/experimental/v2`:
+  - Role-agnostic `info` / `capabilities` on initialize
+  - Baseline session methods including required `session/list`
+  - Prompt lifecycle: immediate `{}` acceptance, `user_message` ack with
+    `messageId`, `state_update` (`running` / `idle` + `stopReason`)
+  - `session/resume` with optional `replayFrom: { "type": "start" }` (replaces
+    v1 `session/load` for v2 peers)
+  - `tool_call` → `tool_call_update`, structured diff `changes` + optional
+    `git_patch`, required message IDs on message chunks
+  - Config options use `configId` (v1 still uses `id`)
+- `session/list` on both protocol versions (backed by the session store).
+- Release workflow support for SemVer pre-releases (`alpha` / `beta` / `rc`):
+  GitHub pre-release + matching npm dist-tag; only tags on `main` publish.
+
+### Changed
+
+- Bumped `@agentclientprotocol/sdk` to `^1.3.0`.
+- Package version is `1.0.0-alpha.0` for the ACP v2 pre-release track.
 
 ## [0.2.4] - 2026-07-22
 

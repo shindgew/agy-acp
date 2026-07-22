@@ -1,7 +1,7 @@
 // Persists ACP session bindings (which agy conversation a session is bound to,
 // and the caller's last config choices) across server restarts, so
-// `session/load` and `session/resume` can reconstruct a session after the ACP
-// client reconnects.
+// `session/load`, `session/resume`, and `session/list` can reconstruct a
+// session after the ACP client reconnects.
 //
 // Writes are serialized through an in-process promise chain (so concurrent
 // persists can't clobber each other) and committed atomically via temp-file +
@@ -49,6 +49,19 @@ export class SessionStore {
   async restore(sessionId: string): Promise<StoredSession | null> {
     const store = await this.load();
     return store.sessions[sessionId] ?? null;
+  }
+
+  /**
+   * List persisted session bindings, newest first.
+   * Optional `cwd` filters to sessions whose stored working directory matches.
+   */
+  async list(filter?: { cwd?: string | null }): Promise<Array<{ sessionId: string } & StoredSession>> {
+    const store = await this.load();
+    const cwd = filter?.cwd ?? null;
+    return Object.entries(store.sessions)
+      .filter(([, session]) => cwd == null || session.cwd === cwd)
+      .map(([sessionId, session]) => ({ sessionId, ...session }))
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
   /** Persist a session binding. Resolves once written (writes are serialized). */

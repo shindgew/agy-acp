@@ -7,11 +7,18 @@ The implementation is a TypeScript, `npx`-runnable ACP server built on
 keeps the adapter aligned with the logged-in Antigravity CLI experience and
 avoids a separate runtime startup path.
 
+**Current package:** `1.0.0-alpha.0` (pre-release). Supports **ACP v1** and
+**experimental draft ACP v2** side by side via version negotiation on
+`initialize`. See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
+and [migration guide](https://agentclientprotocol.com/protocol/v2/migration).
+Draft v2 may still change before stabilization.
+
 ## Architecture
 
 ```text
 Zed / ACP client
-  -> agy-acp SDK NDJSON server over stdio
+  -> agy-acp dual protocol router (v1 or draft v2 from initialize)
+  -> AgyAcpAgent (sessions, config, prompt lifecycle)
   -> AgyCliSession (spawns agy, tracks --conversation id)
   -> agy --print --conversation <id> --sandbox ...
        \-> writes to ~/.gemini/antigravity-cli/conversations/<id>.db
@@ -36,16 +43,20 @@ titles all included. `agy-acp` now reads that database directly instead:
   conversation id is learned from the first turn and reused after),
 - stdout is drained but never parsed; a `StreamPoller` polls the conversation
   database on an interval while the process runs, translating newly-appended
-  steps into ACP updates (`agent_message_chunk`, `tool_call`,
-  `session_info_update`, ...) via `src/db/translator.ts` and
-  `src/db/updates.ts`,
-- `session/load` replays a conversation's full history from its database (with
-  an incremental cache keyed on file `(mtime, size)` — see
-  `src/db/replay.ts`); `session/resume` restores the same session binding
-  without replaying,
+  steps into ACP updates (`agent_message_chunk`, `tool_call` /
+  v2 `tool_call_update`, `session_info_update`, ...) via `src/db/translator.ts`
+  and `src/db/updates.ts`,
+- **ACP v1:** `session/load` replays history; `session/resume` reattaches without
+  replay. **ACP v2:** only `session/resume` — pass `replayFrom: { "type": "start" }`
+  to replay (replaces v1 load). Replay uses an incremental cache keyed on file
+  `(mtime, size)` — see `src/db/replay.ts`,
+- **ACP v2 prompt lifecycle:** `session/prompt` returns `{}` on acceptance;
+  foreground progress uses `state_update` (`running` / `idle` with `stopReason`);
+  the user message is acknowledged with a required `messageId`,
 - session bindings (which agy conversation a session is bound to, last model
-  choice, etc.) persist to `~/.agy-acp-state/sessions.json` so `session/load`
-  and `session/resume` survive a server restart — see `src/session-store.ts`,
+  choice, etc.) persist to `~/.agy-acp-state/sessions.json` so list/load/resume
+  survive a server restart — see `src/session-store.ts`,
+- `session/list` is advertised on both protocol versions,
 - separate ACP session `Model` and `Reasoning Effort` pickers populated from
   `agy models` when available (effort maps to `agy --effort`),
 - an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
@@ -86,20 +97,35 @@ node dist/main.js
 Published package / Zed:
 
 ```sh
-npx agy-acp
+npx agy-acp                 # latest stable
+npx agy-acp@alpha           # latest alpha pre-release channel
+npx agy-acp@1.0.0-alpha.0   # pin a specific pre-release
 ```
 
-Example Zed custom agent shape:
+Example Zed custom agent shape (stable):
 
 ```json
 {
   "agent_servers": {
     "Google Antigravity": {
       "command": "npx",
-      "args": ["agy-acp"],
+      "args": ["-y", "agy-acp"],
       "env": {
         "PATH": "/path/to/agy/bin" // Optional
       }
+    }
+  }
+}
+```
+
+Alpha pre-release (after `v1.0.0-alpha.0` is tagged and CI publishes):
+
+```json
+{
+  "agent_servers": {
+    "Google Antigravity (alpha)": {
+      "command": "npx",
+      "args": ["-y", "agy-acp@alpha"]
     }
   }
 }
