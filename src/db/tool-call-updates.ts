@@ -5,6 +5,7 @@
 import path from "node:path";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
+import { isPlanFile, planUpdateFromMarkdown } from "./plan.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -471,17 +472,9 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   return update;
 }
 
-function isPlanFile(targetFile: string): boolean {
-  return (
-    targetFile.includes(".gemini") &&
-    targetFile.includes("antigravity-cli") &&
-    targetFile.includes("brain") &&
-    targetFile.endsWith("md")
-  );
-}
-
 /** Step type 5 (write_to_file|replace_file_content|multi_replace_file_content),
- *  and step 17 artifact writes (e.g. a generated `plan.md` for user review). */
+ *  and step 17 artifact writes (e.g. a generated `plan.md` for user review).
+ *  Brain plan markdown becomes a structured ACP `plan` update (not an edit tool). */
 export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate | SessionUpdate[] {
   const cwd = ctx?.cwd;
   const fileContents = ctx?.fileContents;
@@ -489,36 +482,32 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const displayCwd = fsPath(cwd) ?? undefined;
 
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
-  const isPlan = isPlanFile(targetFile);
+  const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
+
+  // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update).
+  if (isPlanFile(targetFile)) {
+    if (fullContent === null || fullContent.length === 0) return [];
+    return planUpdateFromMarkdown(targetFile, fullContent);
+  }
+
   const shown = targetFile ? toDisplayPath(targetFile, displayCwd) : "";
-  const planName = shown.split("/").pop() ?? "plan.md";
-  const title = isPlan
-    ? planName.toLowerCase().includes("plan")
-      ? planName
-      : `Plan: ${planName}`
-    : shown
-      ? `Edit ${shown}`
-      : "Edit";
+  const title = shown ? `Edit ${shown}` : "Edit";
 
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
 
-  const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
   if (fullContent !== null) {
     // write_to_file: the whole file content is the new text.
-    if (isPlan) {
-      // Plans are user-facing prose (brain artifacts), not code diffs.
-      content.push(textBlock(fullContent));
-    } else if (targetFile) {
+    if (targetFile) {
       // Prefer prior view_file/write content as oldText when known; otherwise null
       // (new file or prior content never observed in this translator pass).
       const cacheKey = path.resolve(targetFile);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
+      locations.push({ path: targetFile });
     }
-    if (targetFile) locations.push({ path: targetFile });
-  } else if (!isPlan) {
+  } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
     // (a ReplacementChunks array) — normalize both to a list of chunks.
     const chunksRaw = pick(rawInput, "ReplacementChunks", "replacementChunks");
@@ -535,7 +524,6 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     }
   }
 
-  if (isPlan && content.length === 0) return [];
   return toolCallUpdate({ stepRow, title, kind: "edit", content, locations });
 }
 
