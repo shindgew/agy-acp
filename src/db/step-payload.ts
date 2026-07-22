@@ -84,6 +84,18 @@ export interface TitleUpdate {
   title: string;
 }
 
+/**
+ * Step-payload field 28 — run_command result (decoded from real conversation DBs).
+ * Field numbers are load-bearing reverse-engineered facts, not a public schema.
+ */
+export interface CommandResult {
+  cwd: string;
+  exitCode: number;
+  /** Shell stdout/stderr text when present (may include truncation markers). */
+  output: string;
+  command: string;
+}
+
 /** The blob in the `task_details` column. */
 export interface TaskDetails {
   taskId: string;
@@ -103,6 +115,7 @@ export interface StepPayload {
   userPrompt: UserPrompt | undefined;
   agentText: AgentText | undefined;
   titleUpdate: TitleUpdate | undefined;
+  commandResult: CommandResult | undefined;
 }
 
 function decodeToolCall(bytes: Uint8Array): ToolCall {
@@ -202,6 +215,43 @@ function decodeTitleUpdate(bytes: Uint8Array): TitleUpdate {
   return readMessage(bytes, { title: "" }, { 4: (m, r) => (m.title = r.string()) });
 }
 
+/**
+ * Strip leading non-text bytes sometimes present before command output text
+ * (truncation metadata / control chars from the wire format).
+ */
+export function sanitizeCommandOutput(raw: string): string {
+  if (!raw) return raw;
+  let start = 0;
+  while (start < raw.length) {
+    const code = raw.charCodeAt(start);
+    // Keep normal whitespace; drop other C0 controls and DEL.
+    if (code === 0x09 || code === 0x0a || code === 0x0d || (code >= 0x20 && code !== 0x7f)) break;
+    start += 1;
+  }
+  return raw.slice(start);
+}
+
+function decodeCommandResult(bytes: Uint8Array): CommandResult {
+  return readMessage<CommandResult>(
+    bytes,
+    { cwd: "", exitCode: 0, output: "", command: "" },
+    {
+      2: (m, r) => (m.cwd = r.string()),
+      6: (m, r) => (m.exitCode = readInt(r)),
+      21: (m, r) => (m.output = sanitizeCommandOutput(r.string())),
+      // 23 and 25 both carry the command line in observed DBs; prefer first non-empty.
+      23: (m, r) => {
+        const command = r.string();
+        if (!m.command) m.command = command;
+      },
+      25: (m, r) => {
+        const command = r.string();
+        if (!m.command) m.command = command;
+      }
+    }
+  );
+}
+
 export function decodeTaskDetails(bytes: Uint8Array): TaskDetails {
   return readMessage(bytes, { taskId: "", logUri: "", description: "" }, {
     1: (m, r) => (m.taskId = r.string()),
@@ -222,7 +272,8 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       listDirectory: undefined,
       userPrompt: undefined,
       agentText: undefined,
-      titleUpdate: undefined
+      titleUpdate: undefined,
+      commandResult: undefined
     },
     {
       1: (m, r) => (m.validityCheck = readInt(r)),
@@ -233,6 +284,7 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       15: (m, r) => (m.listDirectory = readSubmessage(r, decodeListDirectoryResult)),
       19: (m, r) => (m.userPrompt = readSubmessage(r, decodeUserPrompt)),
       20: (m, r) => (m.agentText = readSubmessage(r, decodeAgentText)),
+      28: (m, r) => (m.commandResult = readSubmessage(r, decodeCommandResult)),
       30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate))
     }
   );

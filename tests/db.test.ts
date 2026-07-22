@@ -7,7 +7,13 @@ import { ReplayCache } from "../src/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/db/scan.js";
 import { Translator } from "../src/db/translator.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
-import { encodeAgentText, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import {
+  encodeAgentText,
+  encodeCommandResult,
+  encodeStepPayload,
+  encodeToolCall,
+  encodeToolRun
+} from "./fixtures/step-encoder.js";
 
 let dir: string;
 
@@ -153,7 +159,18 @@ describe("Translator", () => {
       }
     ]);
 
-    updateStep(db, 1, { status: 3 });
+    updateStep(db, 1, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call }),
+        commandResult: encodeCommandResult({
+          cwd: "/repo",
+          exitCode: 0,
+          output: "hi\n",
+          command: "echo hi"
+        })
+      })
+    });
 
     const second = translator.translate(conn.readAfter(0));
     expect(second).toMatchObject([
@@ -165,6 +182,9 @@ describe("Translator", () => {
         title: "echo hi"
       }
     ]);
+    const content = (second[0] as { content?: Array<{ content?: { text?: string } }> }).content ?? [];
+    const texts = content.map((c) => c.content?.text ?? "").join("\n");
+    expect(texts).toContain("hi");
 
     // Unchanged snapshot: no third emission.
     expect(translator.translate(conn.readAfter(0))).toHaveLength(0);
@@ -203,6 +223,50 @@ describe("Translator", () => {
     const conn2 = ConversationDb.open(dir, "conv-thought")!;
     expect(translator.translate(conn2.readAfter(0))).toHaveLength(0);
     conn2.close();
+  });
+
+
+  it("surfaces commandResult output on execute tool calls", () => {
+    const db = createConversationDb(dir, "conv-exec-out");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c-out",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls","Cwd":"/repo"}'
+          })
+        }),
+        commandResult: encodeCommandResult({
+          cwd: "/repo",
+          exitCode: 0,
+          output: "README.md\n",
+          command: "ls"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-out")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      sessionUpdate: string;
+      kind: string;
+      rawOutput?: { exitCode?: number; output?: string };
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.sessionUpdate).toBe("tool_call");
+    expect(update.kind).toBe("execute");
+    expect(update.rawOutput).toMatchObject({ exitCode: 0, output: "README.md\n" });
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("README.md");
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
