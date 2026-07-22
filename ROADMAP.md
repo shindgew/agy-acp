@@ -1,12 +1,24 @@
-# ACP v1 roadmap
+# Roadmap
 
 `agy-acp` covers the core ACP prompt loop (sessions, config options, streamed
-tool calls, edit diffs, load/resume). Gaps below are relative to ACP v1 as
-exposed by `@agentclientprotocol/sdk` and are ordered by practical editor UX.
-Several items are constrained by wrapping `agy` and polling its conversation
-database rather than driving agy as a full interactive agent.
+tool calls, edit diffs, load/resume). It serves **ACP v1** and **experimental
+draft ACP v2** side by side via `initialize` version negotiation
+(`agentProtocolRouter`). Gaps are ordered by practical editor UX and constrained
+by wrapping `agy` and polling its conversation database rather than driving agy
+as a full interactive agent.
 
-## Done
+Draft ACP v2 tracks the `alpha` dist-tag (`1.0.0-alpha.*`). The wire protocol may
+still change before stabilization — see the
+[ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
+[migration guide](https://agentclientprotocol.com/protocol/v2/migration).
+
+---
+
+## ACP v1
+
+Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
+
+### Done
 
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
@@ -23,15 +35,16 @@ database rather than driving agy as a full interactive agent.
       (search_web hit lists are not persisted by agy; query metadata only)
 - [x] Full-file write diffs with prior content when known from earlier view/write steps
 - [x] Permission notes map decision varint to granted/denied labels
-- [x] Experimental four-choice `run_command` permission bridge via persistent PTY
+- [x] Experimental interactive permission bridge via persistent PTY for the
+      four-choice menu (`run_command` + file tools sharing ToolConfirmationPanel)
 
-## High priority
+### High priority
 
 These need more than conversation-DB polling (interactive agy control plane or
 client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
-- [ ] Expand interactive `session/request_permission` beyond the verified
-      `run_command` menu (unsupported status-9 interactions currently fail closed)
+- [ ] Expand interactive `session/request_permission` beyond verified menu
+      shapes (unsupported status-9 interactions currently fail closed)
 - [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
       prose tool content with Plan titles — not ACP plan updates)
 - [ ] Client terminals: `type: "terminal"` content + `terminal/*` (today: execute tools
@@ -40,7 +53,7 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
       (today: all MCP caps are `false` and servers are ignored)
 
-## Medium priority
+### Medium priority
 
 - [ ] Optional `session/delete` from the session store
 - [ ] `session/fork` if/when useful for clients
@@ -53,7 +66,7 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [ ] Richer `stopReason` values (`max_tokens`, `refusal`, `max_turn_requests`) when
       agy exposes them (today: `end_turn` or `cancelled`)
 
-## Fidelity improvements
+### Fidelity improvements
 
 - [x] Surface command stdout/stderr on execute tool calls when present in the DB
 - [x] Decode/show fetch and web-search result bodies (not just URL / title)
@@ -61,7 +74,7 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [x] Map permission decisions into granted/denied labels (not interactive outcomes)
 - [ ] Agent-outbound images / richer content blocks when agy produces them
 
-## Lower priority / unstable ACP
+### Lower priority / unstable ACP
 
 Usually skip unless a client needs them for this wrapper:
 
@@ -70,3 +83,84 @@ Usually skip unless a client needs them for this wrapper:
 - [ ] `document/*` (editor document sync)
 - [ ] Agent-driven client `fs/read_text_file` / `fs/write_text_file` (agy does FS itself)
 - [ ] Non-stdio transports (HTTP / WebSocket) — stdio NDJSON is intentional for Zed
+
+---
+
+## ACP v2 (experimental draft)
+
+Implemented via `@agentclientprotocol/sdk/experimental/v2`. The db/translator
+layer still emits v1-shaped updates; `sessionUpdateToV2` maps them at the
+protocol boundary. Shared backend gaps (permissions, MCP, plans, terminals)
+apply to both protocol versions — listed here only when the **v2 wire shape**
+differs or is incomplete.
+
+### Done
+
+- [x] Dual-protocol router: negotiate v1 vs draft v2 from `initialize.protocolVersion`
+- [x] Role-agnostic `info` / `capabilities` on `initialize` (no `agentInfo` /
+      `agentCapabilities` split)
+- [x] Baseline session methods: `session/new`, `session/list`, `session/resume`,
+      `session/close`, `session/prompt`, `session/cancel`, `session/update`
+- [x] `session/set_config_option` with `configId` (v1 still uses `id`) for
+      `mode`, `model`, `reasoningEffort`
+- [x] Prompt lifecycle: accept with `{}` immediately; progress via
+      `state_update` (`running` / `idle` + `stopReason`)
+- [x] User-message ack: `user_message` update with agent-owned `messageId`
+- [x] Required `messageId` on `agent_message_chunk` / `agent_thought_chunk` /
+      `user_message_chunk`
+- [x] `session/resume` with optional `replayFrom: { "type": "start" }` (replaces
+      v1 `session/load`; omit `replayFrom` to reattach without replay)
+- [x] Collapse first-sight `tool_call` → v2 `tool_call_update` (upsert shape)
+- [x] Structured diff content: `changes[]` + optional `git_patch` patch block
+- [x] Tool status `cancelled` preserved for v2 (mapped to `failed` for v1)
+- [x] `session/request_permission` with v2 `subject: { type: "tool_call", … }`
+      + `title` (same interactive bridge as v1)
+- [x] Prompt caps advertised: `image`, `embeddedContext`;
+      `additionalDirectories` capability
+
+### High priority
+
+Wire-shape and lifecycle work specific to draft v2 (or required for parity with
+v2-aware clients):
+
+- [ ] Richer `replayFrom` cursors beyond `{ "type": "start" }` when the draft
+      stabilizes incremental replay
+- [ ] Map `ask_question` / status-9 interactions to client `elicitation/create`
+      (today: fail closed; static tool_call text only)
+- [ ] Native `plan_update` / `plan_removed` updates (not prose tool content)
+- [ ] `terminal_update` / `terminal_output_chunk` for execute tools when clients
+      support live terminals (today: text content blocks from DB field 28)
+- [ ] MCP: honor session `mcpServers`, advertise `capabilities.session.mcp`, and
+      route `mcp/*` if/when agy can consume external MCP servers
+- [ ] Expand interactive permission bridge to any remaining agy menus once their
+      TUI/response channels are verified
+
+### Medium priority
+
+- [ ] Advertise and implement `session/delete` / `session/fork` when useful
+- [ ] Push `config_option_update` when catalog/options change outside
+      `set_config_option`
+- [ ] `available_commands_update` for slash-command discovery
+- [ ] `auth/login` / `auth/logout` + non-empty `authMethods` (today: empty list;
+      require pre-logged-in `agy`)
+- [ ] `usage_update` when token/usage data is available from agy
+- [ ] Richer `stopReason` on idle `state_update` (`max_tokens`, `refusal`,
+      `max_turn_requests`) when agy exposes them
+- [ ] Optional full-message updates (`agent_message` / `agent_thought`) in
+      addition to chunk streaming, if clients prefer them
+
+### Draft tracking
+
+- [ ] Keep pace with `@agentclientprotocol/sdk` experimental/v2 breaking changes
+      until ACP v2 stabilizes; pin and re-test on each SDK bump
+- [ ] Promote dual-protocol support off the `alpha` track when the draft freezes
+- [ ] Drop or narrow v1-shaped internal builders if a stable v2-native update
+      model becomes the default path
+
+### Out of scope (unless a client requires them)
+
+Same as v1 lower-priority surface; not advertised in `initialize` capabilities:
+
+- [ ] `providers/*`, `nes/*`, `document/*`
+- [ ] Agent-driven client filesystem methods (agy owns FS)
+- [ ] Non-stdio transports (HTTP / WebSocket / SSE)
