@@ -327,6 +327,217 @@ describe("permission bridge", () => {
   });
 
 
+  it("offers review for an edit that already applied without a live gate, and reverts on reject", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const targetFile = path.join(dir, "target.txt");
+    fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+    const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "already-applied");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let sawKind: string | undefined;
+    let sawStatus: string | undefined;
+    const result = session.prompt("edit it", async () => {}, async (toolCall) => {
+      const raw = toolCall as unknown as { kind?: string; status?: string };
+      sawKind = raw.kind;
+      sawStatus = raw.status;
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "already-applied.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(sawKind).toBe("edit");
+    expect(sawStatus).toBe("completed");
+    // No live agy gate to answer — nothing sent to the PTY.
+    expect(pty.writes).toEqual([]);
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nOLD\nafter");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves an already-applied edit in place when the client keeps it", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const targetFile = path.join(dir, "target.txt");
+    fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+    const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "already-applied-keep");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("edit it", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "already-applied-keep.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "allow-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual([]);
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nNEW\nafter");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("routes an already-applied edit through the client's fs write-through instead of asking permission", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const targetFile = path.join(dir, "target.txt");
+    fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+    const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "fs-bridge-route");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const reads: string[] = [];
+    const writes: Array<{ path: string; content: string }> = [];
+    let permissionCalls = 0;
+    const fsBridge = {
+      readTextFile: async (p: string) => { reads.push(p); },
+      writeTextFile: async (p: string, content: string) => {
+        writes.push({ path: p, content });
+        fs.writeFileSync(p, content, "utf8");
+      }
+    };
+    const result = session.prompt("edit it", async () => {}, async () => {
+      permissionCalls++;
+      return "allow-once";
+    }, fsBridge);
+    setTimeout(async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "fs-bridge-route.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      pty.emitData("? for shortcuts");
+    }, 50);
+    expect((await result).stopReason).toBe("end_turn");
+    expect(permissionCalls).toBe(0);
+    expect(reads).toEqual([targetFile]);
+    expect(writes).toEqual([{ path: targetFile, content: "before\nNEW\nafter" }]);
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nNEW\nafter");
+    expect(pty.writes).toEqual([]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("falls back to the local permission bridge if the client's fs write-through fails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const targetFile = path.join(dir, "target.txt");
+    fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+    const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "fs-bridge-fallback");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let permissionCalls = 0;
+    const fsBridge = {
+      readTextFile: async () => {},
+      writeTextFile: async () => { throw new Error("client rejected the write"); }
+    };
+    const result = session.prompt("edit it", async () => {}, async () => {
+      permissionCalls++;
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "fs-bridge-fallback.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    }, fsBridge);
+    expect((await result).stopReason).toBe("end_turn");
+    expect(permissionCalls).toBe(1);
+    // The failed write-through must leave disk exactly as it already reported
+    // via session/update (newText), not stuck mid-revert.
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nOLD\nafter");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("also routes a live-gated edit (default mode) through the client's fs write-through once agy applies it", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const targetFile = path.join(dir, "target.txt");
+    fs.writeFileSync(targetFile, "before\nOLD\nafter", "utf8");
+    const rawInputJson = JSON.stringify({ TargetFile: targetFile, TargetContent: "OLD", ReplacementContent: "NEW" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "fs-bridge-gated");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 9,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({ call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson }) })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const reads: string[] = [];
+    const writes: Array<{ path: string; content: string }> = [];
+    let permissionCalls = 0;
+    const fsBridge = {
+      readTextFile: async (p: string) => { reads.push(p); },
+      writeTextFile: async (p: string, content: string) => {
+        writes.push({ path: p, content });
+        fs.writeFileSync(p, content, "utf8");
+      }
+    };
+    const result = session.prompt("edit it", async () => {}, async () => {
+      permissionCalls++;
+      // Simulate agy itself performing the write after the live gate is answered.
+      fs.writeFileSync(targetFile, "before\nNEW\nafter", "utf8");
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "fs-bridge-gated.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "agy-allow-once";
+    }, fsBridge);
+    expect((await result).stopReason).toBe("end_turn");
+    // Exactly one permission round trip — the live gate itself. The
+    // subsequent write-through must not trigger a second local prompt.
+    expect(permissionCalls).toBe(1);
+    expect(pty.writes).toEqual(["\r"]);
+    expect(reads).toEqual([targetFile]);
+    expect(writes).toEqual([{ path: targetFile, content: "before\nNEW\nafter" }]);
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("before\nNEW\nafter");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("cancels reliably while awaiting permission", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => { const db = createConversationDb(dir, "cancel"); insertStep(db, pendingToolRow("run_command")); db.close(); });
