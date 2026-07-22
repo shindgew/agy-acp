@@ -8,7 +8,12 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
-import { permissionKeys, type AgyPermissionChoice } from "./permissions.js";
+import {
+  canBridgeInteraction,
+  interactionKeys,
+  parseAskQuestion,
+  type AgyPermissionChoice
+} from "./permissions.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
@@ -27,7 +32,10 @@ export interface PtyProcess {
 export interface PtyFactory {
   spawn(command: string, args: string[], options: { cwd: string; env?: NodeJS.ProcessEnv; cols: number; rows: number }): PtyProcess;
 }
-export type PermissionCallback = (toolCall: SessionUpdate) => Promise<AgyPermissionChoice | "cancelled">;
+export type PermissionCallback = (
+  toolCall: SessionUpdate,
+  context: { toolName: string }
+) => Promise<AgyPermissionChoice | "cancelled">;
 
 export interface SpawnOptions {
   cwd: string;
@@ -318,12 +326,30 @@ export class AgyCliSession {
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
           if (requested.has(id)) continue;
           requested.add(id);
-          if (interaction.toolName !== "run_command") {
-            throw new AgyCliError(`Unsupported agy interaction '${interaction.toolName}' (status 9); only run_command permission menus can be bridged safely`, [this.config.agyPath], null, this.#ptyOutput);
+          if (!canBridgeInteraction(interaction.toolName, toolCall)) {
+            const detail = unsupportedInteractionDetail(interaction.toolName, toolCall);
+            throw new AgyCliError(
+              `Unsupported agy interaction '${interaction.toolName}' (status 9); ${detail}`,
+              [this.config.agyPath],
+              null,
+              this.#ptyOutput
+            );
           }
-          const choice = await this.raceTurnCallback(onPermission(toolCall), deadline);
+          const choice = await this.raceTurnCallback(
+            onPermission(toolCall, { toolName: interaction.toolName }),
+            deadline
+          );
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          this.#pty?.write(permissionKeys(choice));
+          const keys = interactionKeys(choice, interaction.toolName, toolCall);
+          if (keys == null) {
+            throw new AgyCliError(
+              `Unsupported permission choice '${choice}' for '${interaction.toolName}'`,
+              [this.config.agyPath],
+              null,
+              this.#ptyOutput
+            );
+          }
+          this.#pty?.write(keys);
           // An idle marker printed before the decision cannot mean that the
           // approved/rejected command has finished.
           requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
@@ -789,6 +815,18 @@ export function parseAgyModels(output: string): string[] {
     .filter(Boolean)
     .filter((line) => !isAgyStatusLine(line));
   return dedupe(lines);
+}
+
+function unsupportedInteractionDetail(toolName: string, toolCall: SessionUpdate): string {
+  if (toolName === "ask_question") {
+    const ask = parseAskQuestion(toolCall);
+    if (!ask) return "ask_question payload could not be parsed";
+    if (ask.questionCount !== 1) return "only single-question ask_question menus can be bridged safely";
+    if (ask.multiSelect) return "multi-select ask_question is not bridged yet";
+    if (ask.options.length === 0) return "ask_question has no selectable options";
+    return "ask_question could not be bridged";
+  }
+  return "only standard permission menus (run_command, file read/write) and single-select ask_question can be bridged safely";
 }
 
 function isAgyStatusLine(line: string): boolean {
