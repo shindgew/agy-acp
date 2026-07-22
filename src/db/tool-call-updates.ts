@@ -286,20 +286,44 @@ export function searchUpdate(stepRow: StepRow, cwd?: string): SessionUpdate {
 /** Step type 21 (run_command): a shell command execution. */
 export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const toolRun = stepRow.stepPayload.toolRun;
+  const commandResult = stepRow.stepPayload.commandResult;
   const rawInput = parseRawInput(stepRow);
-  const command = asStr(pick(rawInput, "CommandLine", "commandLine", "command"));
+  const command =
+    asStr(pick(rawInput, "CommandLine", "commandLine", "command")) ??
+    (commandResult?.command?.trim() ? commandResult.command : null);
   const firstLine = (command?.split("\n")[0] ?? "").trim();
 
   const title =
     firstLine || asStr(toolRun?.titlePrimary)?.trim() || asStr(toolRun?.titleSecondary)?.trim() || "Command Execution";
 
-  const content: Record<string, unknown>[] = command?.trim() ? [codeBlock(command)] : [];
+  const content: Record<string, unknown>[] = [];
+  if (command?.trim()) content.push(codeBlock(command));
+  // Prefer decoded field-28 output over empty; surface when non-empty.
+  const output = commandResult?.output ?? "";
+  if (output.trim()) content.push(codeBlock(output));
 
-  // The only path a run_command exposes is its working directory.
-  const commandCwd = fsPath(asStr(pick(rawInput, "Cwd", "cwd")));
+  // Prefer explicit Cwd from args; fall back to command-result cwd.
+  const commandCwd =
+    fsPath(asStr(pick(rawInput, "Cwd", "cwd"))) ??
+    fsPath(commandResult?.cwd?.trim() ? commandResult.cwd : null);
   const locations = commandCwd ? [{ path: commandCwd }] : [];
 
-  return toolCallUpdate({ stepRow, title, kind: "execute", content, locations });
+  const update = toolCallUpdate({
+    stepRow,
+    title,
+    kind: "execute",
+    content,
+    locations
+  }) as SessionUpdate & { rawOutput?: unknown };
+
+  // Attach structured exit/output when present (without dropping error rawOutput).
+  if (commandResult && !stepRow.error) {
+    update.rawOutput = {
+      exitCode: commandResult.exitCode,
+      ...(output.trim() ? { output } : {})
+    };
+  }
+  return update;
 }
 
 /** Step type 31 (read_url_content): a call-only step; the fetched body isn't decoded. */
