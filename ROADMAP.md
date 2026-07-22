@@ -39,6 +39,10 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
       four-choice menu (`run_command` + file tools sharing ToolConfirmationPanel)
 - [x] Execute tools surface command + captured output as content blocks (v1) and
       draft-v2 agent-owned `terminal_update` + `type: "terminal"` embeds
+- [x] Structured plan from brain markdown artifacts: classic v1 `plan` entries
+      (list/checkbox parse) and draft-v2 `plan_update` (`markdown` when body is
+      known, else `items`). Status only reflects checkbox markers in the file —
+      no live task progress from agy. `plan_removed` not emitted.
 
 ### High priority
 
@@ -47,8 +51,6 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
 - [ ] Expand interactive `session/request_permission` beyond verified menu
       shapes (unsupported status-9 interactions currently fail closed)
-- [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
-      prose tool content with Plan titles — not ACP plan updates)
 - [ ] v1 client-executed `terminal/*` (`terminal/create` runs a command in the
       editor). Blocked while agy owns the shell — re-running would double-execute.
       v1 keeps content blocks; draft v2 uses agent-owned terminals (see below).
@@ -124,6 +126,8 @@ differs or is incomplete.
       snapshot / exitStatus) plus `type: "terminal"` tool content embed.
       Output is DB field-28 snapshots (and progressive tool updates), not a
       live client PTY byte stream.
+- [x] `plan_update` for brain plan artifacts (`type: "markdown"` preferred;
+      `type: "items"` fallback). No `plan_removed` (agy does not delete plans).
 
 ### High priority
 
@@ -134,7 +138,6 @@ v2-aware clients):
       stabilizes incremental replay
 - [ ] Map `ask_question` / status-9 interactions to client `elicitation/create`
       (today: fail closed; static tool_call text only)
-- [ ] Native `plan_update` / `plan_removed` updates (not prose tool content)
 - [ ] Incremental `terminal_output_chunk` while a command is still running, if
       agy ever persists partial stdout before completion (today: full
       `terminal_update.output` snapshot when field 28 is present)
