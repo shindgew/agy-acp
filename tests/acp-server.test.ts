@@ -397,6 +397,129 @@ describe("buildModelCatalog", () => {
   });
 });
 
+describe("session modes and config option sync", () => {
+  it("advertises modes on session/new and keeps set_mode dual-synced with config", async () => {
+    const spawnProcess = (command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([TEST_MODELS_OUTPUT]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const client = acpClient({ name: "test-client" }).onNotification(
+      methods.client.session.update,
+      (ctx) => {
+        updates.push(ctx.params.update as Record<string, unknown>);
+      }
+    );
+    const connection = client.connect(
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+
+      expect(session.modes).toEqual({
+        currentModeId: "default",
+        availableModes: [
+          {
+            id: "default",
+            name: "Default",
+            description: "Request review before file writes (agy default; omits --mode)."
+          },
+          {
+            id: "accept-edits",
+            name: "Accept Edits",
+            description: "Apply file edits without interactive write review (agy --mode accept-edits)."
+          },
+          {
+            id: "plan",
+            name: "Plan",
+            description: "Plan-oriented execution (agy --mode plan)."
+          }
+        ]
+      });
+      expect(session.configOptions?.[0]).toMatchObject({
+        id: "mode",
+        currentValue: "default"
+      });
+
+      updates.length = 0;
+      await connection.agent.request(methods.agent.session.setMode, {
+        sessionId: session.sessionId,
+        modeId: "plan"
+      });
+
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { sessionUpdate: "current_mode_update", currentModeId: "plan" },
+          expect.objectContaining({
+            sessionUpdate: "config_option_update",
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: "mode", currentValue: "plan" })
+            ])
+          })
+        ])
+      );
+      expect(updates.filter((u) => u.sessionUpdate === "current_mode_update")).toHaveLength(1);
+      expect(updates.filter((u) => u.sessionUpdate === "config_option_update")).toHaveLength(1);
+
+      updates.length = 0;
+      const modeViaConfig = await connection.agent.request(methods.agent.session.setConfigOption, {
+        sessionId: session.sessionId,
+        configId: "mode",
+        value: "accept-edits"
+      });
+      expect(modeViaConfig.configOptions[0].currentValue).toBe("accept-edits");
+      expect(updates).toEqual([
+        { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" }
+      ]);
+      // Config UI already received the full list in the set_config_option response.
+      expect(updates.some((u) => u.sessionUpdate === "config_option_update")).toBe(false);
+
+      updates.length = 0;
+      await connection.agent.request(methods.agent.session.setMode, {
+        sessionId: session.sessionId,
+        modeId: "accept-edits"
+      });
+      // Same mode: no redundant notifications.
+      expect(updates).toEqual([]);
+    } finally {
+      connection.close();
+    }
+  });
+
+  it("rejects unknown mode ids on session/set_mode", async () => {
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([TEST_MODELS_OUTPUT]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+    const connection = acpClient({ name: "test-client" }).connect(
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+      await expect(
+        connection.agent.request(methods.agent.session.setMode, {
+          sessionId: session.sessionId,
+          modeId: "architect"
+        })
+      ).rejects.toThrow();
+    } finally {
+      connection.close();
+    }
+  });
+});
+
 describe("session model config", () => {
   it("updates agy --model and --effort for later prompts", async () => {
     const calls: Array<{ command: string; args: string[]; options: unknown }> = [];
