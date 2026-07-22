@@ -9,6 +9,14 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- Draft ACP v2 agent-owned terminals for `run_command` / execute tools: emit
+  `terminal_update` (command, cwd, base64 output snapshot, exit status) and
+  embed `{ type: "terminal", terminalId }` on the tool call. v1 clients keep
+  command/output content blocks. Client-executed v1 `terminal/*` is still not
+  used (agy runs the shell; re-running via the editor would double-execute).
+
 ## [0.2.7] - 2026-07-22
 
 Session config aligned with Antigravity CLI 1.1.x, plus an experimental
