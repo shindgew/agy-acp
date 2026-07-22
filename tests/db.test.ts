@@ -533,7 +533,7 @@ describe("Translator", () => {
     expect(texts[1]).toContain("Permission granted: unsandboxed (ls)");
   });
 
-  it("presents brain plan writes as Plan titles with prose content", () => {
+  it("presents brain plan writes as structured ACP plan entries", () => {
     const planPath =
       "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
     const db = createConversationDb(dir, "conv-plan");
@@ -548,7 +548,7 @@ describe("Translator", () => {
             namePrimary: "write_to_file",
             rawInputJson: JSON.stringify({
               TargetFile: planPath,
-              CodeContent: "# Plan\n\n1. Do the thing\n"
+              CodeContent: "# Plan\n\n1. Do the thing\n2. Ship it\n"
             })
           })
         })
@@ -563,13 +563,50 @@ describe("Translator", () => {
 
     expect(updates).toHaveLength(1);
     const update = updates[0] as {
-      title: string;
-      content?: Array<{ type?: string; content?: { text?: string } }>;
+      sessionUpdate: string;
+      entries?: Array<{ content: string; status: string; priority: string }>;
     };
-    expect(update.title).toBe("implementation_plan.md");
-    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
-    expect(body).toContain("# Plan");
-    expect((update.content ?? []).some((c) => c.type === "diff")).toBe(false);
+    expect(update.sessionUpdate).toBe("plan");
+    expect(update.entries?.map((e) => e.content)).toEqual(["Do the thing", "Ship it"]);
+    expect(update.entries?.every((e) => e.status === "pending")).toBe(true);
+  });
+
+  it("dedups unchanged plan snapshots across stream polls", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan-dedup");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "- [ ] One\n- [x] Two\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-dedup")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const first = translator.translate(conn.readAfter(-1));
+    const second = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(0);
+    const entries = (first[0] as { entries: Array<{ content: string; status: string }> }).entries;
+    expect(entries).toEqual([
+      { content: "One", priority: "high", status: "pending" },
+      { content: "Two", priority: "high", status: "completed" }
+    ]);
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {

@@ -21,6 +21,7 @@ import { createConversationDb, insertStep } from "./fixtures/conversation-db.js"
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import {
   expandSessionUpdateToV2,
+  sessionUpdateToV1,
   sessionUpdateToV2,
   terminalIdForToolCall
 } from "../src/session-updates.js";
@@ -709,6 +710,52 @@ describe("ACP v2 (experimental draft)", () => {
       type: "diff",
       changes: [{ operation: "add", path: "/tmp/a.ts", fileType: "text" }],
       patch: { format: "git_patch" }
+    });
+  });
+
+  it("maps classic plan to v2 plan_update markdown when meta is present", () => {
+    const markdown = "# Plan\n\n- [ ] One\n- [x] Two\n";
+    const update = {
+      sessionUpdate: "plan",
+      entries: [
+        { content: "One", priority: "high", status: "pending" },
+        { content: "Two", priority: "high", status: "completed" }
+      ],
+      _meta: {
+        "agy-acp/planId": "file:/tmp/brain/plan.md",
+        "agy-acp/planPath": "/tmp/brain/plan.md",
+        "agy-acp/planMarkdown": markdown
+      }
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update.sessionUpdate).toBe("plan_update");
+    expect(v2Update.plan).toEqual({
+      type: "markdown",
+      planId: "file:/tmp/brain/plan.md",
+      content: markdown
+    });
+
+    const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
+    expect(v1Wire.sessionUpdate).toBe("plan");
+    expect(v1Wire.entries).toHaveLength(2);
+    expect(v1Wire._meta).toBeUndefined();
+  });
+
+  it("maps classic plan to v2 plan_update items without markdown meta", () => {
+    const update = {
+      sessionUpdate: "plan",
+      entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "items",
+        planId: "agy-plan",
+        entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
+      }
     });
   });
 
