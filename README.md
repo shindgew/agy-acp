@@ -133,6 +133,8 @@ node dist/main.js
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' | node dist/main.js
 ```
 
+See [ROADMAP.md](./ROADMAP.md) for ACP coverage and planned work.
+
 ## Disclaimer
 
 **Unofficial community adapter.** Bridges the official
