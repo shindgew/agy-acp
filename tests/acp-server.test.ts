@@ -379,9 +379,9 @@ describe("buildModelCatalog", () => {
     ) as SelectConfigOption;
 
     expect(modelConfig.id).toBe("model");
-    expect(modelConfig.name).toBe("model");
+    expect(modelConfig.name).toBe("Model");
     expect(reasoningConfig.id).toBe("reasoningEffort");
-    expect(reasoningConfig.name).toBe("reasoningEffort");
+    expect(reasoningConfig.name).toBe("Reasoning Effort");
     expect(modelConfig.options).toEqual([
       { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" }
     ]);
@@ -416,7 +416,7 @@ describe("session model config", () => {
       });
       const configOptions = session.configOptions ?? [];
       expect(configOptions.map((option) => option.id)).toEqual(["mode", "model", "reasoningEffort"]);
-      expect(configOptions.map((option) => option.name)).toEqual(["mode", "model", "reasoningEffort"]);
+      expect(configOptions.map((option) => option.name)).toEqual(["Mode", "Model", "Reasoning Effort"]);
 
       const modeConfig = configOptions[0] as SelectConfigOption;
       const modelConfig = configOptions[1] as SelectConfigOption;

@@ -798,7 +798,7 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
 export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
   return {
     id: MODE_CONFIG_ID,
-    name: "mode",
+    name: "Mode",
     description:
       "agy execution mode (--mode). Default reviews writes; Accept Edits applies file changes; Plan focuses on planning.",
     category: "mode",
@@ -827,7 +827,7 @@ export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption 
 export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): V1SessionConfigOption {
   return {
     id: MODEL_CONFIG_ID,
-    name: "model",
+    name: "Model",
     description: "ACP model slug passed to agy --model (reasoningEffort is selected separately).",
     category: "model",
     type: "select",
@@ -846,7 +846,7 @@ export function reasoningEffectConfigOption(
 ): V1SessionConfigOption {
   return {
     id: REASONING_EFFORT_CONFIG_ID,
-    name: "reasoningEffort",
+    name: "Reasoning Effort",
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
