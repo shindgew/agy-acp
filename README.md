@@ -289,3 +289,22 @@ Smoke-test the ACP initialize handshake:
 ```sh
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' | node dist/main.js
 ```
+
+## Important Disclaimer & Legal Notice
+
+**This project is an unofficial community adapter** that bridges the official [Google Antigravity CLI (`agy`)](https://antigravity.google/product/antigravity-cli) with the [Agent Client Protocol (ACP)](https://agentclientprotocol.com).
+
+**Use at your own risk.**
+
+Google explicitly discourages third-party tools like this one. From their FAQ:
+
+> Using third party software, tools, or services to access Antigravity is a violation of our [Terms of Service](https://antigravity.google/terms), and severely degrades the experience for legitimate product users. Such actions may be grounds for suspension or termination of your account. If you would like to use a third party coding agent with Gemini, we recommend using a Vertex or AI Studio API key.
+
+### Recommendations
+- Use this adapter **only on test / secondary Google accounts**.
+- For lower-risk or production use, prefer official Google Vertex AI / AI Studio API keys with native ACP-compatible agents.
+- Monitor your account health and stop usage immediately if you notice any warnings.
+
+This project is provided **as-is** with no warranty. The maintainer(s) are not responsible for any account actions, restrictions, or consequences from using this software.
+
+By using `agy-acp`, you acknowledge that you have read and agree to both this disclaimer and Google's Terms of Service.
