@@ -12,7 +12,16 @@ for draft v2 may still change before ACP v2 stabilizes.
 ## [1.0.0-alpha.0] - 2026-07-22
 
 Pre-release: dual ACP **v1** + experimental draft **v2** support.
-Publish by tagging `v1.0.0-alpha.0` (GitHub pre-release + npm dist-tag `alpha`).
+
+After this commit is on `main`, publish with:
+
+```sh
+git tag -a v1.0.0-alpha.0 -m "Release 1.0.0-alpha.0"
+git push origin v1.0.0-alpha.0
+```
+
+That creates a GitHub **pre-release** and publishes npm under dist-tag **`alpha`**
+(`npx agy-acp@alpha`). Tags must point at a commit already on `main`.
 
 ### Added
 
@@ -29,11 +38,13 @@ Publish by tagging `v1.0.0-alpha.0` (GitHub pre-release + npm dist-tag `alpha`).
     `git_patch`, required message IDs on message chunks
   - Config options use `configId` (v1 still uses `id`)
 - `session/list` on both protocol versions (backed by the session store).
+- Release workflow support for SemVer pre-releases (`alpha` / `beta` / `rc`):
+  GitHub pre-release + matching npm dist-tag; only tags on `main` publish.
 
 ### Changed
 
 - Bumped `@agentclientprotocol/sdk` to `^1.3.0`.
-- Package version jumps to `1.0.0-alpha.0` for the ACP v2 pre-release track.
+- Package version is `1.0.0-alpha.0` for the ACP v2 pre-release track.
 
 ## [0.2.4] - 2026-07-22
 
