@@ -16,11 +16,25 @@ export function createConversationDb(dir: string, id: string): Database.Database
 
 export function insertStep(
   db: Database.Database,
-  row: { idx: number; stepType: number; status?: number; stepPayload: Uint8Array }
+  row: {
+    idx: number;
+    stepType: number;
+    status?: number;
+    stepPayload: Uint8Array;
+    permissions?: Uint8Array;
+    errorDetails?: Uint8Array;
+  }
 ): void {
   db.prepare(
-    "INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)"
-  ).run(row.idx, row.stepType, row.status ?? 3, Buffer.from(row.stepPayload));
+    "INSERT INTO steps (idx, step_type, status, step_payload, permissions, error_details) VALUES (?, ?, ?, ?, ?, ?)"
+  ).run(
+    row.idx,
+    row.stepType,
+    row.status ?? 3,
+    Buffer.from(row.stepPayload),
+    row.permissions ? Buffer.from(row.permissions) : null,
+    row.errorDetails ? Buffer.from(row.errorDetails) : null
+  );
 }
 
 export function updateStepPayload(db: Database.Database, idx: number, stepPayload: Uint8Array): void {
