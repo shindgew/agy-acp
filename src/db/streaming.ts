@@ -5,7 +5,15 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
 import { newConversationId } from "./scan.js";
+import { toolCallId } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
+import type { StepRow } from "./types.js";
+
+export interface PendingInteraction {
+  update: SessionUpdate;
+  row: StepRow;
+  toolName: string;
+}
 
 export interface StreamOptions {
   dir: string;
@@ -23,6 +31,12 @@ export class StreamPoller {
   private readonly translator: Translator;
   private db: ConversationDb | null = null;
   private boundId: string | null;
+  private _pending: PendingInteraction[] = [];
+  private _hasRows = false;
+  private _busy = false;
+  private _latestAgentComplete = false;
+  private _revision = 0;
+  private rowSnapshot = "";
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -45,6 +59,20 @@ export class StreamPoller {
     return this.translator.hadUpdates;
   }
 
+  /** Newly observed status-9 tool calls from the most recent poll. */
+  takePending(): PendingInteraction[] {
+    const pending = this._pending;
+    this._pending = [];
+    return pending;
+  }
+
+  get turnCompleteCandidate(): boolean {
+    return this._hasRows && !this._busy && this._latestAgentComplete;
+  }
+
+  /** Increments whenever the observed rows (including growing in-place rows) change. */
+  get revision(): number { return this._revision; }
+
   /** Read steps appended since the turn began and translate the new ones. */
   poll(): SessionUpdate[] {
     if (this.boundId === null && this.opts.snapshot !== null) {
@@ -57,7 +85,20 @@ export class StreamPoller {
       if (this.db === null) return [];
     }
 
-    return this.translator.translate(this.db.readAfter(this.opts.baseStepIdx));
+    const rows = this.db.readAfter(this.opts.baseStepIdx);
+    const snapshot = rows.map((row) => `${row.idx}:${row.stepType}:${row.status}:${JSON.stringify(row.stepPayload)}`).join("|");
+    if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
+    this._hasRows = rows.length > 0;
+    this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
+    const latest = rows.at(-1);
+    this._latestAgentComplete = latest?.stepType === 15 && latest.status === 3;
+    const updates = this.translator.translate(rows);
+    for (const update of updates.filter((item) => (item as unknown as { status?: string }).status === "pending")) {
+      const id = String((update as unknown as { toolCallId?: string }).toolCallId);
+      const row = rows.find((item) => toolCallId(item) === id);
+      if (row) this._pending.push({ update, row, toolName: row.stepPayload.toolRun?.call?.namePrimary || row.stepPayload.toolRun?.call?.nameSecondary || "unknown" });
+    }
+    return updates;
   }
 
   close(): void {
