@@ -37,6 +37,8 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] Permission notes map decision varint to granted/denied labels
 - [x] Experimental interactive permission bridge via persistent PTY for the
       four-choice menu (`run_command` + file tools sharing ToolConfirmationPanel)
+- [x] Execute tools surface command + captured output as content blocks (v1) and
+      draft-v2 agent-owned `terminal_update` + `type: "terminal"` embeds
 
 ### High priority
 
@@ -47,8 +49,9 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
       shapes (unsupported status-9 interactions currently fail closed)
 - [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
       prose tool content with Plan titles — not ACP plan updates)
-- [ ] Client terminals: `type: "terminal"` content + `terminal/*` (today: execute tools
-      show command + captured output as content blocks, not live terminal protocol)
+- [ ] v1 client-executed `terminal/*` (`terminal/create` runs a command in the
+      editor). Blocked while agy owns the shell — re-running would double-execute.
+      v1 keeps content blocks; draft v2 uses agent-owned terminals (see below).
 - [ ] ACP elicitation for `ask_question` (today: static tool_call text options)
 - [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
       (today: all MCP caps are `false` and servers are ignored)
@@ -117,6 +120,10 @@ differs or is incomplete.
       + `title` (same interactive bridge as v1)
 - [x] Prompt caps advertised: `image`, `embeddedContext`;
       `additionalDirectories` capability
+- [x] Agent-owned `terminal_update` for execute tools (command / cwd / output
+      snapshot / exitStatus) plus `type: "terminal"` tool content embed.
+      Output is DB field-28 snapshots (and progressive tool updates), not a
+      live client PTY byte stream.
 
 ### High priority
 
@@ -128,8 +135,9 @@ v2-aware clients):
 - [ ] Map `ask_question` / status-9 interactions to client `elicitation/create`
       (today: fail closed; static tool_call text only)
 - [ ] Native `plan_update` / `plan_removed` updates (not prose tool content)
-- [ ] `terminal_update` / `terminal_output_chunk` for execute tools when clients
-      support live terminals (today: text content blocks from DB field 28)
+- [ ] Incremental `terminal_output_chunk` while a command is still running, if
+      agy ever persists partial stdout before completion (today: full
+      `terminal_update.output` snapshot when field 28 is present)
 - [ ] MCP: honor session `mcpServers`, advertise `capabilities.session.mcp`, and
       route `mcp/*` if/when agy can consume external MCP servers
 - [ ] Expand interactive permission bridge to any remaining agy menus once their
