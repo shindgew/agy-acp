@@ -14,11 +14,14 @@ import {
   configFromEnv,
   parseAgyModels,
   type AgyCliConfig,
+  type PtyFactory,
+  type PtyProcess,
   type SpawnFactory,
   type SpawnOptions
 } from "../src/cli.js";
-import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
-import { encodeStepPayload } from "./fixtures/step-encoder.js";
+import { permissionKeys, permissionOptions } from "../src/permissions.js";
+import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
+import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -83,6 +86,153 @@ describe("commandForPrompt", () => {
     }).commandForPrompt("hello");
     expect(flagValue(planCmd, "--mode")).toBe("plan");
   });
+
+  it("builds interactive mode without print flags", () => {
+    const session = new AgyCliSession({ ...defaultConfig(), interactivePermissions: true });
+    const command = session.interactiveCommandForPrompt("hello");
+    expect(command.slice(0, 3)).toEqual(["agy", "--prompt-interactive", "hello"]);
+    expect(command).not.toContain("--print");
+    expect(command).not.toContain("--print-timeout");
+  });
+});
+
+describe("permission bridge", () => {
+  it("maps every semantic choice to agy's menu keys", () => {
+    expect(permissionKeys("agy-allow-once")).toBe("\r");
+    expect(permissionKeys("agy-allow-conversation")).toBe("\x1b[B\r");
+    expect(permissionKeys("agy-allow-settings")).toBe("\x1b[B\x1b[B\r");
+    expect(permissionKeys("agy-reject-once")).toBe("\x1b[B\x1b[B\x1b[B\r");
+    expect(permissionOptions({ sessionUpdate: "tool_call", toolCallId: "x", title: "Run", kind: "execute", status: "pending", rawInput: { CommandLine: "whoami" } })).toEqual([
+      { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+      { optionId: "agy-allow-conversation", kind: "allow_always", name: "Yes, and always allow in this conversation for commands that start with 'whoami'" },
+      { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow for commands that start with 'whoami' (Persist to settings.json)" },
+      { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
+    ]);
+  });
+
+  for (const [choice, keys] of [
+    ["agy-allow-once", "\r"],
+    ["agy-allow-conversation", "\x1b[B\r"],
+    ["agy-allow-settings", "\x1b[B\x1b[B\r"],
+    ["agy-reject-once", "\x1b[B\x1b[B\x1b[B\r"]
+  ] as const) {
+    it(`bridges ${choice} once and waits for the post-final idle marker`, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+      const pty = new FakePty(() => {
+        const db = createConversationDb(dir, "permission");
+        insertStep(db, pendingToolRow("run_command"));
+        db.close();
+      });
+      const session = interactiveSession(dir, pty);
+      let calls = 0;
+      let resolved = false;
+      const result = session.prompt("go", async () => {}, async () => {
+        calls++;
+        const db = new (await import("better-sqlite3")).default(path.join(dir, "permission.db"));
+        updateStep(db, 1, { status: 3 });
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        db.close();
+        setTimeout(() => pty.emitData("? for shortcuts"), 250);
+        return choice;
+      }).then((value) => { resolved = true; return value; });
+      await new Promise((resolve) => setTimeout(resolve, 225));
+      expect(resolved).toBe(false);
+      expect((await result).stopReason).toBe("end_turn");
+      expect(calls).toBe(1);
+      expect(pty.writes).toEqual([keys]);
+      await session.close();
+      expect(pty.killed).toBe(true);
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
+  it("accepts an idle marker emitted after the DB write but before the next poll", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-race");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-race.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not mistake the fresh TUI startup marker for turn completion", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "startup-marker");
+      insertStep(db, { idx: 1, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let resolved = false;
+    const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
+      .then((value) => { resolved = true; return value; });
+
+    await new Promise((resolve) => setTimeout(resolve, 225));
+    pty.emitData("redraw without another marker");
+    await new Promise((resolve) => setTimeout(resolve, 225));
+    expect(resolved).toBe(false);
+    pty.emitData("? for shortcuts");
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("times out while the ACP client leaves a permission request unanswered", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-timeout");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty, "30ms");
+
+    await expect(session.prompt("go", async () => {}, () => new Promise(() => {}))).rejects.toThrow(/timed out after 30ms/);
+    expect(pty.killed).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("fails closed for ask_question without writing menu keys", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => { const db = createConversationDb(dir, "ask"); insertStep(db, pendingToolRow("ask_question")); db.close(); });
+    const session = interactiveSession(dir, pty);
+    await expect(session.prompt("go", async () => {}, async () => "agy-allow-once")).rejects.toThrow(/Unsupported agy interaction 'ask_question'/);
+    expect(pty.writes).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("cancels reliably while awaiting permission", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => { const db = createConversationDb(dir, "cancel"); insertStep(db, pendingToolRow("run_command")); db.close(); });
+    const session = interactiveSession(dir, pty);
+    const pending = session.prompt("go", async () => {}, () => new Promise((resolve) => setTimeout(() => resolve("cancelled"), 300)));
+    await new Promise((resolve) => setTimeout(resolve, 220));
+    await session.cancel();
+    expect((await pending).stopReason).toBe("cancelled");
+    expect(pty.writes).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("times out and stops the PTY when no conversation binds", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty();
+    const session = interactiveSession(dir, pty, "30ms");
+    await expect(session.prompt("go", async () => {}, async () => "cancelled")).rejects.toThrow(/timed out after 30ms/);
+    expect(pty.killed).toBe(true);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 });
 
 describe("configFromEnv", () => {
@@ -100,6 +250,7 @@ describe("configFromEnv", () => {
     expect(config.skipPermissions).toBe(false);
     expect(config.promptInArgv).toBe(true);
     expect(config.autoInstall).toBe(false);
+    expect(config.interactivePermissions).toBe(true);
   });
 
   it("configures mode from argv and env", () => {
@@ -127,6 +278,7 @@ describe("configFromEnv", () => {
     });
     expect(config1.sandbox).toBe(false);
     expect(config1.skipPermissions).toBe(true);
+    expect(config1.interactivePermissions).toBe(false);
 
     const config2 = configFromEnv({
       cwd: "/repo",
@@ -137,6 +289,7 @@ describe("configFromEnv", () => {
     });
     expect(config2.sandbox).toBe(false);
     expect(config2.skipPermissions).toBe(true);
+    expect(config2.interactivePermissions).toBe(false);
 
     const config3 = configFromEnv({
       cwd: "/repo",
@@ -154,6 +307,14 @@ describe("configFromEnv", () => {
       }
     });
     expect(config4.sandbox).toBe(true);
+  });
+
+  it("enables interactive permissions by default and lets the dangerous bypass select print mode", () => {
+    expect(configFromEnv({ cwd: "/repo" }).interactivePermissions).toBe(true);
+    expect(configFromEnv({ cwd: "/repo", argv: ["--dangerously-skip-permissions"] }).interactivePermissions).toBe(false);
+    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1" } }).interactivePermissions).toBe(false);
+    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_INTERACTIVE_PERMISSIONS: "0" } }).interactivePermissions).toBe(false);
+    expect(configFromEnv({ cwd: "/repo", argv: ["--no-interactive-permissions"] }).interactivePermissions).toBe(false);
   });
 });
 
@@ -326,6 +487,7 @@ function defaultConfig(): AgyCliConfig {
     mode: "default",
     sandbox: true,
     skipPermissions: false,
+    interactivePermissions: false,
     promptInArgv: true,
     autoInstall: false,
     modelList: [],
@@ -394,4 +556,33 @@ class FakeProcess extends EventEmitter {
       return this as unknown as ReturnType<SpawnFactory>;
     };
   }
+}
+
+function pendingToolRow(name: string) {
+  return { idx: 1, stepType: 21, status: 9, stepPayload: encodeStepPayload({
+    toolRun: encodeToolRun({ call: encodeToolCall({ callId: "permission-1", namePrimary: name, rawInputJson: '{"CommandLine":"echo hi"}' }) })
+  }) };
+}
+
+function interactiveSession(dir: string, pty: FakePty, printTimeout = "3s") {
+  return new AgyCliSession({ ...defaultConfig(), conversationsDir: dir, interactivePermissions: true, printTimeout }, undefined, {
+    spawn: () => { pty.start(); return pty; }
+  } as PtyFactory);
+}
+
+class FakePty implements PtyProcess {
+  writes: string[] = [];
+  killed = false;
+  private dataListeners: Array<(data: string) => void> = [];
+  private exitListeners: Array<(event: { exitCode: number }) => void> = [];
+  constructor(private readonly onSpawn?: () => void) {}
+  start() {
+    this.onSpawn?.();
+    queueMicrotask(() => this.emitData("? for shortcuts"));
+  }
+  write(data: string) { this.writes.push(data); }
+  kill() { this.killed = true; for (const listener of this.exitListeners) listener({ exitCode: 0 }); }
+  onData(listener: (data: string) => void) { this.dataListeners.push(listener); return { dispose() {} }; }
+  onExit(listener: (event: { exitCode: number }) => void) { this.exitListeners.push(listener); return { dispose() {} }; }
+  emitData(data: string) { for (const listener of this.dataListeners) listener(data); }
 }
