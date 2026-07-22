@@ -7,7 +7,7 @@ The implementation is a TypeScript, `npx`-runnable ACP server built on
 keeps the adapter aligned with the logged-in Antigravity CLI experience and
 avoids a separate runtime startup path.
 
-**Current package:** `0.2.5` (`latest`). Supports **ACP v1** and
+**Current package:** `0.2.6` (`latest`). Supports **ACP v1** and
 **experimental draft ACP v2** side by side via version negotiation on
 `initialize`. Draft ACP v2 work continues on the `alpha` dist-tag
 (`1.0.0-alpha.*`). See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
@@ -225,13 +225,20 @@ conversation database rather than driving agy as a full interactive agent.
 - [x] Tool kinds, locations, `rawInput` / `rawOutput`, edit content type `diff`
 - [x] `session/list` from the session store
 - [x] Execute tool output when present in the conversation DB (field 28)
+- [x] Decode/show fetch and web-search result bodies when present in the DB
+      (search_web hit lists are not persisted by agy; query metadata only)
+- [x] Full-file write diffs with prior content when known from earlier view/write steps
+- [x] Permission notes map decision varint to granted/denied labels (still not interactive)
 
 ### High priority
 
-- [ ] Interactive `session/request_permission` (today: permission notes only appear as
-      post-hoc text on completed tool calls; agy still owns allow/deny)
+These need more than conversation-DB polling (interactive agy control plane or
+client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
+
+- [ ] Interactive `session/request_permission` (today: post-hoc granted/denied text;
+      agy still owns allow/deny under `--print`)
 - [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
-      plain tool content text)
+      prose tool content with Plan titles — not ACP plan updates)
 - [ ] Client terminals: `type: "terminal"` content + `terminal/*` (today: execute tools
       show command + captured output as content blocks, not live terminal protocol)
 - [ ] ACP elicitation for `ask_question` (today: static tool_call text options)
@@ -254,10 +261,10 @@ conversation database rather than driving agy as a full interactive agent.
 ### Fidelity improvements
 
 - [x] Surface command stdout/stderr on execute tool calls when present in the DB
-- [ ] Decode/show fetch and web-search result bodies (not just URL / title)
+- [x] Decode/show fetch and web-search result bodies (not just URL / title)
+- [x] Better diffs for full-file writes when prior content is knowable
+- [x] Map permission decisions into granted/denied labels (not interactive outcomes)
 - [ ] Agent-outbound images / richer content blocks when agy produces them
-- [ ] Better diffs for full-file writes when prior content is knowable
-- [ ] Map permission decisions into ACP permission outcomes, not only text
 
 ### Lower priority / unstable ACP
 
