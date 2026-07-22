@@ -224,6 +224,7 @@ function fsPath(p: string | null | undefined): string | null {
 /** Step types 8/9/17(view_file|list_dir): a file read or directory listing. */
 export function readUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate {
   const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
+  const fileContents = typeof ctx === "string" ? undefined : ctx?.fileContents;
   const { stepPayload, stepType } = stepRow;
   const toolRun = stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
@@ -258,7 +259,13 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext | string): Sess
     if (filePath) locations.push({ path: filePath, line: startLine });
 
     const body = asStr(view?.content);
-    if (body) content.push(codeBlock(body));
+    if (body) {
+      content.push(codeBlock(body));
+      // Remember full-file (or ranged) view content for later write diffs.
+      if (filePath && fileContents) {
+        fileContents.set(path.resolve(filePath), body);
+      }
+    }
   }
 
   return toolCallUpdate({ stepRow, title, kind: "read", content, locations });
@@ -422,13 +429,21 @@ function isPlanFile(targetFile: string): boolean {
  *  and step 17 artifact writes (e.g. a generated `plan.md` for user review). */
 export function editUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate | SessionUpdate[] {
   const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
+  const fileContents = typeof ctx === "string" ? undefined : ctx?.fileContents;
   const rawInput = parseRawInput(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
 
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
   const isPlan = isPlanFile(targetFile);
   const shown = targetFile ? toDisplayPath(targetFile, displayCwd) : "";
-  const title = isPlan ? (shown.split("/").pop() ?? "Implementation Plan") : shown ? `Edit ${shown}` : "Edit";
+  const planName = shown.split("/").pop() ?? "plan.md";
+  const title = isPlan
+    ? planName.toLowerCase().includes("plan")
+      ? planName
+      : `Plan: ${planName}`
+    : shown
+      ? `Edit ${shown}`
+      : "Edit";
 
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
@@ -437,9 +452,15 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext | string): Sess
   if (fullContent !== null) {
     // write_to_file: the whole file content is the new text.
     if (isPlan) {
-      content.push(textBlock(fullContent)); // plans are user-facing prose, not a code diff
+      // Plans are user-facing prose (brain artifacts), not code diffs.
+      content.push(textBlock(fullContent));
     } else if (targetFile) {
-      content.push({ type: "diff", path: targetFile, oldText: null, newText: fullContent });
+      // Prefer prior view_file/write content as oldText when known; otherwise null
+      // (new file or prior content never observed in this translator pass).
+      const cacheKey = path.resolve(targetFile);
+      const prior = fileContents?.get(cacheKey) ?? null;
+      content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
+      fileContents?.set(cacheKey, fullContent);
     }
     if (targetFile) locations.push({ path: targetFile });
   } else if (!isPlan) {

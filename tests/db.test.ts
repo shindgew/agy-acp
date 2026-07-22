@@ -359,6 +359,66 @@ describe("Translator", () => {
   });
 
 
+  it("uses prior view_file content as oldText on full-file writes", () => {
+    const db = createConversationDb(dir, "conv-write-diff");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-1",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"/repo/a.ts"}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///repo/a.ts",
+          content: "export const x = 1;\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "/repo/a.ts",
+              CodeContent: "export const x = 2;\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-diff")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: "/repo" });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-1"
+    ) as {
+      content?: Array<{ type?: string; path?: string; oldText?: string | null; newText?: string }>;
+    };
+    expect(write).toBeTruthy();
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({
+      type: "diff",
+      path: "/repo/a.ts",
+      oldText: "export const x = 1;\n",
+      newText: "export const x = 2;\n"
+    });
+  });
+
+
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
