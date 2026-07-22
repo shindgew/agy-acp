@@ -66,6 +66,23 @@ describe("commandForPrompt", () => {
     expect(flagValue(command, "--model")).toBe("gemini-3.5-flash");
     expect(flagValue(command, "--effort")).toBe("high");
   });
+
+  it("omits --mode for default and passes accept-edits or plan", () => {
+    const defaultCmd = new AgyCliSession(defaultConfig()).commandForPrompt("hello");
+    expect(defaultCmd).not.toContain("--mode");
+
+    const acceptCmd = new AgyCliSession({
+      ...defaultConfig(),
+      mode: "accept-edits"
+    }).commandForPrompt("hello");
+    expect(flagValue(acceptCmd, "--mode")).toBe("accept-edits");
+
+    const planCmd = new AgyCliSession({
+      ...defaultConfig(),
+      mode: "plan"
+    }).commandForPrompt("hello");
+    expect(flagValue(planCmd, "--mode")).toBe("plan");
+  });
 });
 
 describe("configFromEnv", () => {
@@ -83,6 +100,24 @@ describe("configFromEnv", () => {
     expect(config.skipPermissions).toBe(false);
     expect(config.promptInArgv).toBe(true);
     expect(config.autoInstall).toBe(false);
+  });
+
+  it("configures mode from argv and env", () => {
+    expect(configFromEnv({ cwd: "/repo" }).mode).toBe("default");
+    expect(configFromEnv({ cwd: "/repo", argv: ["--mode", "accept-edits"] }).mode).toBe("accept-edits");
+    expect(
+      configFromEnv({
+        cwd: "/repo",
+        env: { AGY_ACP_MODE: "plan" }
+      }).mode
+    ).toBe("plan");
+    expect(
+      configFromEnv({
+        cwd: "/repo",
+        env: { AGY_ACP_MODE: "plan" },
+        argv: ["--mode", "accept-edits"]
+      }).mode
+    ).toBe("accept-edits");
   });
 
   it("configures sandbox and skipPermissions based on argv and env", () => {
@@ -288,6 +323,7 @@ function defaultConfig(): AgyCliConfig {
     agyPath: "agy",
     printTimeout: "5m0s",
     effort: undefined,
+    mode: "default",
     sandbox: true,
     skipPermissions: false,
     promptInArgv: true,

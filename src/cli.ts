@@ -26,6 +26,19 @@ export type SpawnFactory = (
   options: SpawnOptions
 ) => SpawnedProcess;
 
+/** agy execution mode for `--mode` (omit flag when `default`). */
+export type AgyExecutionMode = "default" | "accept-edits" | "plan";
+
+export const AGY_EXECUTION_MODES: readonly AgyExecutionMode[] = [
+  "default",
+  "accept-edits",
+  "plan"
+] as const;
+
+export function isAgyExecutionMode(value: string): value is AgyExecutionMode {
+  return (AGY_EXECUTION_MODES as readonly string[]).includes(value);
+}
+
 export interface AgyCliConfig {
   cwd: string;
   workspaces: string[];
@@ -34,6 +47,12 @@ export interface AgyCliConfig {
   model?: string;
   /** Value for `--effort` (`low` | `medium` | `high`), when applicable. */
   effort?: string;
+  /**
+   * Agent execution mode for `agy --mode`.
+   * `default` omits the flag (request-review / write confirmation).
+   * `accept-edits` and `plan` pass `--mode <value>`.
+   */
+  mode: AgyExecutionMode;
   project?: string;
   printTimeout: string;
   sandbox: boolean;
@@ -125,6 +144,10 @@ export class AgyCliSession {
     this.config.effort = effort;
   }
 
+  setMode(mode: AgyExecutionMode): void {
+    this.config.mode = mode;
+  }
+
   commandForPrompt(prompt: string): string[] {
     const command = [
       this.config.agyPath,
@@ -142,6 +165,9 @@ export class AgyCliSession {
     }
     if (this.config.skipPermissions) {
       command.push("--dangerously-skip-permissions");
+    }
+    if (this.config.mode !== "default") {
+      command.push("--mode", this.config.mode);
     }
     if (this.config.model) {
       command.push("--model", this.config.model);
@@ -481,12 +507,26 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     skipPermissions = true;
   }
 
+  let mode: AgyExecutionMode = "default";
+  const modeFromEnv = optional(env.AGY_ACP_MODE);
+  if (modeFromEnv && isAgyExecutionMode(modeFromEnv)) {
+    mode = modeFromEnv;
+  }
+  const modeFlagIdx = argv.indexOf("--mode");
+  if (modeFlagIdx >= 0) {
+    const modeArg = argv[modeFlagIdx + 1];
+    if (modeArg && isAgyExecutionMode(modeArg)) {
+      mode = modeArg;
+    }
+  }
+
   return {
     cwd: input.cwd,
     workspaces: input.workspaces ?? [input.cwd],
     agyPath: "agy",
     model: undefined,
     effort: undefined,
+    mode,
     project: undefined,
     printTimeout: "5m0s",
     sandbox,
