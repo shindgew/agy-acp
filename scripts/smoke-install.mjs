@@ -5,7 +5,14 @@
 // the platform's real prebuilt (or compiled) native binary, which is the
 // part that can silently break per OS/arch and unit tests never spawn a
 // subprocess for.
+//
+// A stub `agy` is injected on PATH so initialize does not network-download
+// the real CLI (that was flaky / slow on some runners and is not what this
+// smoke test is measuring).
 import { spawn } from "node:child_process";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { client as acpClient, methods, ndJsonStream, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
@@ -16,10 +23,30 @@ if (!cliPath) {
   process.exit(2);
 }
 
-const child = spawn(process.execPath, [cliPath], { stdio: ["pipe", "pipe", "inherit"] });
+const stubBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-smoke-agy-"));
+// Minimal executable that satisfies resolveAgyExecutable / PATH lookups.
+// initialize must not network-download a real agy CLI during smoke.
+if (process.platform === "win32") {
+  // Windows resolves `agy` via PATHEXT (.COM/.EXE/.BAT/.CMD). A tiny .cmd is enough.
+  fs.writeFileSync(path.join(stubBinDir, "agy.cmd"), "@echo off\r\nexit /b 0\r\n");
+} else {
+  const stubAgyPath = path.join(stubBinDir, "agy");
+  fs.writeFileSync(stubAgyPath, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+}
 
-const timeout = delay(15_000).then(() => {
-  throw new Error("timed out waiting for initialize response");
+const childEnv = {
+  ...process.env,
+  PATH: `${stubBinDir}${path.delimiter}${process.env.PATH ?? ""}`
+};
+
+const child = spawn(process.execPath, [cliPath], {
+  stdio: ["pipe", "pipe", "inherit"],
+  env: childEnv
+});
+
+const timeoutMs = 30_000;
+const timeout = delay(timeoutMs).then(() => {
+  throw new Error(`timed out waiting for initialize response after ${timeoutMs}ms`);
 });
 
 async function run() {
@@ -54,4 +81,9 @@ try {
   process.exitCode = 1;
 } finally {
   child.kill();
+  try {
+    fs.rmSync(stubBinDir, { recursive: true, force: true });
+  } catch {
+    // best-effort cleanup
+  }
 }
