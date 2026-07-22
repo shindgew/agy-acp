@@ -139,9 +139,31 @@ function toolKind(name: string): ToolKind {
   if (/read|view|list/.test(n)) return "read";
   if (/grep|search|find/.test(n)) return "search";
   if (/command|execute|terminal/.test(n)) return "execute";
-  if (/think|thought|reason|plan/.test(n)) return "think";
+  if (/think|thought|reason/.test(n)) return "think";
   if (/url|fetch/.test(n)) return "fetch";
   return "other";
+}
+
+/** True when a tool name is pure agent reasoning (emit agent_thought_chunk). */
+export function isThoughtToolName(name: string): boolean {
+  return /^(think|thought|reason|reasoning)$/i.test(name.trim());
+}
+
+/** Build an agent_thought_chunk from a think-style tool step. */
+export function thoughtUpdate(stepRow: StepRow): SessionUpdate {
+  const rawInput = parseRawInput(stepRow);
+  const fromInput =
+    asStr(pick(rawInput, "Thought", "thought", "Text", "text", "Content", "content"))?.trim() ?? "";
+  const title =
+    asStr(stepRow.stepPayload.toolRun?.titlePrimary)?.trim() ||
+    asStr(stepRow.stepPayload.toolRun?.titleSecondary)?.trim() ||
+    "";
+  const text = fromInput || title || "Thinking";
+  return {
+    sessionUpdate: "agent_thought_chunk",
+    messageId: toolCallId(stepRow),
+    content: { type: "text", text }
+  } as SessionUpdate;
 }
 
 function pick(o: unknown, ...keys: string[]): unknown {

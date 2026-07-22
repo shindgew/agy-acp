@@ -8,12 +8,13 @@ import {
   editUpdate,
   executeUpdate,
   fetchUpdate,
+  isThoughtToolName,
   otherUpdate,
   questionUpdate,
   readUpdate,
   searchUpdate,
   subagentUpdate,
-  toolCallId
+  thoughtUpdate
 } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 
@@ -38,6 +39,8 @@ function agentUpdate(stepRow: StepRow): SessionUpdate {
 /**
  * Step type 23 — the conversation's title was (re)generated. agy packs an
  * optional "Think" narration after the title, separated by a blank line.
+ * (Streaming/replay also handle type 23 in Translator.handleTitle; this path
+ * remains for direct callers of buildUpdatefromStepPayload.)
  */
 function titleUpdate(stepRow: StepRow): SessionUpdate[] {
   const title = stepRow.stepPayload.titleUpdate?.title || null;
@@ -50,12 +53,9 @@ function titleUpdate(stepRow: StepRow): SessionUpdate[] {
   if (!narration || narration.length === 0) return updates;
 
   updates.push({
-    sessionUpdate: "tool_call",
-    toolCallId: toolCallId(stepRow),
-    title: "Think",
-    kind: "think",
-    status: "completed",
-    content: [{ type: "content", content: { type: "text", text: narration.join("\n\n") } }]
+    sessionUpdate: "agent_thought_chunk",
+    messageId: `title-thought-${stepRow.idx}`,
+    content: { type: "text", text: narration.join("\n\n") }
   });
   return updates;
 }
@@ -102,6 +102,7 @@ function buildByToolName(stepRow: StepRow, cwd?: string): SessionUpdate | Sessio
   const name = stepRow.stepPayload.toolRun?.call?.namePrimary ?? "";
   if (!name) return null;
 
+  if (isThoughtToolName(name)) return thoughtUpdate(stepRow);
   if (name === "view_file" || name === "list_dir") return readUpdate(stepRow, cwd);
   if (name === "grep_search" || name === "search_web") return searchUpdate(stepRow, cwd);
   if (name === "run_command") return executeUpdate(stepRow);

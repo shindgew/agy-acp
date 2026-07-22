@@ -173,6 +173,38 @@ describe("Translator", () => {
     db.close();
   });
 
+
+  it("emits agent_thought_chunk for title-attached Think narration", () => {
+    const db = createConversationDb(dir, "conv-thought");
+    insertStep(db, {
+      idx: 1,
+      stepType: 23,
+      stepPayload: encodeStepPayload({
+        titleUpdate: "My session\n\nI will inspect the repo structure first."
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-thought")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      { sessionUpdate: "session_info_update", title: "My session" },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "title-thought-1",
+        content: { type: "text", text: "I will inspect the repo structure first." }
+      }
+    ]);
+
+    // Second poll: no duplicate thought/title.
+    const conn2 = ConversationDb.open(dir, "conv-thought")!;
+    expect(translator.translate(conn2.readAfter(0))).toHaveLength(0);
+    conn2.close();
+  });
+
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
