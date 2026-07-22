@@ -8,9 +8,18 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
+import { revertEditToolCall } from "./edit-revert.js";
+import {
+  primeEditReadThroughClient,
+  routeEditThroughClient,
+  writeEditThroughClient,
+  type EditFsBridge
+} from "./edit-fs-bridge.js";
 import {
   canBridgeInteraction,
   interactionKeys,
+  isEditToolCall,
+  normalizePermissionChoice,
   parseAskQuestion,
   type AgyPermissionChoice
 } from "./permissions.js";
@@ -248,10 +257,15 @@ export class AgyCliSession {
    * translated ACP updates in order. Resolves once the process exits and a few
    * trailing polls have drained any steps flushed right around exit.
    */
-  async prompt(prompt: string, onUpdate: (update: SessionUpdate) => Promise<void>, onPermission?: PermissionCallback): Promise<AgyPromptOutcome> {
+  async prompt(
+    prompt: string,
+    onUpdate: (update: SessionUpdate) => Promise<void>,
+    onPermission?: PermissionCallback,
+    fsBridge?: EditFsBridge
+  ): Promise<AgyPromptOutcome> {
     if (this.config.interactivePermissions) {
       if (!onPermission) throw new Error("interactive permissions require a permission callback");
-      return this.runInteractivePrompt(prompt, onUpdate, onPermission);
+      return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge);
     }
     const command = this.commandForPrompt(prompt);
     try {
@@ -265,7 +279,12 @@ export class AgyCliSession {
     }
   }
 
-  private async runInteractivePrompt(prompt: string, onUpdate: (update: SessionUpdate) => Promise<void>, onPermission: PermissionCallback): Promise<AgyPromptOutcome> {
+  private async runInteractivePrompt(
+    prompt: string,
+    onUpdate: (update: SessionUpdate) => Promise<void>,
+    onPermission: PermissionCallback,
+    fsBridge?: EditFsBridge
+  ): Promise<AgyPromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
@@ -300,7 +319,17 @@ export class AgyCliSession {
     }
     const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
       baseStepIdx: this.#lastStepIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
-    const requested = new Set<string>();
+    // Tracked separately: a toolCallId can legitimately go through the live
+    // gate first (status 9 -> keys sent) and later reappear as a completed
+    // edit once agy applies it, at which point it's still worth routing
+    // through the client's fs write-through so its native review UI tracks
+    // the edit — that's a second, independent decision for the same id.
+    const requestedGate = new Set<string>();
+    const requestedEditReview = new Set<string>();
+    // ids that already went through the live gate above, so a later
+    // completed-edit sighting shouldn't trigger a second (redundant) local
+    // permission prompt if the client has no fs write-through.
+    const gatedIds = new Set<string>();
     const activePtyExit = this.#ptyExit!;
     const deadline = Date.now() + parsePrintTimeoutMs(this.config.printTimeout);
     let candidateRevision = -1;
@@ -324,35 +353,90 @@ export class AgyCliSession {
         for (const interaction of poller.takePending()) {
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
-          if (requested.has(id)) continue;
-          requested.add(id);
-          if (!canBridgeInteraction(interaction.toolName, toolCall)) {
-            const detail = unsupportedInteractionDetail(interaction.toolName, toolCall);
-            throw new AgyCliError(
-              `Unsupported agy interaction '${interaction.toolName}' (status 9); ${detail}`,
-              [this.config.agyPath],
-              null,
-              this.#ptyOutput
+          const seen = interaction.blocked ? requestedGate : requestedEditReview;
+          if (seen.has(id)) continue;
+          seen.add(id);
+
+          if (interaction.blocked) {
+            if (!canBridgeInteraction(interaction.toolName, toolCall)) {
+              const detail = unsupportedInteractionDetail(interaction.toolName, toolCall);
+              throw new AgyCliError(
+                `Unsupported agy interaction '${interaction.toolName}' (status 9); ${detail}`,
+                [this.config.agyPath],
+                null,
+                this.#ptyOutput
+              );
+            }
+            gatedIds.add(id);
+
+            if (fsBridge && isEditToolCall(toolCall)) {
+              // Prime the client's pre-edit snapshot now, while disk still
+              // genuinely holds it — agy hasn't written yet. Doing this
+              // after the fact (like the ungated path below) would mean
+              // reverting disk ourselves and racing the client's own file
+              // watcher/open-buffer state, which can silently produce an
+              // empty diff if the file is open in the client's editor.
+              try {
+                await this.raceTurnCallback(primeEditReadThroughClient(toolCall, fsBridge), deadline);
+              } catch {
+                // best effort
+              }
+            }
+
+            const choice = await this.raceTurnCallback(
+              onPermission(toolCall, { toolName: interaction.toolName }),
+              deadline
             );
+            if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
+
+            const keys = interactionKeys(choice, interaction.toolName, toolCall);
+            if (keys == null) {
+              throw new AgyCliError(
+                `Unsupported permission choice '${choice}' for '${interaction.toolName}'`,
+                [this.config.agyPath],
+                null,
+                this.#ptyOutput
+              );
+            }
+            this.#pty?.write(keys);
+            // An idle marker printed before the decision cannot mean that the
+            // approved/rejected command has finished.
+            requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
+            continue;
           }
+
+          // Completed edit — either it landed on disk without ever pausing
+          // (accept-edits / skip-permissions), or it just passed through the
+          // live gate above and agy applied it. Either way, if the client can
+          // take the write itself, hand it off so its native diff/review UI
+          // (e.g. Zed's Review Changes panel) tracks it.
+          if (fsBridge) {
+            const routed = gatedIds.has(id)
+              // Pre-edit state was already primed above (race-free) — just
+              // hand over the final content, no local revert needed.
+              ? await this.raceTurnCallback(writeEditThroughClient(toolCall, fsBridge), deadline)
+              // No prior gate — this is the only chance we get, so fall back
+              // to revert-then-replay (races the client's file watcher if
+              // the file happens to be open there, but it's the best we can
+              // do after the fact).
+              : await this.raceTurnCallback(routeEditThroughClient(toolCall, fsBridge), deadline);
+            if (routed === true) continue;
+          }
+          if (gatedIds.has(id)) {
+            // Already approved through the live gate above and the client
+            // has no write-through — nothing more to do here.
+            continue;
+          }
+
+          // Genuinely ungated (no live agy gate ever asked) and no client
+          // write-through available — offer local review: keep is a no-op,
+          // reject restores prior text.
           const choice = await this.raceTurnCallback(
             onPermission(toolCall, { toolName: interaction.toolName }),
             deadline
           );
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          const keys = interactionKeys(choice, interaction.toolName, toolCall);
-          if (keys == null) {
-            throw new AgyCliError(
-              `Unsupported permission choice '${choice}' for '${interaction.toolName}'`,
-              [this.config.agyPath],
-              null,
-              this.#ptyOutput
-            );
-          }
-          this.#pty?.write(keys);
-          // An idle marker printed before the decision cannot mean that the
-          // approved/rejected command has finished.
-          requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
+          if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
         if (this.#cancelled) break;
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
