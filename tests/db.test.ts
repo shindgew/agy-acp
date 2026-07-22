@@ -6,7 +6,7 @@ import { ConversationDb } from "../src/db/database.js";
 import { ReplayCache } from "../src/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/db/scan.js";
 import { Translator } from "../src/db/translator.js";
-import { createConversationDb, insertStep, updateStepPayload } from "./fixtures/conversation-db.js";
+import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import { encodeAgentText, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 let dir: string;
@@ -101,11 +101,12 @@ describe("Translator", () => {
     db.close();
   });
 
-  it("dedupes tool-call steps across repeated polls in stream mode", () => {
+  it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {
       idx: 1,
       stepType: 21,
+      status: 3,
       stepPayload: encodeStepPayload({
         toolRun: encodeToolRun({ call: encodeToolCall({ namePrimary: "run_command", rawInputJson: "{}" }) })
       })
@@ -116,6 +117,57 @@ describe("Translator", () => {
 
     expect(translator.translate(conn.readAfter(0))).toHaveLength(1);
     expect(translator.translate(conn.readAfter(0))).toHaveLength(0); // already emitted
+
+    conn.close();
+    db.close();
+  });
+
+
+  it("emits tool_call then tool_call_update when status progresses on the same idx", () => {
+    const db = createConversationDb(dir, "conv-tool-progress");
+    const call = encodeToolCall({
+      callId: "cmd-1",
+      namePrimary: "run_command",
+      rawInputJson: '{"CommandLine":"echo hi"}'
+    });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2, // in_progress
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-tool-progress")!;
+
+    const first = translator.translate(conn.readAfter(0));
+    expect(first).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "cmd-1",
+        kind: "execute",
+        status: "in_progress",
+        title: "echo hi"
+      }
+    ]);
+
+    updateStep(db, 1, { status: 3 });
+
+    const second = translator.translate(conn.readAfter(0));
+    expect(second).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "cmd-1",
+        kind: "execute",
+        status: "completed",
+        title: "echo hi"
+      }
+    ]);
+
+    // Unchanged snapshot: no third emission.
+    expect(translator.translate(conn.readAfter(0))).toHaveLength(0);
 
     conn.close();
     db.close();
