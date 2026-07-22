@@ -11,7 +11,8 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [1.0.0-alpha.0] - 2026-07-22
 
-Pre-release: dual ACP **v1** + experimental draft **v2** support. Not published.
+Pre-release: dual ACP **v1** + experimental draft **v2** support.
+Publish by tagging `v1.0.0-alpha.0` (GitHub pre-release + npm dist-tag `alpha`).
 
 ### Added
 

@@ -97,20 +97,35 @@ node dist/main.js
 Published package / Zed:
 
 ```sh
-npx agy-acp
+npx agy-acp                 # latest stable
+npx agy-acp@alpha           # latest alpha pre-release channel
+npx agy-acp@1.0.0-alpha.0   # pin a specific pre-release
 ```
 
-Example Zed custom agent shape:
+Example Zed custom agent shape (stable):
 
 ```json
 {
   "agent_servers": {
     "Google Antigravity": {
       "command": "npx",
-      "args": ["agy-acp"],
+      "args": ["-y", "agy-acp"],
       "env": {
         "PATH": "/path/to/agy/bin" // Optional
       }
+    }
+  }
+}
+```
+
+Alpha pre-release (after `v1.0.0-alpha.0` is tagged and CI publishes):
+
+```json
+{
+  "agent_servers": {
+    "Google Antigravity (alpha)": {
+      "command": "npx",
+      "args": ["-y", "agy-acp@alpha"]
     }
   }
 }
