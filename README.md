@@ -58,8 +58,8 @@ titles all included. `agy-acp` now reads that database directly instead:
   choice, etc.) persist to `~/.agy-acp-state/sessions.json` so list/load/resume
   survive a server restart — see `src/session-store.ts`,
 - `session/list` is advertised on both protocol versions,
-- separate ACP session `Model` and `Reasoning Effort` pickers populated from
-  `agy models` when available (effort maps to `agy --effort`),
+- ACP session config options in order: `mode`, `model`, `reasoningEffort`
+  (mode → `agy --mode`; model → `agy --model`; reasoningEffort → `agy --effort`),
 - cancellation sends `SIGINT` (giving `agy` a chance to flush its database
   before exiting), then `SIGKILL` if the process does not exit,
 - `--sandbox` is enabled by default,
@@ -141,14 +141,21 @@ Optional environment variables:
   if `agy` uses a different path on your OS.
 - `AGY_ACP_STATE_DIR`: where `agy-acp` persists session bindings (for
   `session/load`/`session/resume`), default `~/.agy-acp-state`.
+- `AGY_ACP_MODE`: default execution mode for new sessions (`default`,
+  `accept-edits`, or `plan`). Overridden by the session Mode picker or the
+  `agy-acp --mode <value>` argv flag.
 
 ## Model Picker
 
 When the ACP client supports session configuration options, `agy-acp` returns
-two options during `session/new`:
+three options during `session/new` (this order):
 
-- `Model`: a select option with ACP category `model`.
-- `Reasoning Effort`: a select option with ACP category `thought_level` (config id `effort`).
+- `mode` (category `mode`):
+  - `default` — agy request-review behavior (omits `--mode`; write tools may soft-deny under `--print`)
+  - `accept-edits` — `agy --mode accept-edits` (apply file edits without interactive write review)
+  - `plan` — `agy --mode plan`
+- `model` (category `model`)
+- `reasoningEffort` (category `thought_level`) — maps to `agy --effort`
 
 The adapter discovers model choices by running:
 
@@ -209,7 +216,7 @@ conversation database rather than driving agy as a full interactive agent.
 
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
-- [x] `session/set_config_option` (`model`, `effort`)
+- [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`)
 - [x] `additionalDirectories` → `agy --add-dir`
 - [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
 - [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
@@ -242,8 +249,8 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
 - [ ] Optional `session/delete` from the session store
 - [ ] `session/fork` if/when useful for clients
-- [ ] Session modes (`session/set_mode`, `modes`, `current_mode_update`) if they map
-      cleanly onto agy — today config options cover model/effort
+- [ ] Native ACP session modes (`session/set_mode`, `modes`, `current_mode_update`)
+      in addition to the `mode` config option that already maps to `agy --mode`
 - [ ] `available_commands_update` for slash-command discovery in the client UI
 - [ ] Push `config_option_update` when options change outside `set_config_option`
 - [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)
