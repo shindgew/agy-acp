@@ -40,14 +40,17 @@ export function parseRawInput(stepRow: StepRow): unknown {
 /** Stable tool-call id: agy's own call id when present, else a synthetic id
  *  derived from the step's position and type. */
 export function toolCallId(stepRow: StepRow): string {
-  return stepRow.stepPayload.toolRun?.call?.callId ?? `agy-${stepRow.idx}-${stepRow.stepType}`;
+  return stepRow.stepPayload.toolRun?.call?.callId.trim() || `agy-${stepRow.idx}-${stepRow.stepType}`;
 }
 
 /** Map agy's step `status` column to an ACP tool_call status.
- *  2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed.
+ *  2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed,
+ *  9 = generic RequestedInteraction (represented as pending for inspection).
  *  `cancelled` is ACP v2; v1 clients map it to `failed` at the protocol boundary. */
-function toolCallStatus(stepRow: StepRow): "in_progress" | "completed" | "failed" | "cancelled" {
+function toolCallStatus(stepRow: StepRow): "pending" | "in_progress" | "completed" | "failed" | "cancelled" {
   switch (stepRow.status) {
+    case 9:
+      return "pending";
     case 2:
       return "in_progress";
     case 6:
