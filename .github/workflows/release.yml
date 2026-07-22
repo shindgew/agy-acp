@@ -1,15 +1,16 @@
 name: Release
 
 # Push a version tag (vX.Y.Z matching package.json) to create a GitHub Release
-# and publish the package to npm — only if the tagged commit is already on main.
+# and publish the package to npm via Trusted Publishing (OIDC) — only if the
+# tagged commit is already on main.
+#
+# Configure the matching Trusted Publisher on npmjs.com for this repo and
+# workflow file (`.github/workflows/release.yml`). No long-lived NPM_TOKEN.
 #
 # Stable:     v1.2.3           → GitHub Release + npm --tag latest
 # Pre-release: v1.0.0-alpha.0  → GitHub pre-release + npm --tag alpha
 #              v1.0.0-beta.1   → GitHub pre-release + npm --tag beta
 #              v1.0.0-rc.1     → GitHub pre-release + npm --tag rc
-#
-# Tags on feature branches (or any commit not reachable from origin/main) fail
-# the "must be on main" check and do not publish.
 on:
   push:
     tags:
@@ -17,6 +18,8 @@ on:
 
 permissions:
   contents: write
+  # Required for npm Trusted Publishing (OIDC).
+  id-token: write
 
 jobs:
   release:
@@ -52,6 +55,10 @@ jobs:
           node-version: "22"
           cache: npm
           registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing needs a recent npm with OIDC support.
+      - name: Install npm with OIDC support
+        run: npm install -g npm@11
 
       - name: Verify tag matches package.json and detect channel
         id: version
@@ -117,6 +124,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "GitHub release ${GITHUB_REF_NAME} already exists; leaving it in place."
+            exit 0
+          fi
           args=(
             "$GITHUB_REF_NAME"
             --title "${{ steps.version.outputs.version }}"
@@ -128,8 +139,8 @@ jobs:
           fi
           gh release create "${args[@]}"
 
-      - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # No NODE_AUTH_TOKEN / NPM_TOKEN: npm exchanges the Actions OIDC token
+      # for a short-lived publish credential via Trusted Publishing.
+      - name: Publish to npm (Trusted Publisher)
         run: |
-          npm publish --access public --tag "${{ steps.version.outputs.npm_tag }}"
+          npm publish --access public --tag "${{ steps.version.outputs.npm_tag }}" --provenance
