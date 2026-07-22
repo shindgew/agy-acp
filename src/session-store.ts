@@ -29,7 +29,6 @@ export interface StoredSession {
   lastStepIdx: number;
   modelId: string;
   reasoningEffect: string;
-  fastMode: boolean;
   updatedAt: string;
 }
 
