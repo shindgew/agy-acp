@@ -9,19 +9,30 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-07-22
+
+Stable release focused on ACP v1 editor UX. Dual-protocol draft ACP v2 support
+from the `1.0.0-alpha.0` line is included when clients negotiate protocol
+version 2; default `npx agy-acp` clients continue to use ACP v1.
+
+### Added
+
+- Progressive tool lifecycle: stream polls re-read in-flight steps and emit
+  `tool_call` on first sight, then `tool_call_update` when status or content
+  changes (pending / in_progress → completed / failed / cancelled).
+- Real `agent_thought_chunk` for title-attached “Think” narration and think-style
+  tool names (replacing fake `tool_call` kind `think` for those paths).
+- Decode `run_command` result payload (step field 28) and surface command
+  stdout/stderr text plus `rawOutput.exitCode` on execute tool calls.
+- `session/list` coverage and docs (implementation already present).
+
+### Changed
+
+- Title-step “Think” blocks no longer re-emit on every stream poll.
+
 ## [1.0.0-alpha.0] - 2026-07-22
 
 Pre-release: dual ACP **v1** + experimental draft **v2** support.
-
-After this commit is on `main`, publish with:
-
-```sh
-git tag -a v1.0.0-alpha.0 -m "Release 1.0.0-alpha.0"
-git push origin v1.0.0-alpha.0
-```
-
-That creates a GitHub **pre-release** and publishes npm under dist-tag **`alpha`**
-(`npx agy-acp@alpha`). Tags must point at a commit already on `main`.
 
 ### Added
 
