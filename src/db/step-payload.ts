@@ -10,6 +10,7 @@
 // than a generated client, built on the generic `readMessage` walker in
 // ./protowire.ts instead of one bespoke switch statement per message.
 
+import { BinaryReader } from "@bufbuild/protobuf/wire";
 import { readInt, readMessage, readSubmessage } from "./protowire.js";
 
 export interface ToolCall {
@@ -96,6 +97,31 @@ export interface CommandResult {
   command: string;
 }
 
+/**
+ * Step-payload field 42 — search_web result metadata.
+ * Full hit lists are not persisted by agy; only query / refined query (or
+ * search URL) appear in the conversation DB.
+ */
+export interface WebSearchResult {
+  query: string;
+  /** Refined query text, or a Google search URL, depending on the step. */
+  refinedQueryOrUrl: string;
+}
+
+/**
+ * Step-payload field 40 — read_url_content result.
+ * Body text is often huge HTML; callers should truncate for UI display.
+ */
+export interface UrlContentResult {
+  url: string;
+  title: string;
+  description: string;
+  /** Fetched document body when embedded in the payload. */
+  body: string;
+  /** Optional path to a brain artifact with the full content. */
+  contentPath: string;
+}
+
 /** The blob in the `task_details` column. */
 export interface TaskDetails {
   taskId: string;
@@ -116,6 +142,8 @@ export interface StepPayload {
   agentText: AgentText | undefined;
   titleUpdate: TitleUpdate | undefined;
   commandResult: CommandResult | undefined;
+  webSearch: WebSearchResult | undefined;
+  urlContent: UrlContentResult | undefined;
 }
 
 function decodeToolCall(bytes: Uint8Array): ToolCall {
@@ -252,6 +280,93 @@ function decodeCommandResult(bytes: Uint8Array): CommandResult {
   );
 }
 
+function decodeWebSearchResult(bytes: Uint8Array): WebSearchResult {
+  return readMessage(bytes, { query: "", refinedQueryOrUrl: "" }, {
+    1: (m, r) => (m.query = r.string()),
+    5: (m, r) => (m.refinedQueryOrUrl = r.string())
+  });
+}
+
+/** Walk nested url-content document wrappers to find the largest text body. */
+function extractLargestString(bytes: Uint8Array, depth = 0): string {
+  if (depth > 6) return "";
+  let best = "";
+  // Manual walk so every string field is considered (body field numbers vary).
+  const reader = new BinaryReader(bytes);
+  while (reader.pos < reader.len) {
+    const tag = reader.uint32();
+    const wire = tag & 7;
+    if (wire === 0) {
+      reader.int64();
+    } else if (wire === 1) {
+      reader.skip(1);
+    } else if (wire === 5) {
+      reader.skip(5);
+    } else if (wire === 2) {
+      const slice = reader.bytes();
+      let asStr: string | null = null;
+      try {
+        asStr = new TextDecoder("utf-8", { fatal: true }).decode(slice);
+      } catch {
+        asStr = null;
+      }
+      if (asStr !== null && !asStr.includes("\0") && asStr.length > best.length) {
+        // Prefer printable document bodies over tiny labels.
+        best = asStr;
+      }
+      if (slice.length > 32) {
+        const nested = extractLargestString(slice, depth + 1);
+        if (nested.length > best.length) best = nested;
+      }
+    } else {
+      break;
+    }
+  }
+  return best;
+}
+
+function decodeUrlContentDocument(bytes: Uint8Array): {
+  title: string;
+  description: string;
+  body: string;
+} {
+  const doc = readMessage(bytes, { title: "", description: "", body: "" }, {
+    4: (m, r) => (m.title = r.string()),
+    6: (m, r) => {
+      // Nested content wrapper: dig for the largest embedded string as body.
+      const nested = r.bytes();
+      const body = extractLargestString(nested);
+      if (body.length > m.body.length) m.body = body;
+    },
+    7: (m, r) => (m.description = r.string())
+  });
+  return doc;
+}
+
+function decodeUrlContentResult(bytes: Uint8Array): UrlContentResult {
+  return readMessage<UrlContentResult>(
+    bytes,
+    { url: "", title: "", description: "", body: "", contentPath: "" },
+    {
+      1: (m, r) => {
+        const url = r.string();
+        if (!m.url) m.url = url;
+      },
+      2: (m, r) => {
+        const doc = readSubmessage(r, decodeUrlContentDocument);
+        if (doc.title) m.title = doc.title;
+        if (doc.description) m.description = doc.description;
+        if (doc.body) m.body = doc.body;
+      },
+      3: (m, r) => {
+        const url = r.string();
+        if (!m.url) m.url = url;
+      },
+      6: (m, r) => (m.contentPath = r.string())
+    }
+  );
+}
+
 export function decodeTaskDetails(bytes: Uint8Array): TaskDetails {
   return readMessage(bytes, { taskId: "", logUri: "", description: "" }, {
     1: (m, r) => (m.taskId = r.string()),
@@ -273,7 +388,9 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       userPrompt: undefined,
       agentText: undefined,
       titleUpdate: undefined,
-      commandResult: undefined
+      commandResult: undefined,
+      webSearch: undefined,
+      urlContent: undefined
     },
     {
       1: (m, r) => (m.validityCheck = readInt(r)),
@@ -285,7 +402,9 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       19: (m, r) => (m.userPrompt = readSubmessage(r, decodeUserPrompt)),
       20: (m, r) => (m.agentText = readSubmessage(r, decodeAgentText)),
       28: (m, r) => (m.commandResult = readSubmessage(r, decodeCommandResult)),
-      30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate))
+      30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate)),
+      40: (m, r) => (m.urlContent = readSubmessage(r, decodeUrlContentResult)),
+      42: (m, r) => (m.webSearch = readSubmessage(r, decodeWebSearchResult))
     }
   );
 }
