@@ -197,6 +197,19 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("maps permission-pending status 9 and dedupes its transition", () => {
+    const db = createConversationDb(dir, "conv-pending");
+    const payload = encodeStepPayload({ toolRun: encodeToolRun({ call: encodeToolCall({ callId: "p1", namePrimary: "run_command", rawInputJson: "{}" }) }) });
+    insertStep(db, { idx: 1, stepType: 21, status: 9, stepPayload: payload });
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-pending")!;
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([{ sessionUpdate: "tool_call", status: "pending" }]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+    updateStep(db, 1, { status: 3, stepPayload: payload });
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([{ sessionUpdate: "tool_call_update", status: "completed" }]);
+    conn.close(); db.close();
+  });
+
 
   it("emits agent_thought_chunk for title-attached Think narration", () => {
     const db = createConversationDb(dir, "conv-thought");

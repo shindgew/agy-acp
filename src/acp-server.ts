@@ -41,7 +41,18 @@ import type {
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./db/replay.js";
 import { ensureAgyInstalled } from "./installer.js";
-import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./cli.js";
+import {
+  AgyCliBackend,
+  AGY_EXECUTION_MODES,
+  configFromEnv,
+  isAgyExecutionMode,
+  type AgyCliConfig,
+  type AgyCliSession,
+  type AgyExecutionMode,
+  type PtyFactory,
+  type SpawnFactory
+} from "./cli.js";
+import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
 import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
@@ -55,9 +66,9 @@ export type AgentContext = V1AgentContext;
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
+const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
-const REASONING_EFFORT_CONFIG_ID = "effort";
-const FAST_MODE_CONFIG_ID = "fast-mode";
+const REASONING_EFFORT_CONFIG_ID = "reasoningEffort";
 const NO_REASONING_VALUE = "none";
 /** Legacy `agy models` lines: `Gemini 3.5 Flash (Medium)`. */
 const LEGACY_EFFORT_PATTERN = /\((low|medium|high)\)\s*$/i;
@@ -87,11 +98,12 @@ interface ModelCatalog {
   displayName(slug: string): string;
 }
 
-interface AgyAcpOptions {
+export interface AgyAcpOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   spawnProcess?: SpawnFactory;
+  ptyFactory?: PtyFactory;
   argv?: string[];
 }
 
@@ -120,7 +132,7 @@ export class AgyAcpAgent {
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#argv = options.argv ?? [];
-    this.#backend = new AgyCliBackend(options.spawnProcess);
+    this.#backend = new AgyCliBackend(options.spawnProcess, options.ptyFactory);
     this.#store = new SessionStore(defaultStateDir(this.#env));
   }
 
@@ -341,6 +353,15 @@ export class AgyAcpAgent {
           sessionId: params.sessionId,
           update: sessionUpdateToV1(update)
         });
+      }, async (toolCall) => {
+        if (signal?.aborted) return "cancelled";
+        const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
+        const response = await racePermissionCancellation(client.request(v1.methods.client.session.requestPermission, {
+          sessionId: params.sessionId,
+          toolCall: requestToolCall as v1.ToolCallUpdate,
+          options: permissionOptions(toolCall)
+        }), signal);
+        return selectedPermission(response, signal);
       });
       await this.persistSession(params.sessionId, session);
       return {
@@ -435,6 +456,15 @@ export class AgyAcpAgent {
 
   private async applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
     const session = this.requireSession(sessionId);
+    if (configId === MODE_CONFIG_ID) {
+      if (typeof value !== "string" || !isAgyExecutionMode(value)) {
+        throw new Error(`Mode must be one of: ${AGY_EXECUTION_MODES.join(", ")}`);
+      }
+      session.agy.setMode(value);
+      await this.persistSession(sessionId, session);
+      return;
+    }
+
     if (configId === MODEL_CONFIG_ID) {
       if (typeof value !== "string") {
         throw new Error("Model config value must be a string");
@@ -457,11 +487,11 @@ export class AgyAcpAgent {
 
     if (configId === REASONING_EFFORT_CONFIG_ID) {
       if (typeof value !== "string") {
-        throw new Error("Reasoning effect config value must be a string");
+        throw new Error("reasoningEffort config value must be a string");
       }
       const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
       if (!allowedEffects.includes(value)) {
-        throw new Error(`Unknown reasoning effect: ${value}`);
+        throw new Error(`Unknown reasoningEffort: ${value}`);
       }
 
       session.selectedReasoningEffect = value;
@@ -471,16 +501,6 @@ export class AgyAcpAgent {
         session.selectedReasoningEffect,
         session.catalog
       );
-      await this.persistSession(sessionId, session);
-      return;
-    }
-
-    if (configId === FAST_MODE_CONFIG_ID) {
-      const enabled = fastModeValueToBoolean(value);
-      if (enabled === undefined) {
-        throw new Error("Fast mode config value must be on or off");
-      }
-      session.agy.setFastMode(enabled);
       await this.persistSession(sessionId, session);
       return;
     }
@@ -542,6 +562,17 @@ export class AgyAcpAgent {
       try {
         const outcome = await session.agy.prompt(promptText, async (update) => {
           await notify(sessionUpdateToV2(update));
+        }, async (toolCall) => {
+          if (signal.aborted) return "cancelled";
+          const converted = sessionUpdateToV2(toolCall) as unknown as Record<string, unknown>;
+          const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
+          const response = await racePermissionCancellation(client.request(v2.methods.client.session.requestPermission, {
+            sessionId: params.sessionId,
+            title: String(requestToolCall.title ?? "Permission required"),
+            subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
+            options: permissionOptions(toolCall)
+          }), signal);
+          return selectedPermission(response, signal);
         });
         await this.persistSession(params.sessionId, session);
 
@@ -607,8 +638,8 @@ export class AgyAcpAgent {
       ? restoredModelSelection(stored, catalog)
       : initialModelSelection(config.model, catalog);
     applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
-    if (stored) {
-      agy.setFastMode(stored.fastMode);
+    if (stored?.mode && isAgyExecutionMode(stored.mode)) {
+      agy.setMode(stored.mode);
     }
 
     return {
@@ -649,9 +680,9 @@ export class AgyAcpAgent {
       workspaces: session.workspaces,
       conversationId: session.agy.conversationId,
       lastStepIdx: session.agy.lastStepIdx,
-      modelId: session.selectedBaseModel,
-      reasoningEffect: session.selectedReasoningEffect,
-      fastMode: session.agy.config.fastMode,
+      model: session.selectedBaseModel,
+      reasoningEffort: session.selectedReasoningEffect,
+      mode: session.agy.config.mode,
       updatedAt: new Date().toISOString()
     };
   }
@@ -715,6 +746,33 @@ export function runAcp(options: AgyAcpOptions = {}) {
 }
 
 export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
+
+function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermissionChoice | "cancelled" {
+  if (signal?.aborted || !response || typeof response !== "object") return "cancelled";
+  const outcome = (response as { outcome?: unknown }).outcome;
+  if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
+  const id = (outcome as { optionId?: string }).optionId;
+  return id === "agy-allow-once" || id === "agy-allow-conversation" || id === "agy-allow-settings" || id === "agy-reject-once"
+    ? id : "cancelled";
+}
+
+async function racePermissionCancellation<T>(request: Promise<T>, signal?: AbortSignal): Promise<T | null> {
+  if (!signal) return request;
+  if (signal.aborted) return null;
+  // A client may eventually reject a request abandoned because the turn was
+  // cancelled. Attach a handler now so that rejection is never unhandled.
+  const guarded = request.then((value) => value, (error) => {
+    if (signal.aborted) return null;
+    throw error;
+  });
+  let abort!: () => void;
+  const cancelled = new Promise<null>((resolve) => {
+    abort = () => resolve(null);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try { return await Promise.race([guarded, cancelled]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)];
@@ -787,11 +845,40 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   };
 }
 
+export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
+  return {
+    id: MODE_CONFIG_ID,
+    name: "Mode",
+    description:
+      "agy execution mode (--mode). Default reviews writes; Accept Edits applies file changes; Plan focuses on planning.",
+    category: "mode",
+    type: "select",
+    currentValue: mode,
+    options: [
+      {
+        value: "default",
+        name: "Default",
+        description: "Request review before file writes (agy default; omits --mode)."
+      },
+      {
+        value: "accept-edits",
+        name: "Accept Edits",
+        description: "Apply file edits without interactive write review (agy --mode accept-edits)."
+      },
+      {
+        value: "plan",
+        name: "Plan",
+        description: "Plan-oriented execution (agy --mode plan)."
+      }
+    ]
+  };
+}
+
 export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): V1SessionConfigOption {
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
-    description: "ACP model slug passed to agy --model (effort is selected separately).",
+    description: "ACP model slug passed to agy --model (reasoningEffort is selected separately).",
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
@@ -818,36 +905,15 @@ export function reasoningEffectConfigOption(
   };
 }
 
-export function fastModeConfigOption(enabled: boolean): V1SessionConfigOption {
-  return {
-    id: FAST_MODE_CONFIG_ID,
-    name: "Fast Mode",
-    description: "Prepends /fast before agy --print prompts to reduce thought visualization delays.",
-    category: "model_config",
-    type: "select",
-    currentValue: enabled ? "on" : "off",
-    options: [
-      {
-        value: "off",
-        name: "Off"
-      },
-      {
-        value: "on",
-        name: "On"
-      }
-    ]
-  };
-}
-
 function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] {
   return [
+    modeConfigOption(session.agy.config.mode),
     modelConfigOption(session.selectedBaseModel, session.catalog),
     reasoningEffectConfigOption(
       session.selectedBaseModel,
       session.selectedReasoningEffect,
       session.catalog
-    ),
-    fastModeConfigOption(session.agy.config.fastMode)
+    )
   ];
 }
 
@@ -1051,7 +1117,7 @@ function restoredModelSelection(
   stored: StoredSession,
   catalog: ModelCatalog
 ): { baseModel: string; reasoningEffect: string } {
-  const baseModel = normalizeStoredBaseModel(stored.modelId, catalog);
+  const baseModel = normalizeStoredBaseModel(stored.model, catalog);
   if (!baseModel) {
     return initialModelSelection(undefined, catalog);
   }
@@ -1061,7 +1127,7 @@ function restoredModelSelection(
   }
   return {
     baseModel,
-    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffect, effects)
+    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffort, effects)
   };
 }
 
@@ -1116,14 +1182,4 @@ function applyModelSelection(
   }
 
   agy.setEffort(selectedReasoningEffect);
-}
-
-function fastModeValueToBoolean(value: unknown): boolean | undefined {
-  if (value === true || value === "on") {
-    return true;
-  }
-  if (value === false || value === "off") {
-    return false;
-  }
-  return undefined;
 }

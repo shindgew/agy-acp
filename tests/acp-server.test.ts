@@ -65,7 +65,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-1", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) }
         ])
@@ -100,7 +100,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-2", [
           {
             idx: 1,
@@ -149,7 +149,7 @@ describe("session/load and session/resume", () => {
   it("replays prior conversation history on load, but not on resume, after a simulated restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
         ])
@@ -228,7 +228,7 @@ describe("session/load and session/resume", () => {
   it("lists persisted sessions after a restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-list", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "listed" }) }
         ])
@@ -278,7 +278,7 @@ describe("session/load and session/resume", () => {
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
       const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "unused", [])
       }));
       try {
@@ -369,7 +369,7 @@ describe("buildModelCatalog", () => {
     expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("Gemini 3.5 Flash (Medium)");
   });
 
-  it("exposes separate model and effort config options", () => {
+  it("exposes mode, model, and reasoningEffort config options", () => {
     const catalog = buildModelCatalog(["gemini-3.5-flash-medium", "gemini-3.5-flash-high"]);
     const modelConfig = modelConfigOption("gemini-3.5-flash", catalog) as SelectConfigOption;
     const reasoningConfig = reasoningEffectConfigOption(
@@ -378,6 +378,10 @@ describe("buildModelCatalog", () => {
       catalog
     ) as SelectConfigOption;
 
+    expect(modelConfig.id).toBe("model");
+    expect(modelConfig.name).toBe("Model");
+    expect(reasoningConfig.id).toBe("reasoningEffort");
+    expect(reasoningConfig.name).toBe("Reasoning Effort");
     expect(modelConfig.options).toEqual([
       { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" }
     ]);
@@ -403,7 +407,7 @@ describe("session model config", () => {
       .onNotification(methods.client.session.update, (ctx) => {
         updates.push(ctx.params.update as { content: { text: string } });
       });
-    const connection = client.connect(createAgyAcpApp({ spawnProcess: spawnProcess as unknown as SpawnFactory }));
+    const connection = client.connect(createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory }));
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
         cwd: "/repo",
@@ -411,58 +415,69 @@ describe("session model config", () => {
         mcpServers: []
       });
       const configOptions = session.configOptions ?? [];
-      const modelConfig = configOptions.find((option) => option.id === "model") as SelectConfigOption | undefined;
-      const reasoningConfig = configOptions.find((option) => option.id === "effort") as SelectConfigOption | undefined;
-      const fastConfig = configOptions.find((option) => option.id === "fast-mode") as SelectConfigOption | undefined;
+      expect(configOptions.map((option) => option.id)).toEqual(["mode", "model", "reasoningEffort"]);
+      expect(configOptions.map((option) => option.name)).toEqual(["Mode", "Model", "Reasoning Effort"]);
 
-      expect(modelConfig?.category).toBe("model");
-      expect(modelConfig?.currentValue).toBe("gemini-3.5-flash");
-      expect(modelConfig?.options).toEqual([
+      const modeConfig = configOptions[0] as SelectConfigOption;
+      const modelConfig = configOptions[1] as SelectConfigOption;
+      const reasoningConfig = configOptions[2] as SelectConfigOption;
+
+      expect(modeConfig.category).toBe("mode");
+      expect(modeConfig.currentValue).toBe("default");
+      expect(optionValues(modeConfig)).toEqual(["default", "accept-edits", "plan"]);
+
+      expect(modelConfig.category).toBe("model");
+      expect(modelConfig.currentValue).toBe("gemini-3.5-flash");
+      expect(modelConfig.options).toEqual([
         { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" },
         { value: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking" },
         { value: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }
       ]);
-      expect(reasoningConfig?.category).toBe("thought_level");
-      expect(reasoningConfig?.currentValue).toBe("medium");
-      expect(reasoningConfig?.options).toEqual([
+
+      expect(reasoningConfig.category).toBe("thought_level");
+      expect(reasoningConfig.currentValue).toBe("medium");
+      expect(reasoningConfig.options).toEqual([
         { value: "medium", name: "Medium" },
         { value: "high", name: "High" }
       ]);
-      expect(fastConfig?.category).toBe("model_config");
-      expect(fastConfig?.type).toBe("select");
-      expect(fastConfig?.currentValue).toBe("off");
+      expect(configOptions.find((option) => option.id === "effort" || option.id === "fast-mode")).toBeUndefined();
 
       const modelResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
         value: "gemini-3.5-flash"
       });
-      expect(modelResponse.configOptions[0].currentValue).toBe("gemini-3.5-flash");
-      expect(modelResponse.configOptions[1].currentValue).toBe("medium");
-      expect(optionValues(modelResponse.configOptions[1] as SelectConfigOption)).toEqual(["medium", "high"]);
+      expect(modelResponse.configOptions.map((option) => option.id)).toEqual([
+        "mode",
+        "model",
+        "reasoningEffort"
+      ]);
+      expect(modelResponse.configOptions[1].currentValue).toBe("gemini-3.5-flash");
+      expect(modelResponse.configOptions[2].currentValue).toBe("medium");
+      expect(optionValues(modelResponse.configOptions[2] as SelectConfigOption)).toEqual(["medium", "high"]);
 
       const reasoningResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "effort",
+        configId: "reasoningEffort",
         value: "high"
       });
-      expect(reasoningResponse.configOptions[1].currentValue).toBe("high");
+      expect(reasoningResponse.configOptions[2].currentValue).toBe("high");
 
-      const fastResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
+      const modeResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "fast-mode",
-        value: "on"
+        configId: "mode",
+        value: "accept-edits"
       });
-      expect(fastResponse.configOptions[2].currentValue).toBe("on");
+      expect(modeResponse.configOptions[0].currentValue).toBe("accept-edits");
 
       const thinkingResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
         value: "claude-opus-4-6-thinking"
       });
-      expect(thinkingResponse.configOptions[0].currentValue).toBe("claude-opus-4-6-thinking");
-      expect(thinkingResponse.configOptions[1].currentValue).toBe("none");
-      expect(optionNames(thinkingResponse.configOptions[1] as SelectConfigOption)).toEqual(["N/A"]);
+      expect(thinkingResponse.configOptions[1].currentValue).toBe("claude-opus-4-6-thinking");
+      expect(thinkingResponse.configOptions[2].currentValue).toBe("none");
+      expect(optionNames(thinkingResponse.configOptions[2] as SelectConfigOption)).toEqual(["N/A"]);
 
       await connection.agent.request(methods.agent.session.prompt, {
         sessionId: session.sessionId,
@@ -470,9 +485,10 @@ describe("session model config", () => {
       });
 
       const promptCall = calls.find((call) => call.args.includes("--print"));
-      expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("/fast\nhi");
+      expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("hi");
       expect(flagValue(promptCall!.args, "--model")).toBe("claude-opus-4-6-thinking");
       expect(promptCall!.args).not.toContain("--effort");
+      expect(flagValue(promptCall!.args, "--mode")).toBe("accept-edits");
     } finally {
       connection.close();
     }
@@ -488,7 +504,7 @@ describe("session model config", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAgyAcpApp({ spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -498,7 +514,7 @@ describe("session model config", () => {
       });
       await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
-        configId: "effort",
+        configId: "reasoningEffort",
         value: "high"
       });
       await connection.agent.request(methods.agent.session.prompt, {
@@ -548,7 +564,7 @@ describe("ACP v2 (experimental draft)", () => {
       );
       const connection = client.connect(
         createAgyAcpV2App({
-          env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-1", [
             { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello v2" }) }
           ])
@@ -601,7 +617,7 @@ describe("ACP v2 (experimental draft)", () => {
   it("replays history on session/resume with replayFrom start", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
@@ -695,6 +711,10 @@ describe("ACP v2 (experimental draft)", () => {
 
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
+
+function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
