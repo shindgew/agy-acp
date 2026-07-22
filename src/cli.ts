@@ -30,7 +30,10 @@ export interface AgyCliConfig {
   cwd: string;
   workspaces: string[];
   agyPath: string;
+  /** Value for `--model` (base model slug or display name). */
   model?: string;
+  /** Value for `--effort` (`low` | `medium` | `high`), when applicable. */
+  effort?: string;
   fastMode: boolean;
   project?: string;
   printTimeout: string;
@@ -119,6 +122,10 @@ export class AgyCliSession {
     this.config.model = model;
   }
 
+  setEffort(effort: string | undefined): void {
+    this.config.effort = effort;
+  }
+
   setFastMode(enabled: boolean): void {
     this.config.fastMode = enabled;
   }
@@ -144,6 +151,9 @@ export class AgyCliSession {
     }
     if (this.config.model) {
       command.push("--model", this.config.model);
+    }
+    if (this.config.effort) {
+      command.push("--effort", this.config.effort);
     }
     if (this.config.project) {
       command.push("--project", this.config.project);
@@ -487,6 +497,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     workspaces: input.workspaces ?? [input.cwd],
     agyPath: "agy",
     model: undefined,
+    effort: undefined,
     fastMode: false,
     project: undefined,
     printTimeout: "5m0s",

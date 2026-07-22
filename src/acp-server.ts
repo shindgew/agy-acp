@@ -36,8 +36,14 @@ const MODEL_CONFIG_ID = "model";
 const REASONING_EFFORT_CONFIG_ID = "effort";
 const FAST_MODE_CONFIG_ID = "fast-mode";
 const NO_REASONING_VALUE = "none";
-const REASONING_EFFECT_PATTERN = /\((low|medium|high)\)\s*$/i;
-const THINKING_SUFFIX_PATTERN = /\(thinking\)\s*$/i;
+/** Legacy `agy models` lines: `Gemini 3.5 Flash (Medium)`. */
+const LEGACY_EFFORT_PATTERN = /\((low|medium|high)\)\s*$/i;
+/** Legacy thinking models: `Claude Sonnet 4.6 (Thinking)`. */
+const LEGACY_THINKING_PATTERN = /\(thinking\)\s*$/i;
+/** Stable slug effort variants from agy ≥1.1.5: `gemini-3.5-flash-medium`. */
+const SLUG_EFFORT_PATTERN = /^(.*)-(low|medium|high)$/i;
+/** Stable slug thinking models: `claude-opus-4-6-thinking` (not an --effort value). */
+const SLUG_THINKING_PATTERN = /-thinking$/i;
 /** Conversation replays cached per conversation id before LRU eviction. */
 const REPLAY_CACHE_CAPACITY = 32;
 
@@ -47,10 +53,15 @@ interface ModelCatalog {
   effectsFor(baseModel: string): string[];
   resolve(baseModel: string, reasoningEffect: string): string;
   split(fullModel: string): { base: string; reasoningEffect?: string };
-  /** Map a legacy agy display name to its ACP slug, if known. */
+  /** Map a legacy agy display name (or base slug) to its ACP model slug, if known. */
   slugForAgyBase(agyBase: string): string | undefined;
-  /** Resolve an ACP model slug back to the agy display name for --model. */
+  /**
+   * Value for `agy --model`: base slug (modern) or legacy display base name.
+   * Effort is passed separately via `--effort`.
+   */
   agyBaseName(slug: string): string;
+  /** Human-readable label for the model picker. */
+  displayName(slug: string): string;
 }
 
 interface AgyAcpOptions {
@@ -397,13 +408,15 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   const baseOrder: string[] = [];
   const effectsByBase = new Map<string, string[]>();
   const agyBaseBySlug = new Map<string, string>();
+  const displayNameBySlug = new Map<string, string>();
 
   for (const entry of uniqueEntries) {
-    const { agyBase, base, reasoningEffect } = splitModelEntry(entry);
+    const { agyBase, base, reasoningEffect, displayBase } = splitModelEntry(entry);
     if (!effectsByBase.has(base)) {
       baseOrder.push(base);
       effectsByBase.set(base, []);
       agyBaseBySlug.set(base, agyBase);
+      displayNameBySlug.set(base, displayBase);
     }
     if (reasoningEffect) {
       const effects = effectsByBase.get(base)!;
@@ -433,7 +446,12 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
     },
     slugForAgyBase: (agyBase: string) => {
       const slug = toModelSlug(agyBase);
-      return agyBaseBySlug.has(slug) ? slug : undefined;
+      if (agyBaseBySlug.has(slug)) {
+        return slug;
+      }
+      // Stored full variant slug (e.g. gemini-3.5-flash-medium) or display line.
+      const fromEntry = splitModelEntry(agyBase);
+      return agyBaseBySlug.has(fromEntry.base) ? fromEntry.base : undefined;
     },
     agyBaseName: (slug: string) => {
       const agyBase = agyBaseBySlug.get(slug);
@@ -441,6 +459,13 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
         throw new Error(`Unknown model slug: ${slug}`);
       }
       return agyBase;
+    },
+    displayName: (slug: string) => {
+      const name = displayNameBySlug.get(slug);
+      if (!name) {
+        throw new Error(`Unknown model slug: ${slug}`);
+      }
+      return name;
     }
   };
 }
@@ -449,13 +474,13 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
-    description: "ACP model slug resolved to the matching agy --model value.",
+    description: "ACP model slug passed to agy --model (effort is selected separately).",
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
     options: catalog.baseModels().map((slug) => ({
       value: slug,
-      name: catalog.agyBaseName(slug)
+      name: catalog.displayName(slug)
     }))
   };
 }
@@ -467,8 +492,8 @@ export function reasoningEffectConfigOption(
 ): SessionConfigOption {
   return {
     id: REASONING_EFFORT_CONFIG_ID,
-    name: "Reasoning Effect",
-    description: "Reasoning effort suffix appended to the selected model.",
+    name: "Reasoning Effort",
+    description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
     currentValue: selectedReasoningEffect,
@@ -509,25 +534,77 @@ function sessionConfigOptions(session: SessionState): SessionConfigOption[] {
   ];
 }
 
-function splitModelEntry(model: string): { agyBase: string; base: string; reasoningEffect?: string } {
-  if (THINKING_SUFFIX_PATTERN.test(model)) {
-    return { agyBase: model, base: toModelSlug(model) };
+/**
+ * Split one `agy models` line into base model + optional effort.
+ *
+ * Modern (agy ≥1.1.5) lines are stable slugs, e.g.:
+ *   gemini-3.5-flash-medium  → base gemini-3.5-flash, effort medium
+ *   claude-opus-4-6-thinking → base claude-opus-4-6-thinking (thinking is not --effort)
+ *   claude-sonnet-4-6        → base only
+ *
+ * Legacy display names remain supported:
+ *   Gemini 3.5 Flash (Medium) → base gemini-3.5-flash, effort medium
+ *   Claude Sonnet 4.6 (Thinking) → base claude-sonnet-4.6-thinking
+ */
+function splitModelEntry(model: string): {
+  agyBase: string;
+  base: string;
+  displayBase: string;
+  reasoningEffect?: string;
+} {
+  const trimmed = model.trim();
+
+  // Legacy parenthetical thinking stays part of the model identity.
+  if (LEGACY_THINKING_PATTERN.test(trimmed)) {
+    const base = toModelSlug(trimmed);
+    return { agyBase: trimmed, base, displayBase: trimmed };
   }
 
-  const match = model.match(REASONING_EFFECT_PATTERN);
-  if (!match || match.index === undefined) {
-    return { agyBase: model, base: toModelSlug(model) };
+  // Legacy: `Gemini 3.5 Flash (Medium)`.
+  const legacyEffort = trimmed.match(LEGACY_EFFORT_PATTERN);
+  if (legacyEffort && legacyEffort.index !== undefined) {
+    const displayBase = trimmed.slice(0, legacyEffort.index).trim();
+    return {
+      agyBase: displayBase,
+      base: toModelSlug(displayBase),
+      displayBase,
+      reasoningEffect: legacyEffort[1].toLowerCase()
+    };
   }
 
-  const agyBase = model.slice(0, match.index).trim();
+  // Modern thinking slug: not an --effort level.
+  if (SLUG_THINKING_PATTERN.test(trimmed)) {
+    const base = toModelSlug(trimmed);
+    return {
+      agyBase: base,
+      base,
+      displayBase: prettifyModelSlug(base)
+    };
+  }
+
+  // Modern effort suffix on a stable slug.
+  const slugEffort = trimmed.match(SLUG_EFFORT_PATTERN);
+  if (slugEffort && isLikelyModelSlug(trimmed)) {
+    const base = toModelSlug(slugEffort[1]);
+    return {
+      agyBase: base,
+      base,
+      displayBase: prettifyModelSlug(base),
+      reasoningEffect: slugEffort[2].toLowerCase()
+    };
+  }
+
+  // Plain slug or unknown free-form name.
+  const base = toModelSlug(trimmed);
+  const looksLikeSlug = isLikelyModelSlug(trimmed) || trimmed === base;
   return {
-    agyBase,
-    base: toModelSlug(agyBase),
-    reasoningEffect: match[1].toLowerCase()
+    agyBase: looksLikeSlug ? base : trimmed,
+    base,
+    displayBase: looksLikeSlug ? prettifyModelSlug(base) : trimmed
   };
 }
 
-/** Convert an agy display name to an ACP-style model slug. */
+/** Convert an agy display name (or slug) to an ACP-style model slug. */
 export function toModelSlug(model: string): string {
   return model
     .toLowerCase()
@@ -535,6 +612,34 @@ export function toModelSlug(model: string): string {
     .trim()
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-");
+}
+
+/** True when `value` looks like a stable agy model slug rather than a display name. */
+function isLikelyModelSlug(value: string): boolean {
+  return /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/i.test(value.trim()) && !/\s/.test(value);
+}
+
+/** Humanize a model slug for picker labels: `gemini-3.5-flash` → `Gemini 3.5 Flash`. */
+export function prettifyModelSlug(slug: string): string {
+  const parts = slug.split("-").filter(Boolean);
+  const merged: string[] = [];
+  for (const part of parts) {
+    // `claude-sonnet-4-6` → version `4.6` (hyphenated minor in the slug).
+    if (/^\d+$/.test(part) && merged.length > 0 && /^\d+(?:\.\d+)*$/.test(merged[merged.length - 1]!)) {
+      merged[merged.length - 1] = `${merged[merged.length - 1]}.${part}`;
+      continue;
+    }
+    if (/^\d+(?:\.\d+)*$/.test(part)) {
+      merged.push(part);
+      continue;
+    }
+    if (part.toLowerCase() === "gpt" || part.toLowerCase() === "oss") {
+      merged.push(part.toUpperCase());
+      continue;
+    }
+    merged.push(part.charAt(0).toUpperCase() + part.slice(1).toLowerCase());
+  }
+  return merged.join(" ");
 }
 
 function reasoningEffectOptions(
@@ -665,18 +770,21 @@ function applyModelSelection(
   selectedReasoningEffect: string,
   catalog: ModelCatalog
 ): void {
+  // agy ≥1.1.5: --model is the base (slug or legacy display base), --effort is separate.
+  agy.setModel(catalog.agyBaseName(selectedBaseModel));
+
   const effects = catalog.effectsFor(selectedBaseModel);
   if (effects.length === 0) {
-    agy.setModel(catalog.agyBaseName(selectedBaseModel));
+    agy.setEffort(undefined);
     return;
   }
 
   if (selectedReasoningEffect === NO_REASONING_VALUE || !effects.includes(selectedReasoningEffect)) {
-    agy.setModel(catalog.resolve(selectedBaseModel, effects[0]));
+    agy.setEffort(effects[0]);
     return;
   }
 
-  agy.setModel(catalog.resolve(selectedBaseModel, selectedReasoningEffect));
+  agy.setEffort(selectedReasoningEffect);
 }
 
 function fastModeValueToBoolean(value: unknown): boolean | undefined {

@@ -51,8 +51,20 @@ describe("commandForPrompt", () => {
     expect(command[command.indexOf("--print") + 1]).toBe("hello");
     expect(command).toContain("--sandbox");
     expect(flagValue(command, "--model")).toBe("gemini-test");
+    expect(command).not.toContain("--effort");
     expect(flagValue(command, "--project")).toBe("project-1");
     expect(command.filter((_, i) => command[i - 1] === "--add-dir")).toEqual(["/repo", "/extra"]);
+  });
+
+  it("includes --effort when configured", () => {
+    const session = new AgyCliSession({
+      ...defaultConfig(),
+      model: "gemini-3.5-flash",
+      effort: "high"
+    });
+    const command = session.commandForPrompt("hello");
+    expect(flagValue(command, "--model")).toBe("gemini-3.5-flash");
+    expect(flagValue(command, "--effort")).toBe("high");
   });
 });
 
@@ -111,14 +123,14 @@ describe("configFromEnv", () => {
 });
 
 describe("parseAgyModels", () => {
-  it("filters status and log lines", () => {
+  it("filters status and log lines for modern slug lists", () => {
     expect(parseAgyModels(`
 Fetching available models...
 I0701 10:23:00.894210 model_config_manager.go:157] log
-Gemini 3.5 Flash (Medium)
-Claude Sonnet 4.6 (Thinking)
-Gemini 3.5 Flash (Medium)
-  `)).toEqual(["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)"]);
+gemini-3.5-flash-medium
+claude-opus-4-6-thinking
+gemini-3.5-flash-medium
+  `)).toEqual(["gemini-3.5-flash-medium", "claude-opus-4-6-thinking"]);
   });
 });
 
@@ -126,15 +138,15 @@ describe("listModels", () => {
   it("discovers models through agy models", async () => {
     const fake = new FakeProcess([`
 Fetching available models...
-Gemini 3.5 Flash (Medium)
-Claude Sonnet 4.6 (Thinking)
+gemini-3.5-flash-medium
+claude-opus-4-6-thinking
 `]);
     const calls: SpawnCall[] = [];
     const backend = new AgyCliBackend(fake.spawnFactory(calls));
 
     const models = await backend.listModels(defaultConfig());
 
-    expect(models).toEqual(["Gemini 3.5 Flash (Medium)", "Claude Sonnet 4.6 (Thinking)"]);
+    expect(models).toEqual(["gemini-3.5-flash-medium", "claude-opus-4-6-thinking"]);
     expect(calls[0].command).toBe("agy");
     expect(calls[0].args).toEqual(["models"]);
   });
@@ -298,6 +310,7 @@ function defaultConfig(): AgyCliConfig {
     agyPath: "agy",
     printTimeout: "5m0s",
     fastMode: false,
+    effort: undefined,
     sandbox: true,
     skipPermissions: false,
     promptInArgv: true,

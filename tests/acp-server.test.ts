@@ -248,11 +248,59 @@ describe("toModelSlug", () => {
     expect(toModelSlug("Gemini 3.5 Flash")).toBe("gemini-3.5-flash");
     expect(toModelSlug("Claude Sonnet 4.6 (Thinking)")).toBe("claude-sonnet-4.6-thinking");
     expect(toModelSlug("GPT-OSS 120B")).toBe("gpt-oss-120b");
+    expect(toModelSlug("gemini-3.5-flash-medium")).toBe("gemini-3.5-flash-medium");
   });
 });
 
 describe("buildModelCatalog", () => {
-  it("splits reasoning effects from base model names", () => {
+  it("splits effort from modern stable model slugs", () => {
+    const catalog = buildModelCatalog([
+      "gemini-3.5-flash-medium",
+      "gemini-3.5-flash-high",
+      "claude-opus-4-6-thinking",
+      "claude-sonnet-4-6",
+      "gpt-oss-120b-medium"
+    ]);
+
+    expect(catalog.baseModels()).toEqual([
+      "gemini-3.5-flash",
+      "claude-opus-4-6-thinking",
+      "claude-sonnet-4-6",
+      "gpt-oss-120b"
+    ]);
+    expect(catalog.effectsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
+    expect(catalog.effectsFor("claude-opus-4-6-thinking")).toEqual([]);
+    expect(catalog.effectsFor("claude-sonnet-4-6")).toEqual([]);
+    expect(catalog.effectsFor("gpt-oss-120b")).toEqual(["medium"]);
+    expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("gemini-3.5-flash-medium");
+    expect(catalog.split("gemini-3.5-flash-high")).toEqual({
+      base: "gemini-3.5-flash",
+      reasoningEffect: "high"
+    });
+    expect(catalog.agyBaseName("gemini-3.5-flash")).toBe("gemini-3.5-flash");
+    expect(catalog.displayName("gemini-3.5-flash")).toBe("Gemini 3.5 Flash");
+  });
+
+  it("keeps -thinking slug models intact instead of treating thinking as effort", () => {
+    const catalog = buildModelCatalog([
+      "gemini-3.5-flash-medium",
+      "claude-opus-4-6-thinking",
+      "claude-sonnet-4-6"
+    ]);
+
+    expect(catalog.split("claude-opus-4-6-thinking")).toEqual({
+      base: "claude-opus-4-6-thinking"
+    });
+    expect(catalog.effectsFor("claude-opus-4-6-thinking")).toEqual([]);
+    const reasoningConfig = reasoningEffectConfigOption(
+      "claude-opus-4-6-thinking",
+      "none",
+      catalog
+    ) as SelectConfigOption;
+    expect(reasoningConfig.options).toEqual([{ value: "none", name: "N/A" }]);
+  });
+
+  it("still splits legacy display-name model lists", () => {
     const catalog = buildModelCatalog([
       "Gemini 3.5 Flash (Medium)",
       "Gemini 3.5 Flash (High)",
@@ -264,40 +312,12 @@ describe("buildModelCatalog", () => {
       "claude-sonnet-4.6-thinking"
     ]);
     expect(catalog.effectsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
-    expect(catalog.effectsFor("claude-sonnet-4.6-thinking")).toEqual([]);
+    expect(catalog.agyBaseName("gemini-3.5-flash")).toBe("Gemini 3.5 Flash");
     expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("Gemini 3.5 Flash (Medium)");
-    expect(catalog.split("Gemini 3.5 Flash (High)")).toEqual({
-      base: "gemini-3.5-flash",
-      reasoningEffect: "high"
-    });
   });
 
-  it("keeps (Thinking) models intact instead of splitting them", () => {
-    const catalog = buildModelCatalog([
-      "Gemini 3.5 Flash (Medium)",
-      "Claude Sonnet 4.6 (Thinking)",
-      "Claude Sonnet 4.6 (Medium)"
-    ]);
-
-    expect(catalog.baseModels()).toEqual([
-      "gemini-3.5-flash",
-      "claude-sonnet-4.6-thinking",
-      "claude-sonnet-4.6"
-    ]);
-    expect(catalog.split("Claude Sonnet 4.6 (Thinking)")).toEqual({
-      base: "claude-sonnet-4.6-thinking"
-    });
-    expect(catalog.effectsFor("claude-sonnet-4.6-thinking")).toEqual([]);
-    const reasoningConfig = reasoningEffectConfigOption(
-      "claude-sonnet-4.6-thinking",
-      "none",
-      catalog
-    ) as SelectConfigOption;
-    expect(reasoningConfig.options).toEqual([{ value: "none", name: "N/A" }]);
-  });
-
-  it("exposes separate model and reasoning effect config options", () => {
-    const catalog = buildModelCatalog(["Gemini 3.5 Flash (Medium)", "Gemini 3.5 Flash (High)"]);
+  it("exposes separate model and effort config options", () => {
+    const catalog = buildModelCatalog(["gemini-3.5-flash-medium", "gemini-3.5-flash-high"]);
     const modelConfig = modelConfigOption("gemini-3.5-flash", catalog) as SelectConfigOption;
     const reasoningConfig = reasoningEffectConfigOption(
       "gemini-3.5-flash",
@@ -316,12 +336,12 @@ describe("buildModelCatalog", () => {
 });
 
 describe("session model config", () => {
-  it("updates agy --model for later prompts", async () => {
+  it("updates agy --model and --effort for later prompts", async () => {
     const calls: Array<{ command: string; args: string[]; options: unknown }> = [];
     const spawnProcess = (command: string, args: string[], options: unknown) => {
       calls.push({ command, args, options });
       if (args[0] === "models") {
-        return new FakeProcess(["Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n"]);
+        return new FakeProcess([TEST_MODELS_OUTPUT]);
       }
       return new FakeProcess(["ok"]);
     };
@@ -346,7 +366,8 @@ describe("session model config", () => {
       expect(modelConfig?.currentValue).toBe("gemini-3.5-flash");
       expect(modelConfig?.options).toEqual([
         { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" },
-        { value: "claude-sonnet-4.6-thinking", name: "Claude Sonnet 4.6 (Thinking)" }
+        { value: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking" },
+        { value: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }
       ]);
       expect(reasoningConfig?.category).toBe("thought_level");
       expect(reasoningConfig?.currentValue).toBe("medium");
@@ -384,9 +405,9 @@ describe("session model config", () => {
       const thinkingResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
-        value: "claude-sonnet-4.6-thinking"
+        value: "claude-opus-4-6-thinking"
       });
-      expect(thinkingResponse.configOptions[0].currentValue).toBe("claude-sonnet-4.6-thinking");
+      expect(thinkingResponse.configOptions[0].currentValue).toBe("claude-opus-4-6-thinking");
       expect(thinkingResponse.configOptions[1].currentValue).toBe("none");
       expect(optionNames(thinkingResponse.configOptions[1] as SelectConfigOption)).toEqual(["N/A"]);
 
@@ -397,14 +418,51 @@ describe("session model config", () => {
 
       const promptCall = calls.find((call) => call.args.includes("--print"));
       expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("/fast\nhi");
-      expect(flagValue(promptCall!.args, "--model")).toBe("Claude Sonnet 4.6 (Thinking)");
+      expect(flagValue(promptCall!.args, "--model")).toBe("claude-opus-4-6-thinking");
+      expect(promptCall!.args).not.toContain("--effort");
+    } finally {
+      connection.close();
+    }
+  });
+
+  it("passes --effort for models with effort variants", async () => {
+    const calls: Array<{ command: string; args: string[]; options: unknown }> = [];
+    const spawnProcess = (command: string, args: string[], options: unknown) => {
+      calls.push({ command, args, options });
+      if (args[0] === "models") {
+        return new FakeProcess([TEST_MODELS_OUTPUT]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+    const connection = acpClient({ name: "test-client" }).connect(
+      createAgyAcpApp({ spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+      await connection.agent.request(methods.agent.session.setConfigOption, {
+        sessionId: session.sessionId,
+        configId: "effort",
+        value: "high"
+      });
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "hi" }]
+      });
+      const promptCall = calls.find((call) => call.args.includes("--print"));
+      expect(flagValue(promptCall!.args, "--model")).toBe("gemini-3.5-flash");
+      expect(flagValue(promptCall!.args, "--effort")).toBe("high");
     } finally {
       connection.close();
     }
   });
 });
 
-const TEST_MODELS_OUTPUT = "Gemini 3.5 Flash (Medium)\nGemini 3.5 Flash (High)\nClaude Sonnet 4.6 (Thinking)\n";
+const TEST_MODELS_OUTPUT =
+  "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
 
 /** Run `fn` with a throwaway conversations directory, cleaned up afterwards. */
 async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
