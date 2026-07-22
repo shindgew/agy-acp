@@ -23,6 +23,9 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
 - [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`)
+- [x] Native session modes: `modes` on new/load/resume, `session/set_mode`,
+      `current_mode_update` (ids match config `mode` / `agy --mode`)
+- [x] `config_option_update` when mode changes via `session/set_mode`
 - [x] `additionalDirectories` → `agy --add-dir`
 - [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
 - [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
@@ -62,10 +65,14 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
 - [ ] Optional `session/delete` from the session store
 - [ ] `session/fork` if/when useful for clients
-- [ ] Native ACP session modes (`session/set_mode`, `modes`, `current_mode_update`)
+- [x] Native ACP session modes (`session/set_mode`, `modes`, `current_mode_update`)
       in addition to the `mode` config option that already maps to `agy --mode`
+      (same three ids: `default` / `accept-edits` / `plan`). Draft v2 has no
+      `set_mode` surface — mode stays a config option there.
 - [ ] `available_commands_update` for slash-command discovery in the client UI
-- [ ] Push `config_option_update` when options change outside `set_config_option`
+- [x] Push `config_option_update` when options change outside `set_config_option`
+      (v1: after `session/set_mode`; `set_config_option` still returns the full
+      list in its response and pushes `current_mode_update` when mode changes)
 - [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)
 - [ ] `usage_update` and prompt-response `usage` when token data is available
 - [ ] Richer `stopReason` values (`max_tokens`, `refusal`, `max_turn_requests`) when
@@ -149,8 +156,9 @@ v2-aware clients):
 ### Medium priority
 
 - [ ] Advertise and implement `session/delete` / `session/fork` when useful
-- [ ] Push `config_option_update` when catalog/options change outside
-      `set_config_option`
+- [x] Push `config_option_update` when options change outside
+      `set_config_option` (v1 `set_mode` path; draft v2 has no set_mode — response
+      still returns full options on set_config_option)
 - [ ] `available_commands_update` for slash-command discovery
 - [ ] `auth/login` / `auth/logout` + non-empty `authMethods` (today: empty list;
       require pre-logged-in `agy`)
