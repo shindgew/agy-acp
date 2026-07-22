@@ -9,17 +9,40 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-07-22
+
+Session config aligned with Antigravity CLI 1.1.x, plus an experimental
+interactive permission bridge for `run_command`. Prefer **agy ≥ 1.1.5** for
+modes, stable model slugs, `--effort`, and the bridged permission menu.
+
 ### Added
 
 - ACP session `mode` config option mapped to `agy --mode`:
   `default` (omit flag), `accept-edits`, and `plan`. Persisted on load/resume,
   overridable via `AGY_ACP_MODE` or `agy-acp --mode <value>`.
+- Experimental persistent-PTY permission bridge (default path). ACP clients can
+  allow once, allow for the persistent conversation, always allow via
+  `settings.json`, or reject once. Cancellation and model/mode changes restart
+  the PTY and reset conversation-scoped grants. Only the observed four-choice
+  `run_command` menu is bridged; other status-9 interactions fail closed without
+  writing PTY menu keys. `--dangerously-skip-permissions` selects non-interactive
+  print mode; `AGY_ACP_INTERACTIVE_PERMISSIONS=0` /
+  `--no-interactive-permissions` also use print mode without auto-approval.
+- `node-pty` dependency for the interactive path, with platform smoke coverage.
 
 ### Changed
 
-- Session config option ids/names and order are now `mode`, `model`,
+- Session config option **ids** and order are now `mode`, `model`,
   `reasoningEffort` (was `model`, `effort`, and previously `fast-mode`).
+  Display **names** are `Mode`, `Model`, `Reasoning Effort`.
   `reasoningEffort` still maps to `agy --effort`.
+- Session store fields renamed to match: `model` / `reasoningEffort` (legacy
+  `modelId` / `reasoningEffect` still load).
+- Default execution path uses interactive `agy --prompt-interactive` via a
+  persistent PTY when the permission bridge is enabled; print mode remains
+  available for the bypasses above.
+- README documents Mode / allowlist / skip-permissions workarounds and the
+  interactive bridge limits.
 
 ### Removed
 
