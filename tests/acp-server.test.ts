@@ -65,7 +65,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-1", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) }
         ])
@@ -100,7 +100,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-2", [
           {
             idx: 1,
@@ -149,7 +149,7 @@ describe("session/load and session/resume", () => {
   it("replays prior conversation history on load, but not on resume, after a simulated restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
         ])
@@ -228,7 +228,7 @@ describe("session/load and session/resume", () => {
   it("lists persisted sessions after a restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-list", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "listed" }) }
         ])
@@ -278,7 +278,7 @@ describe("session/load and session/resume", () => {
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
       const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "unused", [])
       }));
       try {
@@ -407,7 +407,7 @@ describe("session model config", () => {
       .onNotification(methods.client.session.update, (ctx) => {
         updates.push(ctx.params.update as { content: { text: string } });
       });
-    const connection = client.connect(createAgyAcpApp({ spawnProcess: spawnProcess as unknown as SpawnFactory }));
+    const connection = client.connect(createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory }));
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
         cwd: "/repo",
@@ -504,7 +504,7 @@ describe("session model config", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAgyAcpApp({ spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -564,7 +564,7 @@ describe("ACP v2 (experimental draft)", () => {
       );
       const connection = client.connect(
         createAgyAcpV2App({
-          env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-1", [
             { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello v2" }) }
           ])
@@ -617,7 +617,7 @@ describe("ACP v2 (experimental draft)", () => {
   it("replays history on session/resume with replayFrom start", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
@@ -711,6 +711,10 @@ describe("ACP v2 (experimental draft)", () => {
 
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
+
+function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
+}
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
