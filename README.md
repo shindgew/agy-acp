@@ -4,7 +4,7 @@ ACP adapter for Google Antigravity's `agy` CLI. TypeScript, `npx`-runnable, buil
 `@agentclientprotocol/sdk`. Runs a persistent interactive `agy` process so ACP clients
 can answer permission requests while keeping the logged-in Antigravity CLI experience.
 
-**Package:** `0.2.7` (`latest`) — ACP v1 + experimental draft ACP v2 via `initialize`
+**Package:** `0.2.8` (`latest`) — ACP v1 + experimental draft ACP v2 via `initialize`
 negotiation. Draft v2 continues on the `alpha` dist-tag (`1.0.0-alpha.*`). See the
 [ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
 [migration guide](https://agentclientprotocol.com/protocol/v2/migration).
@@ -20,7 +20,7 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
 ```sh
-npx agy-acp                 # stable (0.2.7)
+npx agy-acp                 # stable (0.2.8)
 npx agy-acp@alpha           # draft ACP v2 channel
 npx agy-acp@1.0.0-alpha.0   # pin a pre-release
 ```
@@ -94,15 +94,6 @@ Zed / ACP client
 - Session bindings persist under `AGY_ACP_STATE_DIR` so list/load/resume survive restarts.
 - **v1:** `session/load` replays history; `session/resume` reattaches without replay.
   **v2:** only `session/resume` — pass `replayFrom: { "type": "start" }` to replay.
-
-### Permissions
-
-Default: interactive bridge (agy **1.1.5** TUI/DB behavior) for the four-choice
-`run_command` menu — Yes, allow for conversation, always allow, No. Model/mode changes
-or cancel restart the process and reset process-scoped grants.
-
-`--dangerously-skip-permissions` (or env) disables the bridge and uses `agy --print`.
-Other interactions (e.g. `ask_question`) fail closed — no guessed menu keys.
 
 Wire format decoding was cross-referenced with
 [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp) (MIT);

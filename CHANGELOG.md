@@ -28,6 +28,24 @@ for draft v2 may still change before ACP v2 stabilizes.
   `config_option_update`; changing `mode` via `session/set_config_option` pushes
   `current_mode_update` so native mode UIs stay aligned.
 
+## [0.2.8] - 2026-07-22
+
+Broader interactive permission bridge: file tools and single-select
+`ask_question` can be answered through ACP clients.
+
+### Changed
+
+- Interactive permission bridge now covers file tools that share agy's
+  four-choice ToolConfirmationPanel (`write_to_file`, `replace_file_content`,
+  `multi_replace_file_content`, `view_file`, `list_dir`) in addition to
+  `run_command`.
+- Single-select, single-question `ask_question` is bridged through
+  `session/request_permission` (one option per choice + Skip). Multi-select
+  and multi-question forms still fail closed without writing PTY keys.
+- File-edit permissions use **standard ACP** option ids/kinds
+  (`allow-once` / `allow-always` / `reject-once`) so clients can map them to
+  native Keep / Reject UI, while still driving agy's TUI via PTY keys.
+
 ## [0.2.7] - 2026-07-22
 
 Session config aligned with Antigravity CLI 1.1.x, plus an experimental
