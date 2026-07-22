@@ -1,34 +1,57 @@
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { Readable, Writable } from "node:stream";
-import {
-  agent as acpAgent,
-  methods,
-  ndJsonStream,
-  PROTOCOL_VERSION,
-  type AgentContext,
-  type AgentApp,
-  type CloseSessionRequest,
-  type CloseSessionResponse,
-  type InitializeRequest,
-  type InitializeResponse,
-  type LoadSessionRequest,
-  type LoadSessionResponse,
-  type NewSessionRequest,
-  type NewSessionResponse,
-  type PromptRequest,
-  type PromptResponse,
-  type ResumeSessionRequest,
-  type ResumeSessionResponse,
-  type SessionConfigOption,
-  type SetSessionConfigOptionRequest,
-  type SetSessionConfigOptionResponse
+import * as v1 from "@agentclientprotocol/sdk";
+import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
+import type {
+  AgentContext as V1AgentContext,
+  AgentApp as V1AgentApp,
+  CloseSessionRequest,
+  CloseSessionResponse,
+  InitializeRequest as V1InitializeRequest,
+  InitializeResponse as V1InitializeResponse,
+  LoadSessionRequest,
+  LoadSessionResponse,
+  NewSessionRequest as V1NewSessionRequest,
+  NewSessionResponse as V1NewSessionResponse,
+  PromptRequest as V1PromptRequest,
+  PromptResponse as V1PromptResponse,
+  ResumeSessionRequest as V1ResumeSessionRequest,
+  ResumeSessionResponse as V1ResumeSessionResponse,
+  SessionConfigOption as V1SessionConfigOption,
+  SetSessionConfigOptionRequest as V1SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse as V1SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk";
+import type {
+  AgentContext as V2AgentContext,
+  AgentApp as V2AgentApp,
+  InitializeRequest as V2InitializeRequest,
+  InitializeResponse as V2InitializeResponse,
+  ListSessionsRequest,
+  ListSessionsResponse,
+  NewSessionRequest as V2NewSessionRequest,
+  NewSessionResponse as V2NewSessionResponse,
+  PromptRequest as V2PromptRequest,
+  PromptResponse as V2PromptResponse,
+  ResumeSessionRequest as V2ResumeSessionRequest,
+  ResumeSessionResponse as V2ResumeSessionResponse,
+  SessionConfigOption as V2SessionConfigOption,
+  SetSessionConfigOptionRequest as V2SetSessionConfigOptionRequest,
+  SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
+} from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./db/replay.js";
 import { ensureAgyInstalled } from "./installer.js";
 import { AgyCliBackend, configFromEnv, type AgyCliConfig, type AgyCliSession, type SpawnFactory } from "./cli.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
+import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
+
+/** Prefer re-exporting stable v1 symbols used by existing tests and consumers. */
+export const methods = v1.methods;
+export const PROTOCOL_VERSION = v1.PROTOCOL_VERSION;
+export type SessionConfigOption = V1SessionConfigOption;
+export type AgentApp = V1AgentApp;
+export type AgentContext = V1AgentContext;
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
@@ -81,6 +104,8 @@ interface SessionState {
   selectedBaseModel: string;
   selectedReasoningEffect: string;
   activePrompt: boolean;
+  /** Active v2 prompt-turn abort controller, if any. */
+  promptAbort?: AbortController;
 }
 
 export class AgyAcpAgent {
@@ -99,10 +124,11 @@ export class AgyAcpAgent {
     this.#store = new SessionStore(defaultStateDir(this.#env));
   }
 
-  async initialize(params: InitializeRequest): Promise<InitializeResponse> {
+  async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
     return {
-      protocolVersion: params.protocolVersion === PROTOCOL_VERSION ? params.protocolVersion : PROTOCOL_VERSION,
+      protocolVersion:
+        params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
       agentCapabilities: {
         loadSession: true,
         promptCapabilities: {
@@ -116,6 +142,7 @@ export class AgyAcpAgent {
           acp: false
         },
         sessionCapabilities: {
+          list: {},
           additionalDirectories: {},
           resume: {},
           close: {}
@@ -129,6 +156,35 @@ export class AgyAcpAgent {
     };
   }
 
+  async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
+    await this.ensureAgyReady();
+    return {
+      protocolVersion:
+        params.protocolVersion === v2.PROTOCOL_VERSION ? params.protocolVersion : v2.PROTOCOL_VERSION,
+      info: {
+        name: "agy-acp",
+        title: "Google Antigravity CLI",
+        version: packageJson.version ?? "0.0.0"
+      },
+      // Advertising `session` commits to the v2 baseline methods (new/list/resume/close/prompt/cancel/update).
+      capabilities: {
+        session: {
+          prompt: {
+            image: {},
+            embeddedContext: {}
+          },
+          additionalDirectories: {}
+        }
+      },
+      authMethods: []
+    };
+  }
+
+  /** @deprecated Use initializeV1 — kept for tests that call initialize directly. */
+  async initialize(params: V1InitializeRequest): Promise<V1InitializeResponse> {
+    return this.initializeV1(params);
+  }
+
   private ensureAgyReady(): Promise<string | null> {
     this.#ensureAgyPromise ??= ensureAgyInstalled({
       env: this.#env,
@@ -137,111 +193,134 @@ export class AgyAcpAgent {
     return this.#ensureAgyPromise;
   }
 
-  async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
-    const cwd = params.cwd || process.cwd();
-    const additionalDirectories = params.additionalDirectories ?? [];
-    const workspaces = dedupe([cwd, ...additionalDirectories]);
-    const id = randomUUID();
-    const session = await this.buildSession(cwd, workspaces, null);
-    session.id = id;
-    this.#sessions.set(id, session);
-    await this.persistSession(id, session);
+  async newSessionV1(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
+    const session = await this.createSession(params.cwd, params.additionalDirectories);
     return {
-      sessionId: id,
-      configOptions: sessionConfigOptions(session)
+      sessionId: session.id,
+      configOptions: sessionConfigOptionsV1(session)
+    };
+  }
+
+  async newSessionV2(params: V2NewSessionRequest): Promise<V2NewSessionResponse> {
+    const session = await this.createSession(params.cwd, params.additionalDirectories);
+    return {
+      sessionId: session.id,
+      configOptions: sessionConfigOptionsV2(session)
+    };
+  }
+
+  /** @deprecated Prefer newSessionV1. */
+  async newSession(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
+    return this.newSessionV1(params);
+  }
+
+  async listSessions(params: ListSessionsRequest = {}): Promise<ListSessionsResponse> {
+    const listed = await this.#store.list({ cwd: params.cwd ?? null });
+    return {
+      sessions: listed.map((entry) => ({
+        sessionId: entry.sessionId,
+        cwd: entry.cwd,
+        additionalDirectories: entry.workspaces.filter((w) => w !== entry.cwd),
+        updatedAt: entry.updatedAt
+      }))
     };
   }
 
   /**
-   * `session/load`: reconstruct a previously persisted session and replay its
+   * v1 `session/load`: reconstruct a previously persisted session and replay its
    * agy conversation history (if bound to one) before returning.
    */
-  async loadSession(params: LoadSessionRequest, client: AgentContext): Promise<LoadSessionResponse> {
-    const { session, cwd, stored } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
+  async loadSession(params: LoadSessionRequest, client: V1AgentContext): Promise<LoadSessionResponse> {
+    const { session, cwd, stored } = await this.reloadSession(
+      params.sessionId,
+      params.cwd,
+      params.additionalDirectories
+    );
 
     if (stored.conversationId) {
-      const replay = this.#replayCache.get(session.agy.config.conversationsDir, stored.conversationId, {
-        skipNarration: false,
-        cwd
+      await this.replayConversation(params.sessionId, session, stored.conversationId, cwd, async (update) => {
+        await client.notify(v1.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: sessionUpdateToV1(update)
+        });
       });
-      if (replay) {
-        for (const update of replay.updates) {
-          await client.notify(methods.client.session.update, { sessionId: params.sessionId, update });
-        }
-      }
     }
 
-    return { configOptions: sessionConfigOptions(session) };
+    return { configOptions: sessionConfigOptionsV1(session) };
   }
 
-  /** `session/resume`: reconstruct a previously persisted session without replaying history. */
-  async resumeSession(params: ResumeSessionRequest): Promise<ResumeSessionResponse> {
+  /** v1 `session/resume`: reattach without replaying history. */
+  async resumeSessionV1(params: V1ResumeSessionRequest): Promise<V1ResumeSessionResponse> {
     const { session } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
-    return { configOptions: sessionConfigOptions(session) };
+    return { configOptions: sessionConfigOptionsV1(session) };
   }
 
-  async setConfigOption(params: SetSessionConfigOptionRequest): Promise<SetSessionConfigOptionResponse> {
-    const session = this.requireSession(params.sessionId);
-    if (params.configId === MODEL_CONFIG_ID) {
-      if (typeof params.value !== "string") {
-        throw new Error("Model config value must be a string");
-      }
-      if (!session.catalog.baseModels().includes(params.value)) {
-        throw new Error(`Unknown model: ${params.value}`);
-      }
-
-      session.selectedBaseModel = params.value;
-      session.selectedReasoningEffect = defaultReasoningEffectForBase(params.value, session.catalog);
-      applyModelSelection(
-        session.agy,
-        session.selectedBaseModel,
-        session.selectedReasoningEffect,
-        session.catalog
-      );
-      await this.persistSession(params.sessionId, session);
-      return {
-        configOptions: sessionConfigOptions(session)
-      };
-    }
-
-    if (params.configId === REASONING_EFFORT_CONFIG_ID) {
-      if (typeof params.value !== "string") {
-        throw new Error("Reasoning effect config value must be a string");
-      }
-      const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
-      if (!allowedEffects.includes(params.value)) {
-        throw new Error(`Unknown reasoning effect: ${params.value}`);
-      }
-
-      session.selectedReasoningEffect = params.value;
-      applyModelSelection(
-        session.agy,
-        session.selectedBaseModel,
-        session.selectedReasoningEffect,
-        session.catalog
-      );
-      await this.persistSession(params.sessionId, session);
-      return {
-        configOptions: sessionConfigOptions(session)
-      };
-    }
-
-    if (params.configId === FAST_MODE_CONFIG_ID) {
-      const enabled = fastModeValueToBoolean(params.value);
-      if (enabled === undefined) {
-        throw new Error("Fast mode config value must be on or off");
-      }
-      session.agy.setFastMode(enabled);
-      await this.persistSession(params.sessionId, session);
-      return {
-        configOptions: sessionConfigOptions(session)
-      };
-    }
-
-    throw new Error(`Unknown config option: ${params.configId}`);
+  /** @deprecated Prefer resumeSessionV1. */
+  async resumeSession(params: V1ResumeSessionRequest): Promise<V1ResumeSessionResponse> {
+    return this.resumeSessionV1(params);
   }
 
-  async prompt(params: PromptRequest, client: AgentContext, signal?: AbortSignal): Promise<PromptResponse> {
+  /**
+   * v2 `session/resume`: optional `replayFrom: { type: "start" }` replaces v1
+   * `session/load`. Omitting `replayFrom` reattaches without history.
+   */
+  async resumeSessionV2(
+    params: V2ResumeSessionRequest,
+    client: V2AgentContext
+  ): Promise<V2ResumeSessionResponse> {
+    const { session, cwd, stored } = await this.reloadSession(
+      params.sessionId,
+      params.cwd,
+      params.additionalDirectories
+    );
+
+    const replayFrom = params.replayFrom ?? null;
+    if (replayFrom != null) {
+      if (replayFrom.type !== "start") {
+        throw new Error(`Unsupported replay cursor: ${String((replayFrom as { type?: string }).type)}`);
+      }
+      if (stored.conversationId) {
+        await this.replayConversation(params.sessionId, session, stored.conversationId, cwd, async (update) => {
+          await client.notify(v2.methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: sessionUpdateToV2(update)
+          });
+        });
+      }
+    }
+
+    return { configOptions: sessionConfigOptionsV2(session) };
+  }
+
+  async setConfigOptionV1(
+    params: V1SetSessionConfigOptionRequest
+  ): Promise<V1SetSessionConfigOptionResponse> {
+    await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
+    return { configOptions: sessionConfigOptionsV1(this.requireSession(params.sessionId)) };
+  }
+
+  async setConfigOptionV2(
+    params: V2SetSessionConfigOptionRequest
+  ): Promise<V2SetSessionConfigOptionResponse> {
+    await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
+    return { configOptions: sessionConfigOptionsV2(this.requireSession(params.sessionId)) };
+  }
+
+  /** @deprecated Prefer setConfigOptionV1. */
+  async setConfigOption(
+    params: V1SetSessionConfigOptionRequest
+  ): Promise<V1SetSessionConfigOptionResponse> {
+    return this.setConfigOptionV1(params);
+  }
+
+  /**
+   * v1 prompt lifecycle: response carries stopReason after the full turn.
+   */
+  async promptV1(
+    params: V1PromptRequest,
+    client: V1AgentContext,
+    signal?: AbortSignal
+  ): Promise<V1PromptResponse> {
     const session = this.requireSession(params.sessionId);
     if (session.activePrompt) {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
@@ -258,7 +337,10 @@ export class AgyAcpAgent {
 
     try {
       const outcome = await session.agy.prompt(prompt, async (update) => {
-        await client.notify(methods.client.session.update, { sessionId: params.sessionId, update });
+        await client.notify(v1.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: sessionUpdateToV1(update)
+        });
       });
       await this.persistSession(params.sessionId, session);
       return {
@@ -276,16 +358,221 @@ export class AgyAcpAgent {
     }
   }
 
+  /**
+   * v2 prompt lifecycle: respond `{}` immediately on acceptance. Foreground
+   * progress and stopReason arrive as `state_update` notifications.
+   */
+  async promptV2(params: V2PromptRequest, client: V2AgentContext): Promise<V2PromptResponse> {
+    const session = this.requireSession(params.sessionId);
+    if (session.activePrompt) {
+      throw new Error(`Session already has an active prompt: ${params.sessionId}`);
+    }
+
+    // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
+    const promptText = await promptBlocksToAgyPrompt(params.prompt as v1.ContentBlock[], session.cwd);
+    session.activePrompt = true;
+    const controller = new AbortController();
+    session.promptAbort = controller;
+
+    // Queue the empty acceptance response before any session/update from the turn.
+    // Work starts on the next event-loop task (see dual-version-agent example).
+    const responseQueued = new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+
+    void responseQueued
+      .then(() => this.runV2PromptTurn(params, client, session, promptText, controller.signal))
+      .catch((error) => {
+        console.error(`[agy-acp] v2 prompt turn failed: ${(error as Error).message}`);
+      })
+      .finally(() => {
+        if (session.promptAbort === controller) {
+          session.promptAbort = undefined;
+        }
+        session.activePrompt = false;
+      });
+
+    return {};
+  }
+
+  /** @deprecated Prefer promptV1. */
+  async prompt(
+    params: V1PromptRequest,
+    client: V1AgentContext,
+    signal?: AbortSignal
+  ): Promise<V1PromptResponse> {
+    return this.promptV1(params, client, signal);
+  }
+
   async cancel(params: { sessionId: string }): Promise<void> {
     const session = this.#sessions.get(params.sessionId);
+    session?.promptAbort?.abort();
     await session?.agy.cancel();
   }
 
   async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {
     const session = this.#sessions.get(params.sessionId);
     this.#sessions.delete(params.sessionId);
+    session?.promptAbort?.abort();
     await session?.agy.close();
     return {};
+  }
+
+  private async createSession(
+    requestedCwd: string | undefined,
+    requestedDirs: string[] | undefined
+  ): Promise<SessionState> {
+    const cwd = requestedCwd || process.cwd();
+    const additionalDirectories = requestedDirs ?? [];
+    const workspaces = dedupe([cwd, ...additionalDirectories]);
+    const id = randomUUID();
+    const session = await this.buildSession(cwd, workspaces, null);
+    session.id = id;
+    this.#sessions.set(id, session);
+    await this.persistSession(id, session);
+    return session;
+  }
+
+  private async applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
+    const session = this.requireSession(sessionId);
+    if (configId === MODEL_CONFIG_ID) {
+      if (typeof value !== "string") {
+        throw new Error("Model config value must be a string");
+      }
+      if (!session.catalog.baseModels().includes(value)) {
+        throw new Error(`Unknown model: ${value}`);
+      }
+
+      session.selectedBaseModel = value;
+      session.selectedReasoningEffect = defaultReasoningEffectForBase(value, session.catalog);
+      applyModelSelection(
+        session.agy,
+        session.selectedBaseModel,
+        session.selectedReasoningEffect,
+        session.catalog
+      );
+      await this.persistSession(sessionId, session);
+      return;
+    }
+
+    if (configId === REASONING_EFFORT_CONFIG_ID) {
+      if (typeof value !== "string") {
+        throw new Error("Reasoning effect config value must be a string");
+      }
+      const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
+      if (!allowedEffects.includes(value)) {
+        throw new Error(`Unknown reasoning effect: ${value}`);
+      }
+
+      session.selectedReasoningEffect = value;
+      applyModelSelection(
+        session.agy,
+        session.selectedBaseModel,
+        session.selectedReasoningEffect,
+        session.catalog
+      );
+      await this.persistSession(sessionId, session);
+      return;
+    }
+
+    if (configId === FAST_MODE_CONFIG_ID) {
+      const enabled = fastModeValueToBoolean(value);
+      if (enabled === undefined) {
+        throw new Error("Fast mode config value must be on or off");
+      }
+      session.agy.setFastMode(enabled);
+      await this.persistSession(sessionId, session);
+      return;
+    }
+
+    throw new Error(`Unknown config option: ${configId}`);
+  }
+
+  private async replayConversation(
+    sessionId: string,
+    session: SessionState,
+    conversationId: string,
+    cwd: string,
+    emit: (update: v1.SessionUpdate) => Promise<void>
+  ): Promise<void> {
+    const replay = this.#replayCache.get(session.agy.config.conversationsDir, conversationId, {
+      skipNarration: false,
+      cwd
+    });
+    if (!replay) return;
+    for (const update of replay.updates) {
+      await emit(update);
+    }
+    void sessionId;
+  }
+
+  private async runV2PromptTurn(
+    params: V2PromptRequest,
+    client: V2AgentContext,
+    session: SessionState,
+    promptText: string,
+    signal: AbortSignal
+  ): Promise<void> {
+    const notify = async (update: v2.SessionUpdate) => {
+      await client.notify(v2.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update
+      });
+    };
+
+    const userMessageId = randomUUID();
+    try {
+      signal.throwIfAborted();
+
+      // User message acknowledgment — source of truth for agent-owned messageId.
+      await notify({
+        sessionUpdate: "user_message",
+        messageId: userMessageId,
+        content: params.prompt as v2.ContentBlock[]
+      });
+
+      signal.throwIfAborted();
+      await notify({ sessionUpdate: "state_update", state: "running" });
+
+      const cancelPrompt = () => {
+        session.agy.cancel().catch(() => {});
+      };
+      signal.addEventListener("abort", cancelPrompt, { once: true });
+
+      try {
+        const outcome = await session.agy.prompt(promptText, async (update) => {
+          await notify(sessionUpdateToV2(update));
+        });
+        await this.persistSession(params.sessionId, session);
+
+        const stopReason =
+          outcome.stopReason === "cancelled" || signal.aborted ? "cancelled" : "end_turn";
+        await notify({
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason
+        });
+      } finally {
+        signal.removeEventListener("abort", cancelPrompt);
+      }
+    } catch (error) {
+      await this.persistSession(params.sessionId, session).catch(() => {});
+      if (signal.aborted) {
+        await notify({
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "cancelled"
+        });
+        return;
+      }
+      // Surface a failed turn as idle so the client is not left in `running`.
+      await notify({
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "end_turn"
+      });
+      throw error;
+    }
   }
 
   private requireSession(sessionId: string): SessionState {
@@ -374,27 +661,57 @@ export class AgyAcpAgent {
   }
 }
 
-export function createAgyAcpApp(options: AgyAcpOptions = {}): AgentApp {
+/** ACP v1 agent app (stable protocol). */
+export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
   const agy = new AgyAcpAgent(options);
-  return acpAgent({ name: "agy-acp" })
-    .onRequest(methods.agent.initialize, (ctx) => agy.initialize(ctx.params))
-    .onRequest(methods.agent.session.new, (ctx) => agy.newSession(ctx.params))
-    .onRequest(methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
-    .onRequest(methods.agent.session.resume, (ctx) => agy.resumeSession(ctx.params))
-    .onRequest(methods.agent.session.setConfigOption, (ctx) => agy.setConfigOption(ctx.params))
-    .onRequest(methods.agent.session.prompt, (ctx) => agy.prompt(ctx.params, ctx.client, ctx.signal))
-    .onRequest(methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
-    .onNotification(methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
+  return v1
+    .agent({ name: "agy-acp" })
+    .onRequest(v1.methods.agent.initialize, (ctx) => agy.initializeV1(ctx.params))
+    .onRequest(v1.methods.agent.session.new, (ctx) => agy.newSessionV1(ctx.params))
+    .onRequest(v1.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
+    .onRequest(v1.methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.resume, (ctx) => agy.resumeSessionV1(ctx.params))
+    .onRequest(v1.methods.agent.session.setConfigOption, (ctx) => agy.setConfigOptionV1(ctx.params))
+    .onRequest(v1.methods.agent.session.prompt, (ctx) => agy.promptV1(ctx.params, ctx.client, ctx.signal))
+    .onRequest(v1.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
+    .onNotification(v1.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
+}
+
+/**
+ * Experimental draft ACP v2 agent app.
+ * Prefer {@link createDualAgyAcpApp} / {@link runAcp} so v1 clients still work.
+ */
+export function createAgyAcpV2App(options: AgyAcpOptions = {}): V2AgentApp {
+  const agy = new AgyAcpAgent(options);
+  return v2
+    .agent({ name: "agy-acp" })
+    .onRequest(v2.methods.agent.initialize, (ctx) => agy.initializeV2(ctx.params))
+    .onRequest(v2.methods.agent.session.new, (ctx) => agy.newSessionV2(ctx.params))
+    .onRequest(v2.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
+    .onRequest(v2.methods.agent.session.resume, (ctx) => agy.resumeSessionV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.setConfigOption, (ctx) => agy.setConfigOptionV2(ctx.params))
+    .onRequest(v2.methods.agent.session.prompt, (ctx) => agy.promptV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
+    .onNotification(v2.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
+}
+
+/**
+ * Dual-version agent connector: negotiates ACP v1 or experimental draft v2 from
+ * the client's `initialize.protocolVersion`.
+ */
+export function createDualAgyAcpApp(options: AgyAcpOptions = {}): v2.AgentProtocolRouter {
+  return v2.agentProtocolRouter().withV1(createAgyAcpApp(options)).withV2(createAgyAcpV2App(options));
 }
 
 export function runAcp(options: AgyAcpOptions = {}) {
   const stdout = (options.stdout ?? process.stdout) as Writable;
   const stdin = (options.stdin ?? process.stdin) as Readable;
-  const stream = ndJsonStream(
+  // v1 ndJsonStream is sufficient: framing is shared; the router peeks initialize.
+  const stream = v1.ndJsonStream(
     Writable.toWeb(stdout) as WritableStream<Uint8Array>,
     Readable.toWeb(stdin) as ReadableStream<Uint8Array>
   );
-  return createAgyAcpApp(options).connect(stream);
+  return createDualAgyAcpApp(options).connect(stream);
 }
 
 export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
@@ -470,7 +787,7 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   };
 }
 
-export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): SessionConfigOption {
+export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): V1SessionConfigOption {
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
@@ -489,7 +806,7 @@ export function reasoningEffectConfigOption(
   selectedBaseModel: string,
   selectedReasoningEffect: string,
   catalog: ModelCatalog
-): SessionConfigOption {
+): V1SessionConfigOption {
   return {
     id: REASONING_EFFORT_CONFIG_ID,
     name: "Reasoning Effort",
@@ -501,7 +818,7 @@ export function reasoningEffectConfigOption(
   };
 }
 
-export function fastModeConfigOption(enabled: boolean): SessionConfigOption {
+export function fastModeConfigOption(enabled: boolean): V1SessionConfigOption {
   return {
     id: FAST_MODE_CONFIG_ID,
     name: "Fast Mode",
@@ -522,7 +839,7 @@ export function fastModeConfigOption(enabled: boolean): SessionConfigOption {
   };
 }
 
-function sessionConfigOptions(session: SessionState): SessionConfigOption[] {
+function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] {
   return [
     modelConfigOption(session.selectedBaseModel, session.catalog),
     reasoningEffectConfigOption(
@@ -532,6 +849,20 @@ function sessionConfigOptions(session: SessionState): SessionConfigOption[] {
     ),
     fastModeConfigOption(session.agy.config.fastMode)
   ];
+}
+
+/** v2 renames config option `id` → `configId`. */
+function sessionConfigOptionsV2(session: SessionState): V2SessionConfigOption[] {
+  return sessionConfigOptionsV1(session).map(v1ConfigOptionToV2);
+}
+
+function v1ConfigOptionToV2(option: V1SessionConfigOption): V2SessionConfigOption {
+  const { id, ...rest } = option as V1SessionConfigOption & { id: string };
+  return { ...rest, configId: id } as V2SessionConfigOption;
+}
+
+function readConfigValue(params: { value?: unknown; type?: string }): unknown {
+  return params.value;
 }
 
 /**
@@ -645,7 +976,7 @@ export function prettifyModelSlug(slug: string): string {
 function reasoningEffectOptions(
   selectedBaseModel: string,
   catalog: ModelCatalog
-): Extract<SessionConfigOption, { type: "select" }>["options"] {
+): Extract<V1SessionConfigOption, { type: "select" }>["options"] {
   const effects = catalog.effectsFor(selectedBaseModel);
   if (effects.length === 0) {
     return [

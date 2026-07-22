@@ -1,7 +1,15 @@
 name: Release
 
 # Push a version tag (vX.Y.Z matching package.json) to create a GitHub Release
-# and publish the package to npm.
+# and publish the package to npm — only if the tagged commit is already on main.
+#
+# Stable:     v1.2.3           → GitHub Release + npm --tag latest
+# Pre-release: v1.0.0-alpha.0  → GitHub pre-release + npm --tag alpha
+#              v1.0.0-beta.1   → GitHub pre-release + npm --tag beta
+#              v1.0.0-rc.1     → GitHub pre-release + npm --tag rc
+#
+# Tags on feature branches (or any commit not reachable from origin/main) fail
+# the "must be on main" check and do not publish.
 on:
   push:
     tags:
@@ -17,6 +25,26 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          # Full history so we can verify the tag is an ancestor of main.
+          fetch-depth: 0
+
+      - name: Require tagged commit is on main
+        run: |
+          set -euo pipefail
+          git fetch origin main
+          tag_sha="$(git rev-parse "${GITHUB_REF_NAME}^{}")"
+          main_sha="$(git rev-parse origin/main)"
+          echo "Tag ${GITHUB_REF_NAME} → ${tag_sha}"
+          echo "origin/main         → ${main_sha}"
+
+          # A commit is "on main" if it is origin/main or an ancestor of it.
+          if ! git merge-base --is-ancestor "$tag_sha" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points to ${tag_sha}, which is not on origin/main."
+            echo "Merge the release commit into main first, then tag and push the tag."
+            exit 1
+          fi
+          echo "OK: tagged commit is on main"
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -25,7 +53,8 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
-      - name: Verify tag matches package.json
+      - name: Verify tag matches package.json and detect channel
+        id: version
         run: |
           tag="${GITHUB_REF_NAME#v}"
           version="$(node -p "require('./package.json').version")"
@@ -33,7 +62,26 @@ jobs:
             echo "::error::Tag v${tag} does not match package.json version ${version}"
             exit 1
           fi
-          echo "Releasing ${version}"
+
+          # SemVer pre-release: anything after the first hyphen (e.g. alpha.0).
+          if [[ "$version" == *-* ]]; then
+            pre="${version#*-}"
+            # npm dist-tag from the pre-release id: alpha.0 → alpha, beta.1 → beta
+            npm_tag="${pre%%.*}"
+            if [[ ! "$npm_tag" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]*$ ]]; then
+              echo "::error::Cannot derive a valid npm dist-tag from pre-release '${pre}'"
+              exit 1
+            fi
+            prerelease=true
+          else
+            npm_tag=latest
+            prerelease=false
+          fi
+
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "npm_tag=${npm_tag}" >> "$GITHUB_OUTPUT"
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${version} (prerelease=${prerelease}, npm tag=${npm_tag})"
 
       - name: Install dependencies
         run: npm ci
@@ -53,7 +101,7 @@ jobs:
       - name: Extract release notes from CHANGELOG
         id: notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${{ steps.version.outputs.version }}"
           notes_file="${RUNNER_TEMP}/release-notes.md"
           awk -v ver="$version" '
             $0 ~ ("^## \\[" ver "\\]") { found = 1; next }
@@ -69,12 +117,19 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            --title "${GITHUB_REF_NAME#v}" \
-            --notes-file "${{ steps.notes.outputs.path }}" \
+          args=(
+            "$GITHUB_REF_NAME"
+            --title "${{ steps.version.outputs.version }}"
+            --notes-file "${{ steps.notes.outputs.path }}"
             --verify-tag
+          )
+          if [ "${{ steps.version.outputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          gh release create "${args[@]}"
 
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          npm publish --access public --tag "${{ steps.version.outputs.npm_tag }}"

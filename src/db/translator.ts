@@ -28,9 +28,10 @@ export interface TranslatorOptions {
   cwd?: string;
 }
 
-function agentChunk(text: string): SessionUpdate {
+function agentChunk(text: string, messageId: string): SessionUpdate {
   return {
     sessionUpdate: "agent_message_chunk",
+    messageId,
     content: { type: "text", text }
   };
 }
@@ -42,6 +43,8 @@ export class Translator {
   private readonly emittedSteps = new Set<number>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
   private readonly pendingAgentParts: string[] = [];
+  // Replay: message id for the current buffered agent-text group.
+  private pendingAgentMessageId: string | null = null;
 
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
@@ -143,19 +146,26 @@ export class Translator {
 
   private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
     const text = row.stepPayload.agentText?.text ?? "";
+    const messageId = String(row.idx);
 
     if (this.opts.mode === "replay") {
-      if (text.length > 0) this.pendingAgentParts.push(text);
+      if (text.length > 0) {
+        if (this.pendingAgentMessageId === null) {
+          this.pendingAgentMessageId = messageId;
+        }
+        this.pendingAgentParts.push(text);
+      }
       return;
     }
 
     // Streaming: emit only the slice appended since the last poll for this idx.
+    // Chunks for the same step share one messageId (required by ACP v2).
     const emitted = this.agentTextLengths.get(row.idx) ?? 0;
     if (text.length <= emitted) return;
     this.agentTextLengths.set(row.idx, text.length);
     if (this.opts.skipNarration && isNarration(text)) return;
     const delta = text.slice(emitted);
-    if (delta.length > 0) out.push(agentChunk(delta));
+    if (delta.length > 0) out.push(agentChunk(delta, messageId));
   }
 
   private flushAgentBuffer(out: SessionUpdate[]): void {
@@ -163,7 +173,9 @@ export class Translator {
     const text = this.opts.skipNarration
       ? filterNarration(this.pendingAgentParts)
       : this.pendingAgentParts.join("\n");
+    const messageId = this.pendingAgentMessageId ?? "agent";
     this.pendingAgentParts.length = 0;
-    if (text && text.length > 0) out.push(agentChunk(text));
+    this.pendingAgentMessageId = null;
+    if (text && text.length > 0) out.push(agentChunk(text, messageId));
   }
 }
