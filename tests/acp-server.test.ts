@@ -6,9 +6,11 @@ import { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import * as installer from "../src/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
+import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import {
   buildModelCatalog,
   createAgyAcpApp,
+  createAgyAcpV2App,
   modelConfigOption,
   promptBlocksToText,
   reasoningEffectConfigOption,
@@ -17,7 +19,8 @@ import {
 import type { SpawnFactory } from "../src/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import type { SessionConfigOption } from "@agentclientprotocol/sdk";
+import { sessionUpdateToV2 } from "../src/session-updates.js";
+import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
 
@@ -461,8 +464,197 @@ describe("session model config", () => {
   });
 });
 
+describe("ACP v2 (experimental draft)", () => {
+  it("negotiates protocolVersion 2 with role-agnostic info/capabilities", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const connection = acpV2.client({ name: "test-client" }).connect(createAgyAcpV2App());
+    try {
+      const response = await connection.agent.request(acpV2.methods.agent.initialize, {
+        protocolVersion: acpV2.PROTOCOL_VERSION,
+        info: { name: "test-client", version: "0.0.0" },
+        capabilities: {}
+      });
+
+      expect(response.protocolVersion).toBe(2);
+      expect(response.info.name).toBe("agy-acp");
+      expect(response.capabilities?.session?.prompt?.image).toEqual({});
+      expect(response.capabilities?.session?.prompt?.embeddedContext).toEqual({});
+      expect(response.capabilities?.session?.additionalDirectories).toEqual({});
+      expect(installSpy).toHaveBeenCalledOnce();
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+    }
+  });
+
+  it("accepts session/prompt immediately and reports idle via state_update", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update);
+        }
+      );
+      const connection = client.connect(
+        createAgyAcpV2App({
+          env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+          spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-1", [
+            { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello v2" }) }
+          ])
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+        const response = await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
+
+        // v2 prompt response is an empty acceptance ack (no stopReason).
+        expect(response).toEqual({});
+
+        await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+
+        expect(updates).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sessionUpdate: "user_message",
+              content: [{ type: "text", text: "hi" }]
+            }),
+            expect.objectContaining({ sessionUpdate: "state_update", state: "running" }),
+            expect.objectContaining({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "hello v2" },
+              messageId: expect.any(String)
+            }),
+            expect.objectContaining({
+              sessionUpdate: "state_update",
+              state: "idle",
+              stopReason: "end_turn"
+            })
+          ])
+        );
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("replays history on session/resume with replayFrom start", async () => {
+    await withConversationsDir(async (dir) => {
+      const appOptions = {
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
+        ])
+      };
+
+      let sessionId: string;
+      {
+        const updates: unknown[] = [];
+        const client = acpV2.client({ name: "test-client" }).onNotification(
+          acpV2.methods.client.session.update,
+          (ctx) => {
+            updates.push(ctx.params.update);
+          }
+        );
+        const connection = client.connect(createAgyAcpV2App(appOptions));
+        try {
+          await connection.agent.request(acpV2.methods.agent.initialize, {
+            protocolVersion: 2,
+            info: { name: "test-client", version: "0.0.0" },
+            capabilities: {}
+          });
+          const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+            cwd: "/repo"
+          });
+          sessionId = session.sessionId;
+          await connection.agent.request(acpV2.methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: "text", text: "hi" }]
+          });
+          // Drain the async turn so the conversation binding is persisted.
+          await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+        } finally {
+          connection.close();
+        }
+      }
+
+      {
+        const updates: unknown[] = [];
+        const client = acpV2.client({ name: "test-client" }).onNotification(
+          acpV2.methods.client.session.update,
+          (ctx) => {
+            updates.push(ctx.params.update);
+          }
+        );
+        const connection = client.connect(createAgyAcpV2App(appOptions));
+        try {
+          await connection.agent.request(acpV2.methods.agent.initialize, {
+            protocolVersion: 2,
+            info: { name: "test-client", version: "0.0.0" },
+            capabilities: {}
+          });
+          await connection.agent.request(acpV2.methods.agent.session.resume, {
+            sessionId,
+            cwd: "/repo",
+            replayFrom: { type: "start" }
+          });
+          expect(updates).toContainEqual(
+            expect.objectContaining({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "prior turn" },
+              messageId: expect.any(String)
+            })
+          );
+        } finally {
+          connection.close();
+        }
+      }
+    });
+  });
+
+  it("maps tool_call to tool_call_update and diffs to structured changes", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "c1",
+      title: "Edit /tmp/a.ts",
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: "/tmp/a.ts", oldText: null, newText: "export {}\n" }]
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update.sessionUpdate).toBe("tool_call_update");
+    const content = v2Update.content as Array<Record<string, unknown>>;
+    expect(content[0]).toMatchObject({
+      type: "diff",
+      changes: [{ operation: "add", path: "/tmp/a.ts", fileType: "text" }],
+      patch: { format: "git_patch" }
+    });
+  });
+});
+
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
+
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now();
+  while (!predicate()) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error("waitFor timed out");
+    }
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
 
 /** Run `fn` with a throwaway conversations directory, cleaned up afterwards. */
 async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
