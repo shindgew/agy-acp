@@ -7,7 +7,7 @@ The implementation is a TypeScript, `npx`-runnable ACP server built on
 keeps the adapter aligned with the logged-in Antigravity CLI experience and
 avoids a separate runtime startup path.
 
-**Current package:** `0.2.6` (`latest`). Supports **ACP v1** and
+**Current package:** `0.2.7` (`latest`). Supports **ACP v1** and
 **experimental draft ACP v2** side by side via version negotiation on
 `initialize`. Draft ACP v2 work continues on the `alpha` dist-tag
 (`1.0.0-alpha.*`). See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
@@ -96,7 +96,7 @@ node dist/main.js
 Published package / Zed:
 
 ```sh
-npx agy-acp                 # latest stable (0.2.5)
+npx agy-acp                 # latest stable (0.2.7)
 npx agy-acp@alpha           # latest alpha pre-release channel
 npx agy-acp@1.0.0-alpha.0   # pin a specific pre-release
 ```
@@ -144,18 +144,48 @@ Optional environment variables:
 - `AGY_ACP_MODE`: default execution mode for new sessions (`default`,
   `accept-edits`, or `plan`). Overridden by the session Mode picker or the
   `agy-acp --mode <value>` argv flag.
+- `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS`: when set, passes
+  `--dangerously-skip-permissions` to `agy` (auto-approve tool permissions).
+
+### File writes denied in Zed?
+
+Under `agy --print` (agy ≥ 1.1.3), tools that need interactive confirmation are
+**soft-denied** rather than prompting a TTY. Messages like
+`User denied permission for write_file(...)` usually mean agy refused the tool —
+not that the ACP client blocked the editor filesystem.
+
+Workarounds (prefer earlier ones):
+
+1. Set session **Mode** to **Accept Edits** (`accept-edits`), or start with
+   `AGY_ACP_MODE=accept-edits` / `agy-acp --mode accept-edits`.
+2. Allowlist tools in `~/.gemini/antigravity-cli/settings.json` under
+   `permission.allow` (agy honors this in print mode as of 1.1.1–1.1.4).
+3. Opt in to `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS=1` or
+   `--dangerously-skip-permissions` (broad auto-approve).
+
+True interactive `session/request_permission` (Zed Allow/Deny dialogs feeding
+agy) is **not** implemented: agy decides permissions inside `--print` with no
+external pause/resume API. See the roadmap.
 
 ## Model Picker
 
 When the ACP client supports session configuration options, `agy-acp` returns
-three options during `session/new` (this order):
+three options during `session/new` (this order). Wire **ids** are stable;
+**names** are human-facing labels in the client UI:
 
-- `mode` (category `mode`):
-  - `default` — agy request-review behavior (omits `--mode`; write tools may soft-deny under `--print`)
-  - `accept-edits` — `agy --mode accept-edits` (apply file edits without interactive write review)
-  - `plan` — `agy --mode plan`
-- `model` (category `model`)
-- `reasoningEffort` (category `thought_level`) — maps to `agy --effort`
+| Order | id | name | Category |
+|---|---|---|---|
+| 1 | `mode` | Mode | `mode` |
+| 2 | `model` | Model | `model` |
+| 3 | `reasoningEffort` | Reasoning Effort | `thought_level` |
+
+`mode` values:
+
+- `default` — agy request-review behavior (omits `--mode`; write tools may soft-deny under `--print`)
+- `accept-edits` — `agy --mode accept-edits` (apply file edits without interactive write review)
+- `plan` — `agy --mode plan`
+
+`reasoningEffort` maps to `agy --effort`.
 
 The adapter discovers model choices by running:
 
