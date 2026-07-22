@@ -49,8 +49,10 @@ import {
   type AgyCliConfig,
   type AgyCliSession,
   type AgyExecutionMode,
+  type PtyFactory,
   type SpawnFactory
 } from "./cli.js";
+import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
 import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
@@ -96,11 +98,12 @@ interface ModelCatalog {
   displayName(slug: string): string;
 }
 
-interface AgyAcpOptions {
+export interface AgyAcpOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
   spawnProcess?: SpawnFactory;
+  ptyFactory?: PtyFactory;
   argv?: string[];
 }
 
@@ -129,7 +132,7 @@ export class AgyAcpAgent {
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#argv = options.argv ?? [];
-    this.#backend = new AgyCliBackend(options.spawnProcess);
+    this.#backend = new AgyCliBackend(options.spawnProcess, options.ptyFactory);
     this.#store = new SessionStore(defaultStateDir(this.#env));
   }
 
@@ -350,6 +353,15 @@ export class AgyAcpAgent {
           sessionId: params.sessionId,
           update: sessionUpdateToV1(update)
         });
+      }, async (toolCall) => {
+        if (signal?.aborted) return "cancelled";
+        const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
+        const response = await racePermissionCancellation(client.request(v1.methods.client.session.requestPermission, {
+          sessionId: params.sessionId,
+          toolCall: requestToolCall as v1.ToolCallUpdate,
+          options: permissionOptions(toolCall)
+        }), signal);
+        return selectedPermission(response, signal);
       });
       await this.persistSession(params.sessionId, session);
       return {
@@ -550,6 +562,17 @@ export class AgyAcpAgent {
       try {
         const outcome = await session.agy.prompt(promptText, async (update) => {
           await notify(sessionUpdateToV2(update));
+        }, async (toolCall) => {
+          if (signal.aborted) return "cancelled";
+          const converted = sessionUpdateToV2(toolCall) as unknown as Record<string, unknown>;
+          const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
+          const response = await racePermissionCancellation(client.request(v2.methods.client.session.requestPermission, {
+            sessionId: params.sessionId,
+            title: String(requestToolCall.title ?? "Permission required"),
+            subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
+            options: permissionOptions(toolCall)
+          }), signal);
+          return selectedPermission(response, signal);
         });
         await this.persistSession(params.sessionId, session);
 
@@ -723,6 +746,33 @@ export function runAcp(options: AgyAcpOptions = {}) {
 }
 
 export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
+
+function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermissionChoice | "cancelled" {
+  if (signal?.aborted || !response || typeof response !== "object") return "cancelled";
+  const outcome = (response as { outcome?: unknown }).outcome;
+  if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
+  const id = (outcome as { optionId?: string }).optionId;
+  return id === "agy-allow-once" || id === "agy-allow-conversation" || id === "agy-allow-settings" || id === "agy-reject-once"
+    ? id : "cancelled";
+}
+
+async function racePermissionCancellation<T>(request: Promise<T>, signal?: AbortSignal): Promise<T | null> {
+  if (!signal) return request;
+  if (signal.aborted) return null;
+  // A client may eventually reject a request abandoned because the turn was
+  // cancelled. Attach a handler now so that rejection is never unhandled.
+  const guarded = request.then((value) => value, (error) => {
+    if (signal.aborted) return null;
+    throw error;
+  });
+  let abort!: () => void;
+  const cancelled = new Promise<null>((resolve) => {
+    abort = () => resolve(null);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try { return await Promise.race([guarded, cancelled]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
 
 function dedupe(values: string[]): string[] {
   return [...new Set(values)];
