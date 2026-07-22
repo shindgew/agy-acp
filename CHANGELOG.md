@@ -21,6 +21,12 @@ for draft v2 may still change before ACP v2 stabilizes.
   to draft-v2 `plan_update` (`type: "markdown"` when the body is known, else
   `type: "items"`). Replaces the previous Plan-titled prose tool_call for those
   writes. No `plan_removed` and no live step status beyond checkbox markers.
+- Native ACP v1 session modes: advertise `modes` on `session/new`, `session/load`,
+  and `session/resume`, and handle `session/set_mode` for the same three ids as
+  the `mode` config option (`default` / `accept-edits` / `plan` → `agy --mode`).
+- Dual-sync mode surfaces: `session/set_mode` pushes `current_mode_update` and
+  `config_option_update`; changing `mode` via `session/set_config_option` pushes
+  `current_mode_update` so native mode UIs stay aligned.
 
 ## [0.2.7] - 2026-07-22
 
