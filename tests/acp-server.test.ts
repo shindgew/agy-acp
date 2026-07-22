@@ -413,7 +413,6 @@ describe("session model config", () => {
       const configOptions = session.configOptions ?? [];
       const modelConfig = configOptions.find((option) => option.id === "model") as SelectConfigOption | undefined;
       const reasoningConfig = configOptions.find((option) => option.id === "effort") as SelectConfigOption | undefined;
-      const fastConfig = configOptions.find((option) => option.id === "fast-mode") as SelectConfigOption | undefined;
 
       expect(modelConfig?.category).toBe("model");
       expect(modelConfig?.currentValue).toBe("gemini-3.5-flash");
@@ -428,9 +427,7 @@ describe("session model config", () => {
         { value: "medium", name: "Medium" },
         { value: "high", name: "High" }
       ]);
-      expect(fastConfig?.category).toBe("model_config");
-      expect(fastConfig?.type).toBe("select");
-      expect(fastConfig?.currentValue).toBe("off");
+      expect(configOptions.find((option) => option.id === "fast-mode")).toBeUndefined();
 
       const modelResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
@@ -448,13 +445,6 @@ describe("session model config", () => {
       });
       expect(reasoningResponse.configOptions[1].currentValue).toBe("high");
 
-      const fastResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
-        sessionId: session.sessionId,
-        configId: "fast-mode",
-        value: "on"
-      });
-      expect(fastResponse.configOptions[2].currentValue).toBe("on");
-
       const thinkingResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
@@ -470,7 +460,7 @@ describe("session model config", () => {
       });
 
       const promptCall = calls.find((call) => call.args.includes("--print"));
-      expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("/fast\nhi");
+      expect(promptCall?.args[promptCall.args.indexOf("--print") + 1]).toBe("hi");
       expect(flagValue(promptCall!.args, "--model")).toBe("claude-opus-4-6-thinking");
       expect(promptCall!.args).not.toContain("--effort");
     } finally {

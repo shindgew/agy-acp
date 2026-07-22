@@ -57,7 +57,6 @@ const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
 const MODEL_CONFIG_ID = "model";
 const REASONING_EFFORT_CONFIG_ID = "effort";
-const FAST_MODE_CONFIG_ID = "fast-mode";
 const NO_REASONING_VALUE = "none";
 /** Legacy `agy models` lines: `Gemini 3.5 Flash (Medium)`. */
 const LEGACY_EFFORT_PATTERN = /\((low|medium|high)\)\s*$/i;
@@ -475,16 +474,6 @@ export class AgyAcpAgent {
       return;
     }
 
-    if (configId === FAST_MODE_CONFIG_ID) {
-      const enabled = fastModeValueToBoolean(value);
-      if (enabled === undefined) {
-        throw new Error("Fast mode config value must be on or off");
-      }
-      session.agy.setFastMode(enabled);
-      await this.persistSession(sessionId, session);
-      return;
-    }
-
     throw new Error(`Unknown config option: ${configId}`);
   }
 
@@ -607,9 +596,6 @@ export class AgyAcpAgent {
       ? restoredModelSelection(stored, catalog)
       : initialModelSelection(config.model, catalog);
     applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
-    if (stored) {
-      agy.setFastMode(stored.fastMode);
-    }
 
     return {
       id: "", // set by the caller once the ACP session id is known
@@ -651,7 +637,6 @@ export class AgyAcpAgent {
       lastStepIdx: session.agy.lastStepIdx,
       modelId: session.selectedBaseModel,
       reasoningEffect: session.selectedReasoningEffect,
-      fastMode: session.agy.config.fastMode,
       updatedAt: new Date().toISOString()
     };
   }
@@ -818,27 +803,6 @@ export function reasoningEffectConfigOption(
   };
 }
 
-export function fastModeConfigOption(enabled: boolean): V1SessionConfigOption {
-  return {
-    id: FAST_MODE_CONFIG_ID,
-    name: "Fast Mode",
-    description: "Prepends /fast before agy --print prompts to reduce thought visualization delays.",
-    category: "model_config",
-    type: "select",
-    currentValue: enabled ? "on" : "off",
-    options: [
-      {
-        value: "off",
-        name: "Off"
-      },
-      {
-        value: "on",
-        name: "On"
-      }
-    ]
-  };
-}
-
 function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] {
   return [
     modelConfigOption(session.selectedBaseModel, session.catalog),
@@ -846,8 +810,7 @@ function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] 
       session.selectedBaseModel,
       session.selectedReasoningEffect,
       session.catalog
-    ),
-    fastModeConfigOption(session.agy.config.fastMode)
+    )
   ];
 }
 
@@ -1116,14 +1079,4 @@ function applyModelSelection(
   }
 
   agy.setEffort(selectedReasoningEffect);
-}
-
-function fastModeValueToBoolean(value: unknown): boolean | undefined {
-  if (value === true || value === "on") {
-    return true;
-  }
-  if (value === false || value === "off") {
-    return false;
-  }
-  return undefined;
 }
