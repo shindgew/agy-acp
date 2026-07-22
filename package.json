@@ -1,6 +1,6 @@
 {
   "name": "agy-acp",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Agent Client Protocol adapter that wraps the Google Antigravity CLI",
   "type": "module",
   "author": {

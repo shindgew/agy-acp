@@ -7,6 +7,19 @@ pre-1.0 caveat that minor versions may include breaking changes.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-07-22
+
+### Changed
+
+- Renamed source modules for clarity: `src/agy-db/` → `src/db/`,
+  `src/agy-cli.ts` → `src/cli.ts`, `src/agy-installer.ts` → `src/installer.ts`.
+  The package bin entry is now `dist/main.js` (was `dist/cli.js`).
+- Model discovery matches Antigravity CLI ≥1.1.5: parse stable slugs from
+  `agy models` (e.g. `gemini-3.5-flash-medium`), group by base model, and pass
+  reasoning effort via the separate `agy --effort` flag instead of embedding
+  `(Medium)` in `--model`. Thinking models (`*-thinking`) stay whole-model
+  identities. Legacy display-name lists remain supported.
+
 ## [0.2.3] - 2026-07-01
 
 Published as `0.2.3` because npm permanently blocks republishing a version
