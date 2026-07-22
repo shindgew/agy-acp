@@ -7,9 +7,10 @@ The implementation is a TypeScript, `npx`-runnable ACP server built on
 keeps the adapter aligned with the logged-in Antigravity CLI experience and
 avoids a separate runtime startup path.
 
-**Current package:** `1.0.0-alpha.0` (pre-release). Supports **ACP v1** and
+**Current package:** `0.2.5` (`latest`). Supports **ACP v1** and
 **experimental draft ACP v2** side by side via version negotiation on
-`initialize`. See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
+`initialize`. Draft ACP v2 work continues on the `alpha` dist-tag
+(`1.0.0-alpha.*`). See the [ACP v2 draft announcement](https://agentclientprotocol.com/announcements/acp-v2-draft)
 and [migration guide](https://agentclientprotocol.com/protocol/v2/migration).
 Draft v2 may still change before stabilization.
 
@@ -43,9 +44,9 @@ titles all included. `agy-acp` now reads that database directly instead:
   conversation id is learned from the first turn and reused after),
 - stdout is drained but never parsed; a `StreamPoller` polls the conversation
   database on an interval while the process runs, translating newly-appended
-  steps into ACP updates (`agent_message_chunk`, `tool_call` /
-  v2 `tool_call_update`, `session_info_update`, ...) via `src/db/translator.ts`
-  and `src/db/updates.ts`,
+  steps into ACP updates (`agent_message_chunk`, `agent_thought_chunk`,
+  progressive `tool_call` → `tool_call_update`, `session_info_update`, ...)
+  via `src/db/translator.ts` and `src/db/updates.ts`,
 - **ACP v1:** `session/load` replays history; `session/resume` reattaches without
   replay. **ACP v2:** only `session/resume` — pass `replayFrom: { "type": "start" }`
   to replay (replaces v1 load). Replay uses an incremental cache keyed on file
@@ -97,7 +98,7 @@ node dist/main.js
 Published package / Zed:
 
 ```sh
-npx agy-acp                 # latest stable
+npx agy-acp                 # latest stable (0.2.5)
 npx agy-acp@alpha           # latest alpha pre-release channel
 npx agy-acp@1.0.0-alpha.0   # pin a specific pre-release
 ```
@@ -118,7 +119,7 @@ Example Zed custom agent shape (stable):
 }
 ```
 
-Alpha pre-release (after `v1.0.0-alpha.0` is tagged and CI publishes):
+Alpha pre-release channel (draft ACP v2 iteration):
 
 ```json
 {
@@ -202,6 +203,71 @@ Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
 Both work by reading the session binding persisted after every prompt/config
 change (see `AGY_ACP_STATE_DIR` above) and, for `session/load`, replaying the
 bound agy conversation database from `AGY_ACP_CONVERSATIONS_DIR`.
+
+## ACP v1 roadmap
+
+`agy-acp` covers the core ACP prompt loop (sessions, config options, streamed
+tool calls, edit diffs, load/resume). Gaps below are relative to ACP v1 as
+exposed by `@agentclientprotocol/sdk` and are ordered by practical editor UX.
+Several items are constrained by wrapping `agy --print` and polling its
+conversation database rather than driving agy as a full interactive agent.
+
+### Done
+
+- [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
+- [x] `session/load` and `session/resume` with persisted bindings
+- [x] `session/set_config_option` (`model`, `effort`, `fast-mode`)
+- [x] `additionalDirectories` → `agy --add-dir`
+- [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
+- [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
+      `user_message_chunk` (replay), progressive `tool_call` / `tool_call_update`,
+      `session_info_update`
+- [x] Tool kinds, locations, `rawInput` / `rawOutput`, edit content type `diff`
+- [x] `session/list` from the session store
+- [x] Execute tool output when present in the conversation DB (field 28)
+
+### High priority
+
+- [ ] Interactive `session/request_permission` (today: permission notes only appear as
+      post-hoc text on completed tool calls; agy still owns allow/deny)
+- [ ] Structured `plan` / `plan_update` / `plan_removed` (today: brain/plan files are
+      plain tool content text)
+- [ ] Client terminals: `type: "terminal"` content + `terminal/*` (today: execute tools
+      show command + captured output as content blocks, not live terminal protocol)
+- [ ] ACP elicitation for `ask_question` (today: static tool_call text options)
+- [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
+      (today: all MCP caps are `false` and servers are ignored)
+
+### Medium priority
+
+- [ ] Optional `session/delete` from the session store
+- [ ] `session/fork` if/when useful for clients
+- [ ] Session modes (`session/set_mode`, `modes`, `current_mode_update`) if they map
+      cleanly onto agy — today config options cover model/effort/fast-mode
+- [ ] `available_commands_update` for slash-command discovery in the client UI
+- [ ] Push `config_option_update` when options change outside `set_config_option`
+- [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)
+- [ ] `usage_update` and prompt-response `usage` when token data is available
+- [ ] Richer `stopReason` values (`max_tokens`, `refusal`, `max_turn_requests`) when
+      agy exposes them (today: `end_turn` or `cancelled`)
+
+### Fidelity improvements
+
+- [x] Surface command stdout/stderr on execute tool calls when present in the DB
+- [ ] Decode/show fetch and web-search result bodies (not just URL / title)
+- [ ] Agent-outbound images / richer content blocks when agy produces them
+- [ ] Better diffs for full-file writes when prior content is knowable
+- [ ] Map permission decisions into ACP permission outcomes, not only text
+
+### Lower priority / unstable ACP
+
+Usually skip unless a client needs them for this wrapper:
+
+- [ ] `providers/*` (LLM provider routing UI)
+- [ ] `nes/*` (next-edit suggestions)
+- [ ] `document/*` (editor document sync)
+- [ ] Agent-driven client `fs/read_text_file` / `fs/write_text_file` (agy does FS itself)
+- [ ] Non-stdio transports (HTTP / WebSocket) — stdio NDJSON is intentional for Zed
 
 ## Development
 
