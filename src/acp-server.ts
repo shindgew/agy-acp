@@ -19,8 +19,11 @@ import type {
   ResumeSessionRequest as V1ResumeSessionRequest,
   ResumeSessionResponse as V1ResumeSessionResponse,
   SessionConfigOption as V1SessionConfigOption,
+  SessionModeState,
   SetSessionConfigOptionRequest as V1SetSessionConfigOptionRequest,
-  SetSessionConfigOptionResponse as V1SetSessionConfigOptionResponse
+  SetSessionConfigOptionResponse as V1SetSessionConfigOptionResponse,
+  SetSessionModeRequest,
+  SetSessionModeResponse
 } from "@agentclientprotocol/sdk";
 import type {
   AgentContext as V2AgentContext,
@@ -40,6 +43,7 @@ import type {
   SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./db/replay.js";
+import type { EditFsBridge } from "./edit-fs-bridge.js";
 import { ensureAgyInstalled } from "./installer.js";
 import {
   AgyCliBackend,
@@ -55,7 +59,7 @@ import {
 import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
 import { promptBlocksToAgyPrompt } from "./prompt-content.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
-import { sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
+import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
 
 /** Prefer re-exporting stable v1 symbols used by existing tests and consumers. */
 export const methods = v1.methods;
@@ -128,6 +132,8 @@ export class AgyAcpAgent {
   readonly #store: SessionStore;
   readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
   #ensureAgyPromise: Promise<string | null> | undefined;
+  /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
+  #clientFs = { readTextFile: false, writeTextFile: false };
 
   constructor(options: AgyAcpOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -138,6 +144,10 @@ export class AgyAcpAgent {
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
+    this.#clientFs = {
+      readTextFile: params.clientCapabilities?.fs?.readTextFile ?? false,
+      writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
+    };
     return {
       protocolVersion:
         params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
@@ -205,16 +215,36 @@ export class AgyAcpAgent {
     return this.#ensureAgyPromise;
   }
 
+  /**
+   * When the client advertises `fs.readTextFile` + `fs.writeTextFile`, route
+   * already-applied edits through those methods so the client's own
+   * diff/review UI (e.g. Zed's Review Changes panel) tracks them. Draft v2
+   * has no fs/* client methods, so this is v1-only.
+   */
+  private editFsBridgeV1(client: V1AgentContext, sessionId: string): EditFsBridge | undefined {
+    if (!this.#clientFs.readTextFile || !this.#clientFs.writeTextFile) return undefined;
+    return {
+      readTextFile: async (path) => {
+        await client.request(v1.methods.client.fs.readTextFile, { sessionId, path });
+      },
+      writeTextFile: async (path, content) => {
+        await client.request(v1.methods.client.fs.writeTextFile, { sessionId, path, content });
+      }
+    };
+  }
+
   async newSessionV1(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     return {
       sessionId: session.id,
+      modes: sessionModeState(session.agy.config.mode),
       configOptions: sessionConfigOptionsV1(session)
     };
   }
 
   async newSessionV2(params: V2NewSessionRequest): Promise<V2NewSessionResponse> {
     const session = await this.createSession(params.cwd, params.additionalDirectories);
+    // Draft v2 has no native session/set_mode surface; mode is the config option only.
     return {
       sessionId: session.id,
       configOptions: sessionConfigOptionsV2(session)
@@ -258,13 +288,19 @@ export class AgyAcpAgent {
       });
     }
 
-    return { configOptions: sessionConfigOptionsV1(session) };
+    return {
+      modes: sessionModeState(session.agy.config.mode),
+      configOptions: sessionConfigOptionsV1(session)
+    };
   }
 
   /** v1 `session/resume`: reattach without replaying history. */
   async resumeSessionV1(params: V1ResumeSessionRequest): Promise<V1ResumeSessionResponse> {
     const { session } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
-    return { configOptions: sessionConfigOptionsV1(session) };
+    return {
+      modes: sessionModeState(session.agy.config.mode),
+      configOptions: sessionConfigOptionsV1(session)
+    };
   }
 
   /** @deprecated Prefer resumeSessionV1. */
@@ -293,10 +329,12 @@ export class AgyAcpAgent {
       }
       if (stored.conversationId) {
         await this.replayConversation(params.sessionId, session, stored.conversationId, cwd, async (update) => {
-          await client.notify(v2.methods.client.session.update, {
-            sessionId: params.sessionId,
-            update: sessionUpdateToV2(update)
-          });
+          for (const v2Update of expandSessionUpdateToV2(update)) {
+            await client.notify(v2.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: v2Update
+            });
+          }
         });
       }
     }
@@ -305,25 +343,91 @@ export class AgyAcpAgent {
   }
 
   async setConfigOptionV1(
-    params: V1SetSessionConfigOptionRequest
+    params: V1SetSessionConfigOptionRequest,
+    client?: V1AgentContext
   ): Promise<V1SetSessionConfigOptionResponse> {
-    await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
-    return { configOptions: sessionConfigOptionsV1(this.requireSession(params.sessionId)) };
+    const configId = params.configId;
+    const previousMode = this.requireSession(params.sessionId).agy.config.mode;
+    await this.applyConfigOption(params.sessionId, configId, readConfigValue(params));
+    const session = this.requireSession(params.sessionId);
+
+    // Keep native modes UI in sync when mode changes via config option.
+    if (client && configId === MODE_CONFIG_ID && session.agy.config.mode !== previousMode) {
+      await this.notifyCurrentModeUpdate(client, params.sessionId, session.agy.config.mode);
+    }
+
+    return { configOptions: sessionConfigOptionsV1(session) };
   }
 
   async setConfigOptionV2(
     params: V2SetSessionConfigOptionRequest
   ): Promise<V2SetSessionConfigOptionResponse> {
     await this.applyConfigOption(params.sessionId, params.configId, readConfigValue(params));
+    // Draft v2 has no set_mode; the response carries the full option list.
+    // Out-of-band `config_option_update` is emitted on the v1 set_mode path (outside
+    // this RPC) so config UIs stay aligned with native modes.
     return { configOptions: sessionConfigOptionsV2(this.requireSession(params.sessionId)) };
   }
 
   /** @deprecated Prefer setConfigOptionV1. */
   async setConfigOption(
-    params: V1SetSessionConfigOptionRequest
+    params: V1SetSessionConfigOptionRequest,
+    client?: V1AgentContext
   ): Promise<V1SetSessionConfigOptionResponse> {
-    return this.setConfigOptionV1(params);
+    return this.setConfigOptionV1(params, client);
   }
+
+  /**
+   * v1 `session/set_mode`: mirrors the `mode` config option onto agy `--mode`.
+   * Pushes `config_option_update` so clients that only watch config options stay
+   * aligned (set_mode is outside set_config_option).
+   */
+  async setSessionMode(
+    params: SetSessionModeRequest,
+    client: V1AgentContext
+  ): Promise<SetSessionModeResponse> {
+    const previousMode = this.requireSession(params.sessionId).agy.config.mode;
+    await this.applyConfigOption(params.sessionId, MODE_CONFIG_ID, params.modeId);
+    const session = this.requireSession(params.sessionId);
+    const mode = session.agy.config.mode;
+
+    if (mode !== previousMode) {
+      await this.notifyCurrentModeUpdate(client, params.sessionId, mode);
+      await this.notifyConfigOptionUpdateV1(client, params.sessionId, session);
+    }
+
+    return {};
+  }
+
+  private async notifyCurrentModeUpdate(
+    client: V1AgentContext,
+    sessionId: string,
+    mode: AgyExecutionMode
+  ): Promise<void> {
+    await client.notify(v1.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "current_mode_update",
+        currentModeId: mode
+      }
+    });
+  }
+
+  private async notifyConfigOptionUpdateV1(
+    client: V1AgentContext,
+    sessionId: string,
+    session: SessionState
+  ): Promise<void> {
+    await client.notify(v1.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: sessionConfigOptionsV1(session)
+      }
+    });
+  }
+
+
 
   /**
    * v1 prompt lifecycle: response carries stopReason after the full turn.
@@ -353,16 +457,16 @@ export class AgyAcpAgent {
           sessionId: params.sessionId,
           update: sessionUpdateToV1(update)
         });
-      }, async (toolCall) => {
+      }, async (toolCall, { toolName }) => {
         if (signal?.aborted) return "cancelled";
         const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
         const response = await racePermissionCancellation(client.request(v1.methods.client.session.requestPermission, {
           sessionId: params.sessionId,
           toolCall: requestToolCall as v1.ToolCallUpdate,
-          options: permissionOptions(toolCall)
+          options: permissionOptions(toolCall, toolName)
         }), signal);
         return selectedPermission(response, signal);
-      });
+      }, this.editFsBridgeV1(client, params.sessionId));
       await this.persistSession(params.sessionId, session);
       return {
         stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
@@ -561,16 +665,23 @@ export class AgyAcpAgent {
 
       try {
         const outcome = await session.agy.prompt(promptText, async (update) => {
-          await notify(sessionUpdateToV2(update));
-        }, async (toolCall) => {
+          for (const v2Update of expandSessionUpdateToV2(update)) {
+            await notify(v2Update);
+          }
+        }, async (toolCall, { toolName }) => {
           if (signal.aborted) return "cancelled";
-          const converted = sessionUpdateToV2(toolCall) as unknown as Record<string, unknown>;
+          // Permission subject uses the tool_call_update only (skip terminal_update).
+          const expanded = expandSessionUpdateToV2(toolCall);
+          const converted = (expanded.find((item) => {
+            const kind = (item as unknown as { sessionUpdate?: string }).sessionUpdate;
+            return kind === "tool_call_update" || kind === "tool_call";
+          }) ?? sessionUpdateToV2(toolCall)) as unknown as Record<string, unknown>;
           const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
           const response = await racePermissionCancellation(client.request(v2.methods.client.session.requestPermission, {
             sessionId: params.sessionId,
             title: String(requestToolCall.title ?? "Permission required"),
             subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
-            options: permissionOptions(toolCall)
+            options: permissionOptions(toolCall, toolName)
           }), signal);
           return selectedPermission(response, signal);
         });
@@ -702,7 +813,10 @@ export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
     .onRequest(v1.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
     .onRequest(v1.methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.resume, (ctx) => agy.resumeSessionV1(ctx.params))
-    .onRequest(v1.methods.agent.session.setConfigOption, (ctx) => agy.setConfigOptionV1(ctx.params))
+    .onRequest(v1.methods.agent.session.setMode, (ctx) => agy.setSessionMode(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.setConfigOption, (ctx) =>
+      agy.setConfigOptionV1(ctx.params, ctx.client)
+    )
     .onRequest(v1.methods.agent.session.prompt, (ctx) => agy.promptV1(ctx.params, ctx.client, ctx.signal))
     .onRequest(v1.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
     .onNotification(v1.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
@@ -752,8 +866,22 @@ function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermiss
   const outcome = (response as { outcome?: unknown }).outcome;
   if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
   const id = (outcome as { optionId?: string }).optionId;
-  return id === "agy-allow-once" || id === "agy-allow-conversation" || id === "agy-allow-settings" || id === "agy-reject-once"
-    ? id : "cancelled";
+  if (typeof id !== "string" || !id.trim()) return "cancelled";
+  // Standard ACP ids, legacy agy-* ids, and ask_question option ids.
+  if (
+    id === "allow-once" ||
+    id === "allow-always" ||
+    id === "reject-once" ||
+    id === "agy-allow-once" ||
+    id === "agy-allow-conversation" ||
+    id === "agy-allow-settings" ||
+    id === "agy-reject-once" ||
+    id === "agy-q-skip" ||
+    /^agy-q-\d+$/.test(id)
+  ) {
+    return id;
+  }
+  return "cancelled";
 }
 
 async function racePermissionCancellation<T>(request: Promise<T>, signal?: AbortSignal): Promise<T | null> {
@@ -845,6 +973,41 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   };
 }
 
+/** Shared labels/descriptions for config option `mode` and native ACP session modes. */
+const AGY_MODE_OPTIONS: ReadonlyArray<{
+  value: AgyExecutionMode;
+  name: string;
+  description: string;
+}> = [
+  {
+    value: "default",
+    name: "Default",
+    description: "Request review before file writes (agy default; omits --mode)."
+  },
+  {
+    value: "accept-edits",
+    name: "Accept Edits",
+    description: "Apply file edits without interactive write review (agy --mode accept-edits)."
+  },
+  {
+    value: "plan",
+    name: "Plan",
+    description: "Plan-oriented execution (agy --mode plan)."
+  }
+];
+
+/** Native ACP session mode state (v1 `modes` on new/load/resume). Same ids as config `mode`. */
+export function sessionModeState(mode: AgyExecutionMode): SessionModeState {
+  return {
+    currentModeId: mode,
+    availableModes: AGY_MODE_OPTIONS.map((option) => ({
+      id: option.value,
+      name: option.name,
+      description: option.description
+    }))
+  };
+}
+
 export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
   return {
     id: MODE_CONFIG_ID,
@@ -854,23 +1017,11 @@ export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption 
     category: "mode",
     type: "select",
     currentValue: mode,
-    options: [
-      {
-        value: "default",
-        name: "Default",
-        description: "Request review before file writes (agy default; omits --mode)."
-      },
-      {
-        value: "accept-edits",
-        name: "Accept Edits",
-        description: "Apply file edits without interactive write review (agy --mode accept-edits)."
-      },
-      {
-        value: "plan",
-        name: "Plan",
-        description: "Plan-oriented execution (agy --mode plan)."
-      }
-    ]
+    options: AGY_MODE_OPTIONS.map((option) => ({
+      value: option.value,
+      name: option.name,
+      description: option.description
+    }))
   };
 }
 

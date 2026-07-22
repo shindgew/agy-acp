@@ -9,6 +9,43 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- Draft ACP v2 agent-owned terminals for `run_command` / execute tools: emit
+  `terminal_update` (command, cwd, base64 output snapshot, exit status) and
+  embed `{ type: "terminal", terminalId }` on the tool call. v1 clients keep
+  command/output content blocks. Client-executed v1 `terminal/*` is still not
+  used (agy runs the shell; re-running via the editor would double-execute).
+- Structured ACP plans from agy brain markdown artifacts: emit classic v1
+  `sessionUpdate: "plan"` with entries parsed from lists/checkboxes, and map
+  to draft-v2 `plan_update` (`type: "markdown"` when the body is known, else
+  `type: "items"`). Replaces the previous Plan-titled prose tool_call for those
+  writes. No `plan_removed` and no live step status beyond checkbox markers.
+- Native ACP v1 session modes: advertise `modes` on `session/new`, `session/load`,
+  and `session/resume`, and handle `session/set_mode` for the same three ids as
+  the `mode` config option (`default` / `accept-edits` / `plan` → `agy --mode`).
+- Dual-sync mode surfaces: `session/set_mode` pushes `current_mode_update` and
+  `config_option_update`; changing `mode` via `session/set_config_option` pushes
+  `current_mode_update` so native mode UIs stay aligned.
+
+## [0.2.8] - 2026-07-22
+
+Broader interactive permission bridge: file tools and single-select
+`ask_question` can be answered through ACP clients.
+
+### Changed
+
+- Interactive permission bridge now covers file tools that share agy's
+  four-choice ToolConfirmationPanel (`write_to_file`, `replace_file_content`,
+  `multi_replace_file_content`, `view_file`, `list_dir`) in addition to
+  `run_command`.
+- Single-select, single-question `ask_question` is bridged through
+  `session/request_permission` (one option per choice + Skip). Multi-select
+  and multi-question forms still fail closed without writing PTY keys.
+- File-edit permissions use **standard ACP** option ids/kinds
+  (`allow-once` / `allow-always` / `reject-once`) so clients can map them to
+  native Keep / Reject UI, while still driving agy's TUI via PTY keys.
+
 ## [0.2.7] - 2026-07-22
 
 Session config aligned with Antigravity CLI 1.1.x, plus an experimental

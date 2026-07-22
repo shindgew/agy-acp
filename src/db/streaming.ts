@@ -13,6 +13,14 @@ export interface PendingInteraction {
   update: SessionUpdate;
   row: StepRow;
   toolName: string;
+  /**
+   * True when agy itself is blocked awaiting this decision (status 9, the
+   * interactive confirmation menu). False for an edit that already completed
+   * without ever pausing (accept-edits / skip-permissions / any non-gated
+   * mode) — offered for review after the fact, since the write already
+   * happened.
+   */
+  blocked: boolean;
 }
 
 export interface StreamOptions {
@@ -93,10 +101,23 @@ export class StreamPoller {
     const latest = rows.at(-1);
     this._latestAgentComplete = latest?.stepType === 15 && latest.status === 3;
     const updates = this.translator.translate(rows);
-    for (const update of updates.filter((item) => (item as unknown as { status?: string }).status === "pending")) {
-      const id = String((update as unknown as { toolCallId?: string }).toolCallId);
+    for (const update of updates) {
+      const raw = update as unknown as { status?: string; kind?: string; toolCallId?: string };
+      const blocked = raw.status === "pending";
+      // Edits that complete without ever pausing (accept-edits / skip-permissions)
+      // still get offered for review — see PendingInteraction.blocked.
+      const completedEdit = raw.kind === "edit" && raw.status === "completed";
+      if (!blocked && !completedEdit) continue;
+      const id = String(raw.toolCallId);
       const row = rows.find((item) => toolCallId(item) === id);
-      if (row) this._pending.push({ update, row, toolName: row.stepPayload.toolRun?.call?.namePrimary || row.stepPayload.toolRun?.call?.nameSecondary || "unknown" });
+      if (row) {
+        this._pending.push({
+          update,
+          row,
+          toolName: row.stepPayload.toolRun?.call?.namePrimary || row.stepPayload.toolRun?.call?.nameSecondary || "unknown",
+          blocked
+        });
+      }
     }
     return updates;
   }
