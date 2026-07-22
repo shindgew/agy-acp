@@ -22,7 +22,7 @@ Zed / ACP client
 The ACP SDK layer owns protocol parsing, validation, JSON-RPC framing, and
 client notifications. `AgyAcpAgent` owns sessions, prompt conversion,
 cancellation, and persistence. `AgyCliSession` owns `agy` process execution and
-conversation-id tracking. Everything under `src/agy-db/` owns turning agy's
+conversation-id tracking. Everything under `src/db/` owns turning agy's
 conversation database into ACP updates.
 
 Earlier versions of this adapter read `agy --print`'s stdout and used regex
@@ -37,17 +37,17 @@ titles all included. `agy-acp` now reads that database directly instead:
 - stdout is drained but never parsed; a `StreamPoller` polls the conversation
   database on an interval while the process runs, translating newly-appended
   steps into ACP updates (`agent_message_chunk`, `tool_call`,
-  `session_info_update`, ...) via `src/agy-db/translator.ts` and
-  `src/agy-db/updates.ts`,
+  `session_info_update`, ...) via `src/db/translator.ts` and
+  `src/db/updates.ts`,
 - `session/load` replays a conversation's full history from its database (with
   an incremental cache keyed on file `(mtime, size)` — see
-  `src/agy-db/replay.ts`); `session/resume` restores the same session binding
+  `src/db/replay.ts`); `session/resume` restores the same session binding
   without replaying,
 - session bindings (which agy conversation a session is bound to, last model
   choice, etc.) persist to `~/.agy-acp-state/sessions.json` so `session/load`
   and `session/resume` survive a server restart — see `src/session-store.ts`,
-- separate ACP session `Model` and `Reasoning Effect` pickers populated from
-  `agy models` when available,
+- separate ACP session `Model` and `Reasoning Effort` pickers populated from
+  `agy models` when available (effort maps to `agy --effort`),
 - an ACP session `Fast Mode` selector that prepends `/fast` to print-mode
   prompts without editing global Antigravity settings,
 - cancellation sends `SIGINT` (giving `agy` a chance to flush its database
@@ -55,8 +55,8 @@ titles all included. `agy-acp` now reads that database directly instead:
 - `--sandbox` is enabled by default,
 - `--dangerously-skip-permissions` is opt-in only.
 
-The conversation-database wire format (`src/agy-db/step-payload.ts`,
-`src/agy-db/columns.ts`) was cross-referenced against the reverse-engineering
+The conversation-database wire format (`src/db/step-payload.ts`,
+`src/db/columns.ts`) was cross-referenced against the reverse-engineering
 done by the [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp)
 project (MIT); the decoding code itself is our own, built on a shared generic
 wire-walker rather than a generated client.
@@ -67,7 +67,8 @@ wire-walker rather than a generated client.
 `agy` is not already on `PATH`.
 The adapter downloads the latest release asset from
 [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli/releases/latest)
-into `~/.local/bin/agy`.
+into `~/.local/bin/agy` (checksum-verified when GitHub publishes a digest), and
+prepends that directory to `PATH` for the adapter process.
 
 You can still install `agy` yourself if you prefer:
 
@@ -79,7 +80,7 @@ Local development:
 
 ```sh
 npm run build
-node dist/cli.js
+node dist/main.js
 ```
 
 Published package / Zed:
@@ -108,8 +109,8 @@ Optional environment variables:
 
 - `PATH`: include the directory that contains `agy` when the agent process does
   not inherit your shell `PATH` (common in editor-launched agents). When `agy`
-  is missing, `agy-acp` installs it to `~/.local/bin` and prepends that
-  directory to `PATH` for the adapter process.
+  is missing, `agy-acp` installs it to `~/.local/bin` from GitHub Releases and
+  prepends that directory to `PATH` for the adapter process.
 - `AGY_ACP_CONVERSATIONS_DIR`: where `agy` writes its per-conversation SQLite
   databases, default `~/.gemini/antigravity-cli/conversations`. Override this
   if `agy` uses a different path on your OS.
@@ -122,7 +123,7 @@ When the ACP client supports session configuration options, `agy-acp` returns
 three options during `session/new`:
 
 - `Model`: a select option with ACP category `model`.
-- `Reasoning Effect`: a select option with ACP category `thought_level`.
+- `Reasoning Effort`: a select option with ACP category `thought_level` (config id `effort`).
 - `Fast Mode`: an `Off`/`On` select option with ACP category `model_config`.
 
 The adapter discovers model choices by running:
@@ -131,22 +132,30 @@ The adapter discovers model choices by running:
 agy models
 ```
 
-Selecting a model and reasoning effect sends `session/set_config_option`; later
-prompts include:
+On current Antigravity CLI releases (`agy` ≥ 1.1.5), that command lists stable
+slugs such as `gemini-3.5-flash-medium` and `claude-opus-4-6-thinking`. The
+adapter groups those into a base model plus optional effort:
+
+| `agy models` line | Model picker | Effort picker |
+|---|---|---|
+| `gemini-3.5-flash-medium` | `gemini-3.5-flash` | `medium` |
+| `gemini-3.5-flash-high` | `gemini-3.5-flash` | `high` |
+| `claude-opus-4-6-thinking` | `claude-opus-4-6-thinking` | N/A |
+| `claude-sonnet-4-6` | `claude-sonnet-4-6` | N/A |
+
+Selecting a model and effort sends `session/set_config_option`; later prompts
+include:
 
 ```sh
-agy --print "..." --model "<base model> (<reasoning effect>)"
+agy --print "..." --model gemini-3.5-flash --effort high
 ```
 
-The first discovered model is selected by default for new sessions.
-Models ending in `(Low)`, `(Medium)`, or `(High)` are split into a base
-model picker plus a reasoning-effect picker. `(Thinking)` is treated as part of
-the model name, not as a reasoning-effect suffix.
+Models without effort variants only pass `--model`. Thinking models keep
+`-thinking` as part of the model identity (not as an `--effort` value).
 
-ACP config values use lowercase slugs (`gemini-3.5-flash`, `medium`, and so
-on) while the picker labels stay human-readable (`Gemini 3.5 Flash`, `Medium`,
-and so on). The adapter resolves the slug values back to agy's native
-`--model` display names when spawning prompts.
+Legacy display-name lists (`Gemini 3.5 Flash (Medium)`) are still parsed for
+compatibility. Picker labels stay human-readable (`Gemini 3.5 Flash`,
+`Medium`, …).
 
 Enabling `Fast Mode` sends `/fast` before the user prompt in the transient
 `agy --print` session. This mirrors Antigravity CLI Fast Mode without mutating
@@ -179,5 +188,5 @@ npm test
 Smoke-test the ACP initialize handshake:
 
 ```sh
-printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' | node dist/cli.js
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}' | node dist/main.js
 ```

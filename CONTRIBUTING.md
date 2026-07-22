@@ -17,9 +17,9 @@ Run the same checks used by CI before opening a pull request:
 ```sh
 npm run build
 npm test
-node --check dist/cli.js
+node --check dist/main.js
 node --check dist/acp-server.js
-node --check dist/agy-cli.js
+node --check dist/cli.js
 ```
 
 ## Pull Requests
