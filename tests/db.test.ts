@@ -350,7 +350,7 @@ describe("Translator", () => {
       content?: Array<{ content?: { text?: string } }>;
     };
     expect(update.kind).toBe("fetch");
-    expect(update.title).toContain("Example Doc");
+    expect(update.title).toBe("Fetch Example Doc");
     expect(update.rawOutput).toMatchObject({ title: "Example Doc" });
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("https://example.com/doc");
@@ -414,6 +414,61 @@ describe("Translator", () => {
       oldText: "export const x = 1;\n",
       newText: "export const x = 2;\n"
     });
+  });
+
+  it("does not use ranged view_file slices as oldText for full-file writes", () => {
+    const db = createConversationDb(dir, "conv-write-ranged");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-range",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"/repo/a.ts","StartLine":10,"EndLine":20}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///repo/a.ts",
+          startLine: 10,
+          endLine: 20,
+          content: "partial slice\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "/repo/a.ts",
+              CodeContent: "full file\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-ranged")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-2"
+    ) as {
+      content?: Array<{ type?: string; oldText?: string | null; newText?: string }>;
+    };
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({ oldText: null, newText: "full file\n" });
   });
 
   it("labels permission decisions as granted or denied", () => {

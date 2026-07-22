@@ -135,11 +135,8 @@ function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate |
  */
 export function buildUpdatefromStepPayload(
   stepRow: StepRow,
-  ctx?: UpdateContext | string
+  ctx?: UpdateContext
 ): SessionUpdate | SessionUpdate[] | null {
-  const context: UpdateContext | undefined =
-    typeof ctx === "string" ? { cwd: ctx } : ctx;
-
   switch (stepRow.stepType) {
     case 14:
       return userPromptUpdate(stepRow);
@@ -148,15 +145,15 @@ export function buildUpdatefromStepPayload(
     case 23:
       return titleUpdate(stepRow);
     case 5:
-      return editUpdate(stepRow, context);
+      return editUpdate(stepRow, ctx);
     case 17:
-      return buildByToolName(stepRow, context);
+      return buildByToolName(stepRow, ctx);
     case 8:
     case 9:
-      return readUpdate(stepRow, context);
+      return readUpdate(stepRow, ctx);
     case 7:
     case 33:
-      return searchUpdate(stepRow, context);
+      return searchUpdate(stepRow, ctx);
     case 21:
       return executeUpdate(stepRow);
     case 31:
@@ -169,6 +166,6 @@ export function buildUpdatefromStepPayload(
       return otherUpdate(stepRow);
     default:
       if (LIFECYCLE_STEP_TYPES.has(stepRow.stepType)) return null;
-      return buildByToolName(stepRow, context);
+      return buildByToolName(stepRow, ctx);
   }
 }

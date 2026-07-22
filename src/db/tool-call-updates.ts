@@ -237,10 +237,31 @@ function fsPath(p: string | null | undefined): string | null {
 // agy's rawInputJson keys are inconsistently PascalCase/camelCase across tool
 // versions (`TargetFile` vs `targetFile`), so every lookup below tries both.
 
+/**
+ * True when a view_file step looks safe to cache as the full file body for
+ * later write diffs. Reject mid-file slices; accept start-at-beginning reads
+ * that either omit an end bound or reach the file's reported total.
+ */
+function isFullFileView(opts: {
+  startLine: number;
+  endLine: number | null;
+  nextLine?: number | null;
+  fileSizeOrTotal?: number | null;
+}): boolean {
+  if (opts.startLine > 1) return false;
+  if (opts.endLine === null || opts.endLine === 0) return true;
+  // nextLine 0/undefined after a complete read; or end covers reported total lines.
+  if (opts.nextLine === 0) return true;
+  if (opts.fileSizeOrTotal != null && opts.fileSizeOrTotal > 0 && opts.endLine >= opts.fileSizeOrTotal) {
+    return true;
+  }
+  return false;
+}
+
 /** Step types 8/9/17(view_file|list_dir): a file read or directory listing. */
-export function readUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate {
-  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
-  const fileContents = typeof ctx === "string" ? undefined : ctx?.fileContents;
+export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
+  const cwd = ctx?.cwd;
+  const fileContents = ctx?.fileContents;
   const { stepPayload, stepType } = stepRow;
   const toolRun = stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
@@ -277,8 +298,17 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext | string): Sess
     const body = asStr(view?.content);
     if (body) {
       content.push(codeBlock(body));
-      // Remember full-file (or ranged) view content for later write diffs.
-      if (filePath && fileContents) {
+      // Only cache full-file views; ranged slices would corrupt later write diffs.
+      if (
+        filePath &&
+        fileContents &&
+        isFullFileView({
+          startLine,
+          endLine,
+          nextLine: asNum(view?.nextLine),
+          fileSizeOrTotal: asNum(view?.fileSizeOrTotal)
+        })
+      ) {
         fileContents.set(path.resolve(filePath), body);
       }
     }
@@ -297,8 +327,8 @@ function renderHits(hits: SearchHit[] | undefined): string {
 }
 
 /** Step types 7/33(grep_search|search_web): a filesystem or web search. */
-export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate {
-  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
+export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
+  const cwd = ctx?.cwd;
   const { stepPayload, stepType } = stepRow;
   const name = stepPayload.toolRun?.call?.namePrimary ?? "";
   const rawInput = parseRawInput(stepRow);
@@ -380,6 +410,18 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   return update;
 }
 
+/** Prefer a real document title over agy's generic "Live Content" label. */
+function fetchTitle(docTitle: string, url: string, toolRun: StepRow["stepPayload"]["toolRun"]): string {
+  const generic = !docTitle || /^live content$/i.test(docTitle);
+  if (!generic) return `Fetch ${docTitle}`;
+  if (url) return `Fetch ${url}`;
+  return (
+    asStr(toolRun?.titlePrimary)?.trim() ||
+    asStr(toolRun?.titleSecondary)?.trim() ||
+    "Fetch URL"
+  );
+}
+
 /** Step type 31 (read_url_content): fetch URL + optional decoded body (field 40). */
 export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   const toolRun = stepRow.stepPayload.toolRun;
@@ -389,12 +431,7 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
     asStr(urlContent?.url)?.trim() || asStr(pick(rawInput, "Url", "url"))?.trim() || "";
 
   const docTitle = asStr(urlContent?.title)?.trim() || "";
-  const title =
-    (docTitle ? `Fetch ${docTitle}` : null) ||
-    (url ? `Fetch ${url}` : null) ||
-    asStr(toolRun?.titlePrimary)?.trim() ||
-    asStr(toolRun?.titleSecondary)?.trim() ||
-    "Fetch URL";
+  const title = fetchTitle(docTitle, url, toolRun);
 
   const content: Record<string, unknown>[] = [];
   if (url) content.push(textBlock(url));
@@ -442,9 +479,9 @@ function isPlanFile(targetFile: string): boolean {
 
 /** Step type 5 (write_to_file|replace_file_content|multi_replace_file_content),
  *  and step 17 artifact writes (e.g. a generated `plan.md` for user review). */
-export function editUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate | SessionUpdate[] {
-  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
-  const fileContents = typeof ctx === "string" ? undefined : ctx?.fileContents;
+export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate | SessionUpdate[] {
+  const cwd = ctx?.cwd;
+  const fileContents = ctx?.fileContents;
   const rawInput = parseRawInput(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
 
