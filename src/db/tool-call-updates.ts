@@ -79,9 +79,25 @@ function errorBlock(e: ErrorDetails): Record<string, unknown> {
   return codeBlock(`Error: ${message}${detail}`);
 }
 
+/** Map agy permission decision varint to a short outcome label.
+ *  Observed values: 0 = denied, 1 = granted. */
+export function permissionOutcome(decision: number): "denied" | "granted" | "unknown" {
+  if (decision === 0) return "denied";
+  if (decision === 1) return "granted";
+  return "unknown";
+}
+
 function permissionBlock(p: PermissionInfo): Record<string, unknown> {
   const target = p.value.trim() ? ` (${p.value.trim()})` : "";
-  return textBlock(`Permission requested: ${p.kind || "unknown"}${target}`);
+  const kind = p.kind || "unknown";
+  const outcome = permissionOutcome(p.decision);
+  const label =
+    outcome === "denied"
+      ? `Permission denied: ${kind}${target}`
+      : outcome === "granted"
+        ? `Permission granted: ${kind}${target}`
+        : `Permission requested: ${kind}${target}`;
+  return textBlock(label);
 }
 
 /** Truncate a large tool body for editor-friendly display. */
@@ -414,7 +430,6 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   }
   return update;
 }
-
 
 function isPlanFile(targetFile: string): boolean {
   return (

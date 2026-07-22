@@ -313,7 +313,6 @@ describe("Translator", () => {
     expect(body).toContain("https://www.google.com/search");
   });
 
-
   it("surfaces fetched URL body from field 40", () => {
     const db = createConversationDb(dir, "conv-fetch");
     insertStep(db, {
@@ -357,7 +356,6 @@ describe("Translator", () => {
     expect(body).toContain("https://example.com/doc");
     expect(body).toContain("Body from the page.");
   });
-
 
   it("uses prior view_file content as oldText on full-file writes", () => {
     const db = createConversationDb(dir, "conv-write-diff");
@@ -418,6 +416,93 @@ describe("Translator", () => {
     });
   });
 
+  it("labels permission decisions as granted or denied", () => {
+    const db = createConversationDb(dir, "conv-perm");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-deny",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"rm -rf /"}'
+          })
+        })
+      }),
+      permissions: encodePermissions({ kind: "command", value: "rm -rf /", decision: 0 })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-ok",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls"}'
+          })
+        })
+      }),
+      permissions: encodePermissions({ kind: "unsandboxed", value: "ls", decision: 1 })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-perm")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    const texts = updates.map((u) =>
+      ((u as { content?: Array<{ content?: { text?: string } }> }).content ?? [])
+        .map((c) => c.content?.text ?? "")
+        .join("\n")
+    );
+    expect(texts[0]).toContain("Permission denied: command (rm -rf /)");
+    expect(texts[1]).toContain("Permission granted: unsandboxed (ls)");
+  });
+
+  it("presents brain plan writes as Plan titles with prose content", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "# Plan\n\n1. Do the thing\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      title: string;
+      content?: Array<{ type?: string; content?: { text?: string } }>;
+    };
+    expect(update.title).toBe("implementation_plan.md");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("# Plan");
+    expect((update.content ?? []).some((c) => c.type === "diff")).toBe(false);
+  });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
