@@ -9,6 +9,18 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Added
+
+- ACP session `mode` config option mapped to `agy --mode`:
+  `default` (omit flag), `accept-edits`, and `plan`. Persisted on load/resume,
+  overridable via `AGY_ACP_MODE` or `agy-acp --mode <value>`.
+
+### Changed
+
+- Session config option ids/names and order are now `mode`, `model`,
+  `reasoningEffort` (was `model`, `effort`, and previously `fast-mode`).
+  `reasoningEffort` still maps to `agy --effort`.
+
 ### Removed
 
 - ACP session `Fast Mode` config option (`fast-mode` / `/fast` prompt prefix).
