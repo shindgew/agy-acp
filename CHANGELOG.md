@@ -9,6 +9,12 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Removed
+
+- ACP session `Fast Mode` config option (`fast-mode` / `/fast` prompt prefix).
+  Antigravity CLI removed `/fast` slash commands in `agy` 1.1.0 in favor of
+  execution mode cycling (`default` → `accept-edits` → `plan`).
+
 ## [0.2.6] - 2026-07-22
 
 Stable ACP v1 fidelity release: richer tool result bodies and better editor diffs,
