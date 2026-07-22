@@ -225,6 +225,56 @@ describe("session/load and session/resume", () => {
     });
   });
 
+  it("lists persisted sessions after a restart", async () => {
+    await withConversationsDir(async (dir) => {
+      const appOptions = {
+        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-list", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "listed" }) }
+        ])
+      };
+
+      let sessionId: string;
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        try {
+          const session = await connection.agent.request(methods.agent.session.new, {
+            cwd: "/repo",
+            additionalDirectories: ["/extra"],
+            mcpServers: []
+          });
+          sessionId = session.sessionId;
+          await connection.agent.request(methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: "text", text: "hi" }]
+          });
+        } finally {
+          connection.close();
+        }
+      }
+
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        try {
+          const listed = await connection.agent.request(methods.agent.session.list, {
+            cwd: "/repo"
+          });
+          expect(listed.sessions).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                sessionId,
+                cwd: "/repo",
+                additionalDirectories: ["/extra"]
+              })
+            ])
+          );
+        } finally {
+          connection.close();
+        }
+      }
+    });
+  });
+
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
       const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp({
