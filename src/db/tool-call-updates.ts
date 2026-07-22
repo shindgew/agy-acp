@@ -31,12 +31,14 @@ export function toolCallId(stepRow: StepRow): string {
 }
 
 /** Map agy's step `status` column to an ACP tool_call status.
- *  2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed. */
-function toolCallStatus(stepRow: StepRow): "in_progress" | "completed" | "failed" {
+ *  2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed.
+ *  `cancelled` is ACP v2; v1 clients map it to `failed` at the protocol boundary. */
+function toolCallStatus(stepRow: StepRow): "in_progress" | "completed" | "failed" | "cancelled" {
   switch (stepRow.status) {
     case 2:
       return "in_progress";
     case 6:
+      return "cancelled";
     case 7:
       return "failed";
     default:
@@ -86,7 +88,7 @@ export function toolCallUpdate(opts: {
   stepRow: StepRow;
   title: string;
   kind: ToolKind;
-  status?: "pending" | "in_progress" | "completed" | "failed";
+  status?: "pending" | "in_progress" | "completed" | "failed" | "cancelled";
   content?: Record<string, unknown>[];
   locations?: Record<string, unknown>[];
 }): SessionUpdate {
@@ -102,6 +104,8 @@ export function toolCallUpdate(opts: {
     ? { message: stepRow.error.message || stepRow.error.detail, detail: stepRow.error.detail, stackTrace: stepRow.error.stackTrace }
     : undefined;
 
+  // Emit `tool_call` (v1 create shape). The v2 boundary rewrites this to
+  // `tool_call_update` (first update creates the call).
   return {
     sessionUpdate: "tool_call",
     toolCallId: toolCallId(stepRow),

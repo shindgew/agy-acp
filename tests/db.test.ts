@@ -87,11 +87,15 @@ describe("Translator", () => {
     const conn = ConversationDb.open(dir, "conv-2")!;
 
     const first = translator.translate(conn.readAfter(0));
-    expect(first).toEqual([{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } }]);
+    expect(first).toEqual([
+      { sessionUpdate: "agent_message_chunk", messageId: "1", content: { type: "text", text: "Hello" } }
+    ]);
 
     updateStepPayload(db, 1, encodeStepPayload({ agentText: "Hello world" }));
     const second = translator.translate(conn.readAfter(0));
-    expect(second).toEqual([{ sessionUpdate: "agent_message_chunk", content: { type: "text", text: " world" } }]);
+    expect(second).toEqual([
+      { sessionUpdate: "agent_message_chunk", messageId: "1", content: { type: "text", text: " world" } }
+    ]);
 
     conn.close();
     db.close();
@@ -129,7 +133,11 @@ describe("Translator", () => {
     conn.close();
 
     expect(updates).toEqual([
-      { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello\n world" } }
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\n world" }
+      }
     ]);
   });
 });
