@@ -14,9 +14,12 @@ import {
   readUpdate,
   searchUpdate,
   subagentUpdate,
-  thoughtUpdate
+  thoughtUpdate,
+  type UpdateContext
 } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
+
+export type { UpdateContext } from "./tool-call-updates.js";
 
 /**
  * Step types recorded by agy for its own bookkeeping, with no user-facing ACP
@@ -98,18 +101,18 @@ function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
  *  the fallback for any other unrecognized step type). Returns null when the
  *  step carries no actual tool call (e.g. type-17 artifact progress wrappers
  *  have a tool-run header but no `call`), so we don't emit empty tool_calls. */
-function buildByToolName(stepRow: StepRow, cwd?: string): SessionUpdate | SessionUpdate[] | null {
+function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate | SessionUpdate[] | null {
   const name = stepRow.stepPayload.toolRun?.call?.namePrimary ?? "";
   if (!name) return null;
 
   if (isThoughtToolName(name)) return thoughtUpdate(stepRow);
-  if (name === "view_file" || name === "list_dir") return readUpdate(stepRow, cwd);
-  if (name === "grep_search" || name === "search_web") return searchUpdate(stepRow, cwd);
+  if (name === "view_file" || name === "list_dir") return readUpdate(stepRow, ctx);
+  if (name === "grep_search" || name === "search_web") return searchUpdate(stepRow, ctx);
   if (name === "run_command") return executeUpdate(stepRow);
   if (name === "read_url_content") return fetchUpdate(stepRow);
   if (name === "invoke_subagent") return subagentUpdate(stepRow);
   if (name === "ask_question") return questionUpdate(stepRow);
-  if (/write|replace|edit|patch/.test(name)) return editUpdate(stepRow, cwd);
+  if (/write|replace|edit|patch/.test(name)) return editUpdate(stepRow, ctx);
   return otherUpdate(stepRow);
 }
 
@@ -130,7 +133,13 @@ function buildByToolName(stepRow: StepRow, cwd?: string): SessionUpdate | Sessio
  *   90, 98, 101   lifecycle/system       -> null (skipped)
  *   default       unknown tool step      -> tool_call (generic) or null
  */
-export function buildUpdatefromStepPayload(stepRow: StepRow, cwd?: string): SessionUpdate | SessionUpdate[] | null {
+export function buildUpdatefromStepPayload(
+  stepRow: StepRow,
+  ctx?: UpdateContext | string
+): SessionUpdate | SessionUpdate[] | null {
+  const context: UpdateContext | undefined =
+    typeof ctx === "string" ? { cwd: ctx } : ctx;
+
   switch (stepRow.stepType) {
     case 14:
       return userPromptUpdate(stepRow);
@@ -139,15 +148,15 @@ export function buildUpdatefromStepPayload(stepRow: StepRow, cwd?: string): Sess
     case 23:
       return titleUpdate(stepRow);
     case 5:
-      return editUpdate(stepRow, cwd);
+      return editUpdate(stepRow, context);
     case 17:
-      return buildByToolName(stepRow, cwd);
+      return buildByToolName(stepRow, context);
     case 8:
     case 9:
-      return readUpdate(stepRow, cwd);
+      return readUpdate(stepRow, context);
     case 7:
     case 33:
-      return searchUpdate(stepRow, cwd);
+      return searchUpdate(stepRow, context);
     case 21:
       return executeUpdate(stepRow);
     case 31:
@@ -160,6 +169,6 @@ export function buildUpdatefromStepPayload(stepRow: StepRow, cwd?: string): Sess
       return otherUpdate(stepRow);
     default:
       if (LIFECYCLE_STEP_TYPES.has(stepRow.stepType)) return null;
-      return buildByToolName(stepRow, cwd);
+      return buildByToolName(stepRow, context);
   }
 }

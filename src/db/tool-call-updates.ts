@@ -8,6 +8,19 @@ import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
+/** Absolute path -> last known file body from prior view_file / write steps. */
+export type FileContentCache = Map<string, string>;
+
+/** Options shared by tool builders that need project context. */
+export interface UpdateContext {
+  cwd?: string;
+  /** Prior file contents for full-file write diffs. */
+  fileContents?: FileContentCache;
+}
+
+/** Cap on fetched URL / large tool bodies surfaced in session updates. */
+export const MAX_TOOL_BODY_CHARS = 32_000;
+
 // --- shared helpers ----------------------------------------------------------
 
 /** Parse the JSON-encoded tool arguments (`toolRun.call.rawInputJson`), tolerating
@@ -69,6 +82,12 @@ function errorBlock(e: ErrorDetails): Record<string, unknown> {
 function permissionBlock(p: PermissionInfo): Record<string, unknown> {
   const target = p.value.trim() ? ` (${p.value.trim()})` : "";
   return textBlock(`Permission requested: ${p.kind || "unknown"}${target}`);
+}
+
+/** Truncate a large tool body for editor-friendly display. */
+export function truncateToolBody(text: string, max = MAX_TOOL_BODY_CHARS): { text: string; truncated: boolean } {
+  if (text.length <= max) return { text, truncated: false };
+  return { text: `${text.slice(0, max)}\n… (truncated, ${text.length - max} more chars)`, truncated: true };
 }
 
 function taskBlock(t: TaskDetails): Record<string, unknown> {
@@ -203,7 +222,8 @@ function fsPath(p: string | null | undefined): string | null {
 // versions (`TargetFile` vs `targetFile`), so every lookup below tries both.
 
 /** Step types 8/9/17(view_file|list_dir): a file read or directory listing. */
-export function readUpdate(stepRow: StepRow, cwd?: string): SessionUpdate {
+export function readUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate {
+  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
   const { stepPayload, stepType } = stepRow;
   const toolRun = stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
@@ -254,7 +274,8 @@ function renderHits(hits: SearchHit[] | undefined): string {
 }
 
 /** Step types 7/33(grep_search|search_web): a filesystem or web search. */
-export function searchUpdate(stepRow: StepRow, cwd?: string): SessionUpdate {
+export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate {
+  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
   const { stepPayload, stepType } = stepRow;
   const name = stepPayload.toolRun?.call?.namePrimary ?? "";
   const rawInput = parseRawInput(stepRow);
@@ -275,9 +296,19 @@ export function searchUpdate(stepRow: StepRow, cwd?: string): SessionUpdate {
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
   } else {
-    // search_web is call-only (no result body decoded into the payload).
-    const query = asStr(pick(rawInput, "query", "Query"))?.trim() ?? "";
+    // search_web: field 42 carries query metadata; hit lists are not persisted.
+    const web = stepPayload.webSearch;
+    const query =
+      asStr(web?.query)?.trim() || asStr(pick(rawInput, "query", "Query"))?.trim() || "";
     title = query ? `Web search ${query}` : "Web search";
+
+    const lines: string[] = [];
+    if (query) lines.push(`Query: ${query}`);
+    const secondary = asStr(web?.refinedQueryOrUrl)?.trim() ?? "";
+    if (secondary && secondary !== query) {
+      lines.push(secondary.startsWith("http") ? `URL: ${secondary}` : `Refined: ${secondary}`);
+    }
+    if (lines.length > 0) content.push(codeBlock(lines.join("\n")));
   }
 
   return toolCallUpdate({ stepRow, title, kind: "search", content, locations });
@@ -326,20 +357,57 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   return update;
 }
 
-/** Step type 31 (read_url_content): a call-only step; the fetched body isn't decoded. */
+/** Step type 31 (read_url_content): fetch URL + optional decoded body (field 40). */
 export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   const toolRun = stepRow.stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
-  const url = asStr(pick(rawInput, "Url", "url"))?.trim();
+  const urlContent = stepRow.stepPayload.urlContent;
+  const url =
+    asStr(urlContent?.url)?.trim() || asStr(pick(rawInput, "Url", "url"))?.trim() || "";
 
+  const docTitle = asStr(urlContent?.title)?.trim() || "";
   const title =
+    (docTitle ? `Fetch ${docTitle}` : null) ||
     (url ? `Fetch ${url}` : null) ||
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
     "Fetch URL";
 
-  return toolCallUpdate({ stepRow, title, kind: "fetch", content: url ? [textBlock(url)] : [] });
+  const content: Record<string, unknown>[] = [];
+  if (url) content.push(textBlock(url));
+  const description = asStr(urlContent?.description)?.trim() || "";
+  if (docTitle || description) {
+    const meta = [docTitle && `Title: ${docTitle}`, description && `Description: ${description}`]
+      .filter(Boolean)
+      .join("\n");
+    if (meta) content.push(textBlock(meta));
+  }
+
+  const body = asStr(urlContent?.body) ?? "";
+  let truncated = false;
+  if (body.trim()) {
+    const sliced = truncateToolBody(body);
+    truncated = sliced.truncated;
+    content.push(codeBlock(sliced.text));
+  }
+
+  const update = toolCallUpdate({ stepRow, title, kind: "fetch", content }) as SessionUpdate & {
+    rawOutput?: unknown;
+  };
+
+  if (urlContent && !stepRow.error) {
+    update.rawOutput = {
+      url: url || undefined,
+      title: docTitle || undefined,
+      description: description || undefined,
+      contentPath: urlContent.contentPath || undefined,
+      bodyChars: body.length || undefined,
+      truncated: truncated || undefined
+    };
+  }
+  return update;
 }
+
 
 function isPlanFile(targetFile: string): boolean {
   return (
@@ -352,7 +420,8 @@ function isPlanFile(targetFile: string): boolean {
 
 /** Step type 5 (write_to_file|replace_file_content|multi_replace_file_content),
  *  and step 17 artifact writes (e.g. a generated `plan.md` for user review). */
-export function editUpdate(stepRow: StepRow, cwd?: string): SessionUpdate | SessionUpdate[] {
+export function editUpdate(stepRow: StepRow, ctx?: UpdateContext | string): SessionUpdate | SessionUpdate[] {
+  const cwd = typeof ctx === "string" ? ctx : ctx?.cwd;
   const rawInput = parseRawInput(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
 

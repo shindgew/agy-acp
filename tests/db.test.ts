@@ -10,9 +10,13 @@ import { createConversationDb, insertStep, updateStep, updateStepPayload } from 
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodePermissions,
   encodeStepPayload,
   encodeToolCall,
-  encodeToolRun
+  encodeToolRun,
+  encodeUrlContentResult,
+  encodeViewFileResult,
+  encodeWebSearchResult
 } from "./fixtures/step-encoder.js";
 
 let dir: string;
@@ -268,6 +272,92 @@ describe("Translator", () => {
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("README.md");
   });
+
+  it("surfaces web search query metadata from field 42", () => {
+    const db = createConversationDb(dir, "conv-web-search");
+    insertStep(db, {
+      idx: 1,
+      stepType: 33,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "ws-1",
+            namePrimary: "search_web",
+            rawInputJson: '{"query":"agy acp adapter"}'
+          })
+        }),
+        webSearch: encodeWebSearchResult({
+          query: "agy acp adapter",
+          refinedQueryOrUrl: "https://www.google.com/search?q=agy+acp+adapter"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-web-search")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      kind: string;
+      title: string;
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.kind).toBe("search");
+    expect(update.title).toContain("agy acp adapter");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("Query: agy acp adapter");
+    expect(body).toContain("https://www.google.com/search");
+  });
+
+
+  it("surfaces fetched URL body from field 40", () => {
+    const db = createConversationDb(dir, "conv-fetch");
+    insertStep(db, {
+      idx: 1,
+      stepType: 31,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "fetch-1",
+            namePrimary: "read_url_content",
+            rawInputJson: '{"Url":"https://example.com/doc"}'
+          })
+        }),
+        urlContent: encodeUrlContentResult({
+          url: "https://example.com/doc",
+          title: "Example Doc",
+          description: "Fetched live",
+          body: "# Hello\n\nBody from the page."
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-fetch")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      kind: string;
+      title: string;
+      rawOutput?: { title?: string; truncated?: boolean };
+      content?: Array<{ content?: { text?: string } }>;
+    };
+    expect(update.kind).toBe("fetch");
+    expect(update.title).toContain("Example Doc");
+    expect(update.rawOutput).toMatchObject({ title: "Example Doc" });
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("https://example.com/doc");
+    expect(body).toContain("Body from the page.");
+  });
+
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
