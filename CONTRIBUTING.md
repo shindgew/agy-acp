@@ -57,8 +57,16 @@ The npm dist-tag is the first segment of the SemVer pre-release id
 (`1.0.0-alpha.0` → `alpha`). Stable versions (no hyphen) publish as `latest`.
 Bare `npx agy-acp` always follows `latest`, so alphas never become default.
 
-One-time setup: store an npm automation token as the repository secret
-`NPM_TOKEN` (Settings → Secrets and variables → Actions).
+One-time setup (npm **Trusted Publisher**, no long-lived token):
+
+1. On [npmjs.com](https://www.npmjs.com) → package `agy-acp` → **Trusted Publisher**.
+2. Provider: **GitHub Actions**.
+3. Organization / user: `shindgew`, repository: `agy-acp`.
+4. Workflow filename: `release.yml` (must match `.github/workflows/release.yml`).
+5. Leave environment empty unless you add a GitHub Environment to the job.
+
+The release workflow uses OIDC (`permissions: id-token: write`) and
+`npm publish --provenance`. Do **not** set `NPM_TOKEN` for publish.
 
 ### Stable release checklist
 
