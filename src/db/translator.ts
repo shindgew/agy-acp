@@ -4,7 +4,8 @@
 // stream (step type 15):
 //
 //   - streaming emits the newly-appended slice each poll (text grows in place
-//     at a fixed idx), deduping tool steps it has already sent;
+//     at a fixed idx), and re-emits tool steps as `tool_call_update` when their
+//     status/content snapshot changes;
 //   - replay buffers consecutive agent-text parts and flushes them as one
 //     message at each boundary, applying narration filtering across the group.
 //
@@ -36,11 +37,36 @@ function agentChunk(text: string, messageId: string): SessionUpdate {
   };
 }
 
+/** Stable signature of a tool update for progressive re-emission. */
+function updateSnapshot(update: SessionUpdate): string {
+  const raw = update as unknown as Record<string, unknown>;
+  return JSON.stringify({
+    sessionUpdate: raw.sessionUpdate,
+    toolCallId: raw.toolCallId,
+    title: raw.title,
+    kind: raw.kind,
+    status: raw.status,
+    content: raw.content,
+    locations: raw.locations,
+    rawInput: raw.rawInput,
+    rawOutput: raw.rawOutput
+  });
+}
+
+function asToolCallUpdate(update: SessionUpdate): SessionUpdate {
+  return {
+    ...(update as object),
+    sessionUpdate: "tool_call_update"
+  } as SessionUpdate;
+}
+
 export class Translator {
   // Streaming: idx -> chars of agent text already emitted (for incremental diff).
   private readonly agentTextLengths = new Map<number, number>();
-  // Streaming: tool step indices already emitted (dedup across polls).
-  private readonly emittedSteps = new Set<number>();
+  // Stream + replay: last emitted snapshot keyed by step idx (tool progressive lifecycle).
+  private readonly toolSnapshots = new Map<number, string>();
+  // Title-attached think tool cards: emit once per step idx until content changes.
+  private readonly titleThoughtSnapshots = new Map<number, string>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
   private readonly pendingAgentParts: string[] = [];
   // Replay: message id for the current buffered agent-text group.
@@ -93,13 +119,11 @@ export class Translator {
 
       default: {
         // Tool calls and lifecycle steps. In replay, a tool call ends the
-        // current agent message; in streaming, dedup by idx across polls.
+        // current agent message. In both modes, progressive status/content
+        // changes re-emit as tool_call_update.
         if (this.opts.mode === "replay") {
           this.flushAgentBuffer(out);
-        } else if (this.emittedSteps.has(row.idx)) {
-          return;
         }
-        this.emittedSteps.add(row.idx);
         this.pushDispatched(row, out);
       }
     }
@@ -108,10 +132,37 @@ export class Translator {
   private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
     const update = buildUpdatefromStepPayload(row, this.opts.cwd);
     if (Array.isArray(update)) {
-      out.push(...update);
+      for (const item of update) this.emitProgressive(row.idx, item, out);
     } else if (update) {
-      out.push(update);
+      this.emitProgressive(row.idx, update, out);
     }
+  }
+
+  /**
+   * Emit a tool update, converting subsequent emissions for the same step idx
+   * into `tool_call_update` when the snapshot changes.
+   */
+  private emitProgressive(stepIdx: number, update: SessionUpdate, out: SessionUpdate[]): void {
+    const raw = update as unknown as Record<string, unknown>;
+    const kind = raw.sessionUpdate;
+
+    if (kind !== "tool_call" && kind !== "tool_call_update") {
+      out.push(update);
+      return;
+    }
+
+    const snapshot = updateSnapshot(update);
+    const previous = this.toolSnapshots.get(stepIdx);
+    if (previous === undefined) {
+      this.toolSnapshots.set(stepIdx, snapshot);
+      // First sight always uses create shape; v2 boundary may rewrite to upsert.
+      out.push({ ...raw, sessionUpdate: "tool_call" } as SessionUpdate);
+      return;
+    }
+    if (previous === snapshot) return;
+
+    this.toolSnapshots.set(stepIdx, snapshot);
+    out.push(asToolCallUpdate(update));
   }
 
   private handleTitle(row: StepRow, out: SessionUpdate[]): void {
@@ -123,9 +174,15 @@ export class Translator {
       out.push({ sessionUpdate: "session_info_update", title: currentTitle });
     }
 
-    if (!blocks || blocks?.filter((b) => b.trim().length > 0).length === 0) return;
+    const narration = blocks?.filter((b) => b.trim().length > 0).join("\n\n") ?? "";
+    if (!narration) return;
 
-    out.push({
+    // Avoid re-emitting the same title-attached Think card on every stream poll.
+    const previous = this.titleThoughtSnapshots.get(row.idx);
+    if (previous === narration) return;
+    this.titleThoughtSnapshots.set(row.idx, narration);
+
+    const thinkUpdate = {
       sessionUpdate: "tool_call",
       toolCallId: toolCallId(row),
       title: "Think",
@@ -136,12 +193,18 @@ export class Translator {
           type: "content",
           content: {
             type: "text",
-            text: blocks?.join("\n\n") || (currentTitle ?? "")
+            text: narration
           }
         }
       ]
-    });
-    return;
+    } as SessionUpdate;
+
+    // First sight for this title step is a create; content changes become updates.
+    if (previous === undefined) {
+      out.push(thinkUpdate);
+    } else {
+      out.push(asToolCallUpdate(thinkUpdate));
+    }
   }
 
   private handleAgentText(row: StepRow, out: SessionUpdate[]): void {

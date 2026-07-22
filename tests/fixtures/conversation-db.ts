@@ -26,3 +26,24 @@ export function insertStep(
 export function updateStepPayload(db: Database.Database, idx: number, stepPayload: Uint8Array): void {
   db.prepare("UPDATE steps SET step_payload = ? WHERE idx = ?").run(Buffer.from(stepPayload), idx);
 }
+
+export function updateStepStatus(db: Database.Database, idx: number, status: number): void {
+  db.prepare("UPDATE steps SET status = ? WHERE idx = ?").run(status, idx);
+}
+
+export function updateStep(
+  db: Database.Database,
+  idx: number,
+  patch: { status?: number; stepPayload?: Uint8Array }
+): void {
+  if (patch.status !== undefined && patch.stepPayload !== undefined) {
+    db.prepare("UPDATE steps SET status = ?, step_payload = ? WHERE idx = ?").run(
+      patch.status,
+      Buffer.from(patch.stepPayload),
+      idx
+    );
+    return;
+  }
+  if (patch.status !== undefined) updateStepStatus(db, idx, patch.status);
+  if (patch.stepPayload !== undefined) updateStepPayload(db, idx, patch.stepPayload);
+}
