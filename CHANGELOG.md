@@ -16,6 +16,11 @@ for draft v2 may still change before ACP v2 stabilizes.
   embed `{ type: "terminal", terminalId }` on the tool call. v1 clients keep
   command/output content blocks. Client-executed v1 `terminal/*` is still not
   used (agy runs the shell; re-running via the editor would double-execute).
+- Structured ACP plans from agy brain markdown artifacts: emit classic v1
+  `sessionUpdate: "plan"` with entries parsed from lists/checkboxes, and map
+  to draft-v2 `plan_update` (`type: "markdown"` when the body is known, else
+  `type: "items"`). Replaces the previous Plan-titled prose tool_call for those
+  writes. No `plan_removed` and no live step status beyond checkbox markers.
 
 ## [0.2.7] - 2026-07-22
 
