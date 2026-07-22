@@ -40,6 +40,13 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] Permission notes map decision varint to granted/denied labels
 - [x] Experimental interactive permission bridge via persistent PTY for the
       four-choice menu (`run_command` + file tools sharing ToolConfirmationPanel)
+- [x] Agent-driven client `fs/read_text_file` / `fs/write_text_file`: when the
+      client advertises both, every completed edit is routed through them —
+      whether it landed on disk without a live agy gate (accept-edits) or
+      just passed one (default mode, after the live permission prompt) —
+      so the client's own diff/review UI (e.g. Zed's Review Changes panel)
+      tracks it in either mode. Falls back to the local permission bridge
+      if the client lacks the capability or rejects the write-through.
 - [x] Execute tools surface command + captured output as content blocks (v1) and
       draft-v2 agent-owned `terminal_update` + `type: "terminal"` embeds
 - [x] Structured plan from brain markdown artifacts: classic v1 `plan` entries
@@ -52,12 +59,14 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 These need more than conversation-DB polling (interactive agy control plane or
 client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 
-- [ ] Expand interactive `session/request_permission` beyond verified menu
-      shapes (unsupported status-9 interactions currently fail closed)
+- [ ] Expand interactive `session/request_permission` (multi-select /
+      multi-question `ask_question`, remaining status-9 tools;
+      unsupported status-9 interactions currently fail closed)
 - [ ] v1 client-executed `terminal/*` (`terminal/create` runs a command in the
       editor). Blocked while agy owns the shell — re-running would double-execute.
       v1 keeps content blocks; draft v2 uses agent-owned terminals (see below).
-- [ ] ACP elicitation for `ask_question` (today: static tool_call text options)
+- [ ] ACP elicitation for free-text / multi-select `ask_question` (single-select
+      MCQ already uses `session/request_permission`)
 - [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
       (today: all MCP caps are `false` and servers are ignored)
 
@@ -93,7 +102,6 @@ Usually skip unless a client needs them for this wrapper:
 - [ ] `providers/*` (LLM provider routing UI)
 - [ ] `nes/*` (next-edit suggestions)
 - [ ] `document/*` (editor document sync)
-- [ ] Agent-driven client `fs/read_text_file` / `fs/write_text_file` (agy does FS itself)
 - [ ] Non-stdio transports (HTTP / WebSocket) — stdio NDJSON is intentional for Zed
 
 ---
@@ -143,7 +151,7 @@ v2-aware clients):
 
 - [ ] Richer `replayFrom` cursors beyond `{ "type": "start" }` when the draft
       stabilizes incremental replay
-- [ ] Map `ask_question` / status-9 interactions to client `elicitation/create`
+- [ ] Map multi-select / free-text `ask_question` to client `elicitation/create`
       (today: fail closed; static tool_call text only)
 - [ ] Incremental `terminal_output_chunk` while a command is still running, if
       agy ever persists partial stdout before completion (today: full
@@ -183,3 +191,7 @@ Same as v1 lower-priority surface; not advertised in `initialize` capabilities:
 - [ ] `providers/*`, `nes/*`, `document/*`
 - [ ] Agent-driven client filesystem methods (agy owns FS)
 - [ ] Non-stdio transports (HTTP / WebSocket / SSE)
+
+
+
+
