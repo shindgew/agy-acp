@@ -245,6 +245,11 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
       status: mapToolStatusForV1(raw.status)
     } as V1SessionUpdate;
   }
+  // Drop agent-private plan _meta keys from the v1 wire (entries stay).
+  if (raw.sessionUpdate === "plan" && raw._meta && typeof raw._meta === "object") {
+    const { _meta: _drop, ...rest } = raw;
+    return rest as V1SessionUpdate;
+  }
   return update;
 }
 
@@ -289,7 +294,46 @@ export function sessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdate {
     return raw as V2SessionUpdate;
   }
 
+  // Classic v1 `plan` → draft v2 `plan_update` with structured items.
+  // Prefer markdown content when the translator stashed it in _meta.
+  if (raw.sessionUpdate === "plan") {
+    return planToV2(raw);
+  }
+
   return raw as V2SessionUpdate;
+}
+
+function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
+  const meta = asRecord(raw._meta);
+  const planId =
+    (typeof meta?.["agy-acp/planId"] === "string" && meta["agy-acp/planId"]) ||
+    (typeof meta?.["agy-acp/planPath"] === "string" && `file:${meta["agy-acp/planPath"]}`) ||
+    "agy-plan";
+  const markdown =
+    typeof meta?.["agy-acp/planMarkdown"] === "string" ? meta["agy-acp/planMarkdown"] : null;
+  const entries = Array.isArray(raw.entries) ? raw.entries : [];
+
+  // Prefer markdown when available (full fidelity of the brain artifact);
+  // otherwise fall back to item entries from the classic plan shape.
+  if (markdown !== null && markdown.length > 0) {
+    return {
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "markdown",
+        planId,
+        content: markdown
+      }
+    } as V2SessionUpdate;
+  }
+
+  return {
+    sessionUpdate: "plan_update",
+    plan: {
+      type: "items",
+      planId,
+      entries
+    }
+  } as V2SessionUpdate;
 }
 
 /**
