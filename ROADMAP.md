@@ -35,7 +35,7 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
       and [`session/resume`](https://agentclientprotocol.com/rfds/session-resume)
       with persisted bindings
 - [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v1/session-config-options)
-      (`mode`, `model`, `reasoningEffect`) — select options only (no
+      (`mode`, `model`, `reasoningEffort`) — select options only (no
       [boolean config options](https://agentclientprotocol.com/rfds/boolean-config-option) yet)
 - [x] Native [session modes](https://agentclientprotocol.com/protocol/v1/session-modes):
       `modes` on new/load/resume,
@@ -222,7 +222,7 @@ differs or is incomplete.
       [`session/cancel`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle),
       [`session/update`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 - [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v2/session-config-options)
-      with `configId` (v1 still uses `id`) for `mode`, `model`, `reasoningEffect`
+      with `configId` (v1 still uses `id`) for `mode`, `model`, `reasoningEffort`
 - [x] [Prompt lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle):
       accept with `{}` immediately; progress via
       [`state_update`](https://agentclientprotocol.com/protocol/v2/schema#stateupdate)

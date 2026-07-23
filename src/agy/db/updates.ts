@@ -43,7 +43,7 @@ function agentUpdate(stepRow: StepRow): SessionUpdate {
  * Step type 23 — the conversation's title was (re)generated. agy packs an
  * optional "Think" narration after the title, separated by a blank line.
  * (Streaming/replay also handle type 23 in Translator.handleTitle; this path
- * remains for direct callers of buildUpdatefromStepPayload.)
+ * remains for direct callers of sessionUpdateFromStep.)
  */
 function titleUpdate(stepRow: StepRow): SessionUpdate[] {
   const title = stepRow.stepPayload.titleUpdate?.title || null;
@@ -133,7 +133,7 @@ function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate |
  *   90, 98, 101   lifecycle/system       -> null (skipped)
  *   default       unknown tool step      -> tool_call (generic) or null
  */
-export function buildUpdatefromStepPayload(
+export function sessionUpdateFromStep(
   stepRow: StepRow,
   ctx?: UpdateContext
 ): SessionUpdate | SessionUpdate[] | null {

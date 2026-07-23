@@ -16,7 +16,7 @@ export const MODEL_SLASH = "model";
 export const EFFORT_SLASH = "effort";
 
 /** Commands advertised to clients for typeahead / slash menus. */
-export const AGY_ACP_COMMANDS: readonly AvailableCommand[] = [
+export const AVAILABLE_COMMANDS: readonly AvailableCommand[] = [
   {
     name: MODE_SLASH,
     description: "Set agy execution mode for this session (default, accept-edits, plan).",
@@ -42,7 +42,7 @@ export const AGY_ACP_COMMANDS: readonly AvailableCommand[] = [
 export function availableCommandsUpdate(): SessionUpdate {
   return {
     sessionUpdate: "available_commands_update",
-    availableCommands: [...AGY_ACP_COMMANDS]
+    availableCommands: [...AVAILABLE_COMMANDS]
   };
 }
 

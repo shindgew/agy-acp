@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  AGY_ACP_COMMANDS,
+  AVAILABLE_COMMANDS,
   availableCommandsUpdate,
   interpretSlashCommand,
   parseSlashCommand,
@@ -85,9 +85,9 @@ describe("availableCommandsUpdate", () => {
     const update = availableCommandsUpdate();
     expect(update).toMatchObject({
       sessionUpdate: "available_commands_update",
-      availableCommands: AGY_ACP_COMMANDS
+      availableCommands: AVAILABLE_COMMANDS
     });
-    expect(AGY_ACP_COMMANDS.map((c) => c.name).sort()).toEqual(
+    expect(AVAILABLE_COMMANDS.map((c) => c.name).sort()).toEqual(
       ["effort", "mode", "model", "plan"].sort()
     );
   });

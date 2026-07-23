@@ -48,21 +48,21 @@ import type {
   SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
 import { ReplayCache } from "./agy/db/replay.js";
-import type { EditFsBridge } from "./file-system/bridge.js";
+import type { ClientFileSystem } from "./file-system/bridge.js";
 import { ensureAgyInstalled } from "./agy/installer.js";
 import {
   AgyCliBackend,
-  AGY_EXECUTION_MODES,
+  SESSION_MODE_IDS,
   configFromEnv,
-  isAgyExecutionMode,
+  isSessionModeId,
   type AgyCliConfig,
   type AgyCliSession,
-  type AgyExecutionMode,
+  type SessionModeId,
   type PtyFactory,
   type SpawnFactory
 } from "./agy/cli.js";
-import { permissionOptions, type AgyPermissionChoice } from "./tool-calls/permissions.js";
-import { promptBlocksToAgyPrompt } from "./content/index.js";
+import { permissionOptions, type PermissionChoice } from "./tool-calls/permissions.js";
+import { contentBlocksToPrompt } from "./content/index.js";
 import { defaultStateDir, SessionStore, type StoredSession } from "./session/store.js";
 import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session/updates.js";
 import {
@@ -92,9 +92,9 @@ const REPLAY_CACHE_CAPACITY = 32;
 interface ModelCatalog {
   readonly entries: readonly string[];
   baseModels(): string[];
-  effectsFor(baseModel: string): string[];
-  resolve(baseModel: string, reasoningEffect: string): string;
-  split(fullModel: string): { base: string; reasoningEffect?: string };
+  effortsFor(baseModel: string): string[];
+  resolve(baseModel: string, reasoningEffort: string): string;
+  split(fullModel: string): { base: string; reasoningEffort?: string };
   /** Map a legacy agy display name (or base slug) to its ACP model slug, if known. */
   slugForAgyBase(agyBase: string): string | undefined;
   /**
@@ -106,7 +106,7 @@ interface ModelCatalog {
   displayName(slug: string): string;
 }
 
-export interface AgyAcpOptions {
+export interface AcpAgentOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
@@ -123,13 +123,13 @@ interface SessionState {
   agy: AgyCliSession;
   catalog: ModelCatalog;
   selectedBaseModel: string;
-  selectedReasoningEffect: string;
+  selectedReasoningEffort: string;
   activePrompt: boolean;
   /** Active v2 prompt-turn abort controller, if any. */
   promptAbort?: AbortController;
 }
 
-export class AgyAcpAgent {
+export class AcpAgent {
   readonly #env: NodeJS.ProcessEnv;
   readonly #argv: string[];
   readonly #backend: AgyCliBackend;
@@ -140,7 +140,7 @@ export class AgyAcpAgent {
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
   #clientFs = { readTextFile: false, writeTextFile: false };
 
-  constructor(options: AgyAcpOptions = {}) {
+  constructor(options: AcpAgentOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#argv = options.argv ?? [];
     this.#backend = new AgyCliBackend(options.spawnProcess, options.ptyFactory);
@@ -221,7 +221,7 @@ export class AgyAcpAgent {
    * diff/review UI (e.g. Zed's Review Changes panel) tracks them. Draft v2
    * has no fs/* client methods, so this is v1-only.
    */
-  private editFsBridgeV1(client: V1AgentContext, sessionId: string): EditFsBridge | undefined {
+  private clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined {
     if (!this.#clientFs.readTextFile || !this.#clientFs.writeTextFile) return undefined;
     return {
       readTextFile: async (path) => {
@@ -406,7 +406,7 @@ export class AgyAcpAgent {
   private async notifyCurrentModeUpdate(
     client: V1AgentContext,
     sessionId: string,
-    mode: AgyExecutionMode
+    mode: SessionModeId
   ): Promise<void> {
     await client.notify(v1.methods.client.session.update, {
       sessionId,
@@ -461,14 +461,14 @@ export class AgyAcpAgent {
 
   /**
    * Honor curated ACP slash commands that map onto session config (mode / model /
-   * reasoningEffect). Returns true when the prompt was fully handled without
+   * reasoningEffort). Returns true when the prompt was fully handled without
    * spawning agy. Unknown or non-slash prompts return false (pass through).
    */
   private async applyCuratedSlashCommand(
     sessionId: string,
     promptText: string,
     notify: {
-      modeChanged?: (mode: AgyExecutionMode) => Promise<void>;
+      modeChanged?: (mode: SessionModeId) => Promise<void>;
       configChanged: () => Promise<void>;
     }
   ): Promise<boolean> {
@@ -519,7 +519,7 @@ export class AgyAcpAgent {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
 
-    const prompt = await promptBlocksToAgyPrompt(params.prompt, session.cwd);
+    const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
 
     // Curated slash commands → config options; do not spawn agy for those.
     const handled = await this.applyCuratedSlashCommand(params.sessionId, prompt, {
@@ -559,7 +559,7 @@ export class AgyAcpAgent {
           options: permissionOptions(toolCall, toolName)
         }), signal);
         return selectedPermission(response, signal);
-      }, this.editFsBridgeV1(client, params.sessionId));
+      }, this.clientFileSystemV1(client, params.sessionId));
       await this.persistSession(params.sessionId, session);
       return {
         stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
@@ -587,7 +587,7 @@ export class AgyAcpAgent {
     }
 
     // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
-    const promptText = await promptBlocksToAgyPrompt(params.prompt as v1.ContentBlock[], session.cwd);
+    const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
     session.activePrompt = true;
     const controller = new AbortController();
     session.promptAbort = controller;
@@ -644,8 +644,8 @@ export class AgyAcpAgent {
   private async applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
     const session = this.requireSession(sessionId);
     if (configId === MODE_CONFIG_ID) {
-      if (typeof value !== "string" || !isAgyExecutionMode(value)) {
-        throw new Error(`Mode must be one of: ${AGY_EXECUTION_MODES.join(", ")}`);
+      if (typeof value !== "string" || !isSessionModeId(value)) {
+        throw new Error(`Mode must be one of: ${SESSION_MODE_IDS.join(", ")}`);
       }
       session.agy.setMode(value);
       await this.persistSession(sessionId, session);
@@ -661,11 +661,11 @@ export class AgyAcpAgent {
       }
 
       session.selectedBaseModel = value;
-      session.selectedReasoningEffect = defaultReasoningEffectForBase(value, session.catalog);
+      session.selectedReasoningEffort = defaultReasoningEffortForBase(value, session.catalog);
       applyModelSelection(
         session.agy,
         session.selectedBaseModel,
-        session.selectedReasoningEffect,
+        session.selectedReasoningEffort,
         session.catalog
       );
       await this.persistSession(sessionId, session);
@@ -674,18 +674,18 @@ export class AgyAcpAgent {
 
     if (configId === REASONING_EFFORT_CONFIG_ID) {
       if (typeof value !== "string") {
-        throw new Error("reasoningEffect config value must be a string");
+        throw new Error("reasoningEffort config value must be a string");
       }
-      const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
-      if (!allowedEffects.includes(value)) {
-        throw new Error(`Unknown reasoningEffect: ${value}`);
+      const allowedEfforts = reasoningEffortValues(session.selectedBaseModel, session.catalog);
+      if (!allowedEfforts.includes(value)) {
+        throw new Error(`Unknown reasoningEffort: ${value}`);
       }
 
-      session.selectedReasoningEffect = value;
+      session.selectedReasoningEffort = value;
       applyModelSelection(
         session.agy,
         session.selectedBaseModel,
-        session.selectedReasoningEffect,
+        session.selectedReasoningEffort,
         session.catalog
       );
       await this.persistSession(sessionId, session);
@@ -849,8 +849,8 @@ export class AgyAcpAgent {
     const selection = stored
       ? restoredModelSelection(stored, catalog)
       : initialModelSelection(config.model, catalog);
-    applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
-    if (stored?.mode && isAgyExecutionMode(stored.mode)) {
+    applyModelSelection(agy, selection.baseModel, selection.reasoningEffort, catalog);
+    if (stored?.mode && isSessionModeId(stored.mode)) {
       agy.setMode(stored.mode);
     }
 
@@ -861,7 +861,7 @@ export class AgyAcpAgent {
       agy,
       catalog,
       selectedBaseModel: selection.baseModel,
-      selectedReasoningEffect: selection.reasoningEffect,
+      selectedReasoningEffort: selection.reasoningEffort,
       activePrompt: false
     };
   }
@@ -895,7 +895,7 @@ export class AgyAcpAgent {
       conversationId: session.agy.conversationId,
       lastStepIdx: session.agy.lastStepIdx,
       model: session.selectedBaseModel,
-      reasoningEffect: session.selectedReasoningEffect,
+      reasoningEffort: session.selectedReasoningEffort,
       mode: session.agy.config.mode,
       updatedAt: new Date().toISOString()
     };
@@ -907,8 +907,8 @@ export class AgyAcpAgent {
 }
 
 /** ACP v1 agent app (stable protocol). */
-export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
-  const agent = new AgyAcpAgent(options);
+export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
+  const agent = new AcpAgent(options);
   return v1
     .agent({ name: "agy-acp" })
     .onRequest(v1.methods.agent.initialize, (ctx) => agent.initializeV1(ctx.params))
@@ -927,10 +927,10 @@ export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
 
 /**
  * Experimental draft ACP v2 agent app.
- * Prefer {@link createDualAgyAcpApp} / {@link runAcp} so v1 clients still work.
+ * Prefer {@link createDualAcpApp} / {@link runAcp} so v1 clients still work.
  */
-export function createAgyAcpV2App(options: AgyAcpOptions = {}): V2AgentApp {
-  const agent = new AgyAcpAgent(options);
+export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
+  const agent = new AcpAgent(options);
   return v2
     .agent({ name: "agy-acp" })
     .onRequest(v2.methods.agent.initialize, (ctx) => agent.initializeV2(ctx.params))
@@ -947,11 +947,11 @@ export function createAgyAcpV2App(options: AgyAcpOptions = {}): V2AgentApp {
  * Dual-version agent connector: negotiates ACP v1 or experimental draft v2 from
  * the client's `initialize.protocolVersion`.
  */
-export function createDualAgyAcpApp(options: AgyAcpOptions = {}): v2.AgentProtocolRouter {
-  return v2.agentProtocolRouter().withV1(createAgyAcpApp(options)).withV2(createAgyAcpV2App(options));
+export function createDualAcpApp(options: AcpAgentOptions = {}): v2.AgentProtocolRouter {
+  return v2.agentProtocolRouter().withV1(createAcpApp(options)).withV2(createAcpV2App(options));
 }
 
-export function runAcp(options: AgyAcpOptions = {}) {
+export function runAcp(options: AcpAgentOptions = {}) {
   const stdout = (options.stdout ?? process.stdout) as Writable;
   const stdin = (options.stdin ?? process.stdin) as Readable;
   // v1 ndJsonStream is sufficient: framing is shared; the router peeks initialize.
@@ -959,12 +959,12 @@ export function runAcp(options: AgyAcpOptions = {}) {
     Writable.toWeb(stdout) as WritableStream<Uint8Array>,
     Readable.toWeb(stdin) as ReadableStream<Uint8Array>
   );
-  return createDualAgyAcpApp(options).connect(stream);
+  return createDualAcpApp(options).connect(stream);
 }
 
-export { promptBlocksToAgyPrompt, promptBlocksToText } from "./content/index.js";
+export { contentBlocksToPrompt, contentBlocksToText } from "./content/index.js";
 
-function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermissionChoice | "cancelled" {
+function selectedPermission(response: unknown, signal?: AbortSignal): PermissionChoice | "cancelled" {
   if (signal?.aborted || !response || typeof response !== "object") return "cancelled";
   const outcome = (response as { outcome?: unknown }).outcome;
   if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
@@ -1017,17 +1017,17 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   const displayNameBySlug = new Map<string, string>();
 
   for (const entry of uniqueEntries) {
-    const { agyBase, base, reasoningEffect, displayBase } = splitModelEntry(entry);
+    const { agyBase, base, reasoningEffort, displayBase } = splitModelEntry(entry);
     if (!effectsByBase.has(base)) {
       baseOrder.push(base);
       effectsByBase.set(base, []);
       agyBaseBySlug.set(base, agyBase);
       displayNameBySlug.set(base, displayBase);
     }
-    if (reasoningEffect) {
+    if (reasoningEffort) {
       const effects = effectsByBase.get(base)!;
-      if (!effects.includes(reasoningEffect)) {
-        effects.push(reasoningEffect);
+      if (!effects.includes(reasoningEffort)) {
+        effects.push(reasoningEffort);
       }
     }
   }
@@ -1035,20 +1035,20 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   return {
     entries: uniqueEntries,
     baseModels: () => baseOrder,
-    effectsFor: (baseModel: string) => effectsByBase.get(baseModel) ?? [],
-    resolve: (baseModel: string, reasoningEffect: string) => {
+    effortsFor: (baseModel: string) => effectsByBase.get(baseModel) ?? [],
+    resolve: (baseModel: string, reasoningEffort: string) => {
       const resolved = uniqueEntries.find((entry) => {
         const parsed = splitModelEntry(entry);
-        return parsed.base === baseModel && parsed.reasoningEffect === reasoningEffect;
+        return parsed.base === baseModel && parsed.reasoningEffort === reasoningEffort;
       });
       if (!resolved) {
-        throw new Error(`Unknown model selection: ${baseModel} (${reasoningEffect})`);
+        throw new Error(`Unknown model selection: ${baseModel} (${reasoningEffort})`);
       }
       return resolved;
     },
     split: (fullModel: string) => {
-      const { base, reasoningEffect } = splitModelEntry(fullModel);
-      return { base, reasoningEffect };
+      const { base, reasoningEffort } = splitModelEntry(fullModel);
+      return { base, reasoningEffort };
     },
     slugForAgyBase: (agyBase: string) => {
       const slug = toModelSlug(agyBase);
@@ -1078,7 +1078,7 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
 
 /** Shared labels/descriptions for config option `mode` and native ACP session modes. */
 const AGY_MODE_OPTIONS: ReadonlyArray<{
-  value: AgyExecutionMode;
+  value: SessionModeId;
   name: string;
   description: string;
 }> = [
@@ -1100,7 +1100,7 @@ const AGY_MODE_OPTIONS: ReadonlyArray<{
 ];
 
 /** Native ACP session mode state (v1 `modes` on new/load/resume). Same ids as config `mode`. */
-export function sessionModeState(mode: AgyExecutionMode): SessionModeState {
+export function sessionModeState(mode: SessionModeId): SessionModeState {
   return {
     currentModeId: mode,
     availableModes: AGY_MODE_OPTIONS.map((option) => ({
@@ -1111,7 +1111,7 @@ export function sessionModeState(mode: AgyExecutionMode): SessionModeState {
   };
 }
 
-export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
+export function modeConfigOption(mode: SessionModeId): V1SessionConfigOption {
   return {
     id: MODE_CONFIG_ID,
     name: "Mode",
@@ -1132,7 +1132,7 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
-    description: "ACP model slug passed to agy --model (reasoningEffect is selected separately).",
+    description: "ACP model slug passed to agy --model (reasoningEffort is selected separately).",
     category: "model",
     type: "select",
     currentValue: selectedBaseModel,
@@ -1143,9 +1143,9 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
   };
 }
 
-export function reasoningEffectConfigOption(
+export function reasoningEffortConfigOption(
   selectedBaseModel: string,
-  selectedReasoningEffect: string,
+  selectedReasoningEffort: string,
   catalog: ModelCatalog
 ): V1SessionConfigOption {
   return {
@@ -1154,8 +1154,8 @@ export function reasoningEffectConfigOption(
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
-    currentValue: selectedReasoningEffect,
-    options: reasoningEffectOptions(selectedBaseModel, catalog)
+    currentValue: selectedReasoningEffort,
+    options: reasoningEffortOptions(selectedBaseModel, catalog)
   };
 }
 
@@ -1163,9 +1163,9 @@ function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] 
   return [
     modeConfigOption(session.agy.config.mode),
     modelConfigOption(session.selectedBaseModel, session.catalog),
-    reasoningEffectConfigOption(
+    reasoningEffortConfigOption(
       session.selectedBaseModel,
-      session.selectedReasoningEffect,
+      session.selectedReasoningEffort,
       session.catalog
     )
   ];
@@ -1201,7 +1201,7 @@ function splitModelEntry(model: string): {
   agyBase: string;
   base: string;
   displayBase: string;
-  reasoningEffect?: string;
+  reasoningEffort?: string;
 } {
   const trimmed = model.trim();
 
@@ -1219,7 +1219,7 @@ function splitModelEntry(model: string): {
       agyBase: displayBase,
       base: toModelSlug(displayBase),
       displayBase,
-      reasoningEffect: legacyEffort[1].toLowerCase()
+      reasoningEffort: legacyEffort[1].toLowerCase()
     };
   }
 
@@ -1241,7 +1241,7 @@ function splitModelEntry(model: string): {
       agyBase: base,
       base,
       displayBase: prettifyModelSlug(base),
-      reasoningEffect: slugEffort[2].toLowerCase()
+      reasoningEffort: slugEffort[2].toLowerCase()
     };
   }
 
@@ -1293,11 +1293,11 @@ export function prettifyModelSlug(slug: string): string {
   return merged.join(" ");
 }
 
-function reasoningEffectOptions(
+function reasoningEffortOptions(
   selectedBaseModel: string,
   catalog: ModelCatalog
 ): Extract<V1SessionConfigOption, { type: "select" }>["options"] {
-  const effects = catalog.effectsFor(selectedBaseModel);
+  const effects = catalog.effortsFor(selectedBaseModel);
   if (effects.length === 0) {
     return [
       {
@@ -1309,11 +1309,11 @@ function reasoningEffectOptions(
 
   return effects.map((effect) => ({
     value: effect,
-    name: reasoningEffectDisplayName(effect)
+    name: reasoningEffortDisplayName(effect)
   }));
 }
 
-function reasoningEffectDisplayName(value: string): string {
+function reasoningEffortDisplayName(value: string): string {
   const labels: Record<string, string> = {
     low: "Low",
     medium: "Medium",
@@ -1322,21 +1322,21 @@ function reasoningEffectDisplayName(value: string): string {
   return labels[value] ?? value;
 }
 
-function reasoningEffectValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {
-  return reasoningEffectOptions(selectedBaseModel, catalog)
+function reasoningEffortValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {
+  return reasoningEffortOptions(selectedBaseModel, catalog)
     .map((option) => ("value" in option ? option.value : undefined))
     .filter((value): value is string => value !== undefined);
 }
 
-function defaultReasoningEffectForBase(selectedBaseModel: string, catalog: ModelCatalog): string {
-  const effects = catalog.effectsFor(selectedBaseModel);
+function defaultReasoningEffortForBase(selectedBaseModel: string, catalog: ModelCatalog): string {
+  const effects = catalog.effortsFor(selectedBaseModel);
   return effects[0] ?? NO_REASONING_VALUE;
 }
 
 function initialModelSelection(
   configuredModel: string | undefined,
   catalog: ModelCatalog
-): { baseModel: string; reasoningEffect: string } {
+): { baseModel: string; reasoningEffort: string } {
   if (!configuredModel) {
     const [firstBaseModel] = catalog.baseModels();
     if (!firstBaseModel) {
@@ -1344,23 +1344,23 @@ function initialModelSelection(
     }
     return {
       baseModel: firstBaseModel,
-      reasoningEffect: defaultReasoningEffectForBase(firstBaseModel, catalog)
+      reasoningEffort: defaultReasoningEffortForBase(firstBaseModel, catalog)
     };
   }
 
-  const { base, reasoningEffect } = catalog.split(configuredModel);
-  const effects = catalog.effectsFor(base);
+  const { base, reasoningEffort } = catalog.split(configuredModel);
+  const effects = catalog.effortsFor(base);
   if (effects.length === 0) {
     return {
       baseModel: base,
-      reasoningEffect: NO_REASONING_VALUE
+      reasoningEffort: NO_REASONING_VALUE
     };
   }
 
   return {
     baseModel: base,
-    reasoningEffect: reasoningEffect && effects.includes(reasoningEffect)
-      ? reasoningEffect
+    reasoningEffort: reasoningEffort && effects.includes(reasoningEffort)
+      ? reasoningEffort
       : effects[0]
   };
 }
@@ -1370,18 +1370,18 @@ function initialModelSelection(
 function restoredModelSelection(
   stored: StoredSession,
   catalog: ModelCatalog
-): { baseModel: string; reasoningEffect: string } {
+): { baseModel: string; reasoningEffort: string } {
   const baseModel = normalizeStoredBaseModel(stored.model, catalog);
   if (!baseModel) {
     return initialModelSelection(undefined, catalog);
   }
-  const effects = catalog.effectsFor(baseModel);
+  const effects = catalog.effortsFor(baseModel);
   if (effects.length === 0) {
-    return { baseModel, reasoningEffect: NO_REASONING_VALUE };
+    return { baseModel, reasoningEffort: NO_REASONING_VALUE };
   }
   return {
     baseModel,
-    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffect, effects)
+    reasoningEffort: normalizeStoredReasoningEffort(stored.reasoningEffort, effects)
   };
 }
 
@@ -1392,7 +1392,7 @@ function normalizeStoredBaseModel(modelId: string, catalog: ModelCatalog): strin
   return catalog.slugForAgyBase(modelId);
 }
 
-function normalizeStoredReasoningEffect(storedEffect: string, effects: string[]): string {
+function normalizeStoredReasoningEffort(storedEffect: string, effects: string[]): string {
   if (effects.includes(storedEffect)) {
     return storedEffect;
   }
@@ -1418,22 +1418,22 @@ function normalizeStoredReasoningEffect(storedEffect: string, effects: string[])
 function applyModelSelection(
   agy: AgyCliSession,
   selectedBaseModel: string,
-  selectedReasoningEffect: string,
+  selectedReasoningEffort: string,
   catalog: ModelCatalog
 ): void {
   // agy ≥1.1.5: --model is the base (slug or legacy display base), --effort is separate.
   agy.setModel(catalog.agyBaseName(selectedBaseModel));
 
-  const effects = catalog.effectsFor(selectedBaseModel);
+  const effects = catalog.effortsFor(selectedBaseModel);
   if (effects.length === 0) {
     agy.setEffort(undefined);
     return;
   }
 
-  if (selectedReasoningEffect === NO_REASONING_VALUE || !effects.includes(selectedReasoningEffect)) {
+  if (selectedReasoningEffort === NO_REASONING_VALUE || !effects.includes(selectedReasoningEffort)) {
     agy.setEffort(effects[0]);
     return;
   }
 
-  agy.setEffort(selectedReasoningEffect);
+  agy.setEffort(selectedReasoningEffort);
 }

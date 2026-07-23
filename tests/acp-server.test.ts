@@ -8,13 +8,13 @@ import * as installer from "../src/agy/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import {
-  AgyAcpAgent,
+  AcpAgent,
   buildModelCatalog,
-  createAgyAcpApp,
-  createAgyAcpV2App,
+  createAcpApp,
+  createAcpV2App,
   modelConfigOption,
-  promptBlocksToText,
-  reasoningEffectConfigOption,
+  contentBlocksToText,
+  reasoningEffortConfigOption,
   toModelSlug
 } from "../src/agent.js";
 import type { PtyFactory, SpawnFactory } from "../src/agy/cli.js";
@@ -30,9 +30,9 @@ import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sd
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
 
-describe("promptBlocksToText", () => {
+describe("contentBlocksToText", () => {
   it("joins text content blocks", () => {
-    expect(promptBlocksToText([
+    expect(contentBlocksToText([
       { type: "text", text: "first" },
       { type: "text", text: "second" }
     ])).toBe("first\nsecond");
@@ -42,7 +42,7 @@ describe("promptBlocksToText", () => {
 describe("initialize", () => {
   it("returns SDK-validated ACP capabilities", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
-    const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp());
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp());
     try {
       const response = await connection.agent.request(methods.agent.initialize, {
         protocolVersion: PROTOCOL_VERSION,
@@ -62,9 +62,9 @@ describe("initialize", () => {
   });
 });
 
-describe("editFsBridgeV1", () => {
+describe("clientFileSystemV1", () => {
   type FsAgent = {
-    editFsBridgeV1(
+    clientFileSystemV1(
       client: { request: (...args: unknown[]) => Promise<unknown> },
       sessionId: string
     ): { readTextFile(path: string): Promise<void>; writeTextFile(path: string, content: string): Promise<void> } | undefined;
@@ -72,22 +72,22 @@ describe("editFsBridgeV1", () => {
 
   it("is undefined when the client doesn't advertise both fs capabilities", async () => {
     vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
-    const agent = new AgyAcpAgent();
+    const agent = new AcpAgent();
     await agent.initializeV1({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: true } } });
-    const bridge = (agent as unknown as FsAgent).editFsBridgeV1({ request: vi.fn() }, "s1");
+    const bridge = (agent as unknown as FsAgent).clientFileSystemV1({ request: vi.fn() }, "s1");
     expect(bridge).toBeUndefined();
     vi.restoreAllMocks();
   });
 
   it("routes read/write through client.request with fs/read_text_file and fs/write_text_file", async () => {
     vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
-    const agent = new AgyAcpAgent();
+    const agent = new AcpAgent();
     await agent.initializeV1({
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
     });
     const request = vi.fn().mockResolvedValue({});
-    const bridge = (agent as unknown as FsAgent).editFsBridgeV1({ request }, "s1")!;
+    const bridge = (agent as unknown as FsAgent).clientFileSystemV1({ request }, "s1")!;
     expect(bridge).toBeDefined();
 
     await bridge.readTextFile("/repo/a.txt");
@@ -167,7 +167,7 @@ describe("edit fs write-through (full ACP round trip)", () => {
         })
         .onNotification(methods.client.session.update, () => {});
 
-      const connection = testClient.connect(createAgyAcpApp({
+      const connection = testClient.connect(createAcpApp({
         env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
         spawnProcess: ((_command: string, args: string[]) => {
           if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
@@ -212,7 +212,7 @@ describe("session prompt", () => {
         .onNotification(methods.client.session.update, (ctx) => {
           updates.push(ctx.params.update);
         });
-      const connection = client.connect(createAgyAcpApp({
+      const connection = client.connect(createAcpApp({
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-1", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) }
@@ -248,7 +248,7 @@ describe("session prompt", () => {
         .onNotification(methods.client.session.update, (ctx) => {
           updates.push(ctx.params.update);
         });
-      const connection = client.connect(createAgyAcpApp({
+      const connection = client.connect(createAcpApp({
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-2", [
           {
@@ -309,7 +309,7 @@ describe("session/load and session/resume", () => {
       // simulating the ACP client reconnecting to a fresh server instance.
       let sessionId: string;
       {
-        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
         try {
           const session = await connection.agent.request(methods.agent.session.new, {
             cwd: "/repo",
@@ -326,7 +326,7 @@ describe("session/load and session/resume", () => {
         }
       }
 
-      // session/load: a brand-new AgyAcpAgent (no in-memory state) should
+      // session/load: a brand-new AcpAgent (no in-memory state) should
       // restore the binding from disk and replay the prior turn.
       {
         const updates: unknown[] = [];
@@ -334,7 +334,7 @@ describe("session/load and session/resume", () => {
           .onNotification(methods.client.session.update, (ctx) => {
             updates.push(ctx.params.update);
           });
-        const connection = client.connect(createAgyAcpApp(appOptions));
+        const connection = client.connect(createAcpApp(appOptions));
         try {
           const response = await connection.agent.request(methods.agent.session.load, {
             sessionId,
@@ -363,7 +363,7 @@ describe("session/load and session/resume", () => {
           .onNotification(methods.client.session.update, (ctx) => {
             updates.push(ctx.params.update);
           });
-        const connection = client.connect(createAgyAcpApp(appOptions));
+        const connection = client.connect(createAcpApp(appOptions));
         try {
           const response = await connection.agent.request(methods.agent.session.resume, {
             sessionId,
@@ -392,7 +392,7 @@ describe("session/load and session/resume", () => {
 
       let sessionId: string;
       {
-        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
         try {
           const session = await connection.agent.request(methods.agent.session.new, {
             cwd: "/repo",
@@ -410,7 +410,7 @@ describe("session/load and session/resume", () => {
       }
 
       {
-        const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp(appOptions));
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
         try {
           const listed = await connection.agent.request(methods.agent.session.list, {
             cwd: "/repo"
@@ -433,7 +433,7 @@ describe("session/load and session/resume", () => {
 
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
-      const connection = acpClient({ name: "test-client" }).connect(createAgyAcpApp({
+      const connection = acpClient({ name: "test-client" }).connect(createAcpApp({
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "unused", [])
       }));
@@ -477,14 +477,14 @@ describe("buildModelCatalog", () => {
       "claude-sonnet-4-6",
       "gpt-oss-120b"
     ]);
-    expect(catalog.effectsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
-    expect(catalog.effectsFor("claude-opus-4-6-thinking")).toEqual([]);
-    expect(catalog.effectsFor("claude-sonnet-4-6")).toEqual([]);
-    expect(catalog.effectsFor("gpt-oss-120b")).toEqual(["medium"]);
+    expect(catalog.effortsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
+    expect(catalog.effortsFor("claude-opus-4-6-thinking")).toEqual([]);
+    expect(catalog.effortsFor("claude-sonnet-4-6")).toEqual([]);
+    expect(catalog.effortsFor("gpt-oss-120b")).toEqual(["medium"]);
     expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("gemini-3.5-flash-medium");
     expect(catalog.split("gemini-3.5-flash-high")).toEqual({
       base: "gemini-3.5-flash",
-      reasoningEffect: "high"
+      reasoningEffort: "high"
     });
     expect(catalog.agyBaseName("gemini-3.5-flash")).toBe("gemini-3.5-flash");
     expect(catalog.displayName("gemini-3.5-flash")).toBe("Gemini 3.5 Flash");
@@ -500,8 +500,8 @@ describe("buildModelCatalog", () => {
     expect(catalog.split("claude-opus-4-6-thinking")).toEqual({
       base: "claude-opus-4-6-thinking"
     });
-    expect(catalog.effectsFor("claude-opus-4-6-thinking")).toEqual([]);
-    const reasoningConfig = reasoningEffectConfigOption(
+    expect(catalog.effortsFor("claude-opus-4-6-thinking")).toEqual([]);
+    const reasoningConfig = reasoningEffortConfigOption(
       "claude-opus-4-6-thinking",
       "none",
       catalog
@@ -520,15 +520,15 @@ describe("buildModelCatalog", () => {
       "gemini-3.5-flash",
       "claude-sonnet-4.6-thinking"
     ]);
-    expect(catalog.effectsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
+    expect(catalog.effortsFor("gemini-3.5-flash")).toEqual(["medium", "high"]);
     expect(catalog.agyBaseName("gemini-3.5-flash")).toBe("Gemini 3.5 Flash");
     expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("Gemini 3.5 Flash (Medium)");
   });
 
-  it("exposes mode, model, and reasoningEffect config options", () => {
+  it("exposes mode, model, and reasoningEffort config options", () => {
     const catalog = buildModelCatalog(["gemini-3.5-flash-medium", "gemini-3.5-flash-high"]);
     const modelConfig = modelConfigOption("gemini-3.5-flash", catalog) as SelectConfigOption;
-    const reasoningConfig = reasoningEffectConfigOption(
+    const reasoningConfig = reasoningEffortConfigOption(
       "gemini-3.5-flash",
       "medium",
       catalog
@@ -564,7 +564,7 @@ describe("session modes and config option sync", () => {
       }
     );
     const connection = client.connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -651,7 +651,7 @@ describe("session modes and config option sync", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -685,7 +685,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       await connection.agent.request(methods.agent.session.new, {
@@ -724,7 +724,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -781,7 +781,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -827,7 +827,7 @@ describe("session model config", () => {
       .onNotification(methods.client.session.update, (ctx) => {
         updates.push(ctx.params.update as { content: { text: string } });
       });
-    const connection = client.connect(createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory }));
+    const connection = client.connect(createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory }));
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
         cwd: "/repo",
@@ -924,7 +924,7 @@ describe("session model config", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -953,7 +953,7 @@ describe("session model config", () => {
 describe("ACP v2 (experimental draft)", () => {
   it("negotiates protocolVersion 2 with role-agnostic info/capabilities", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
-    const connection = acpV2.client({ name: "test-client" }).connect(createAgyAcpV2App());
+    const connection = acpV2.client({ name: "test-client" }).connect(createAcpV2App());
     try {
       const response = await connection.agent.request(acpV2.methods.agent.initialize, {
         protocolVersion: acpV2.PROTOCOL_VERSION,
@@ -983,7 +983,7 @@ describe("ACP v2 (experimental draft)", () => {
         }
       );
       const connection = client.connect(
-        createAgyAcpV2App({
+        createAcpV2App({
           env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-1", [
             { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello v2" }) }
@@ -1052,7 +1052,7 @@ describe("ACP v2 (experimental draft)", () => {
             updates.push(ctx.params.update);
           }
         );
-        const connection = client.connect(createAgyAcpV2App(appOptions));
+        const connection = client.connect(createAcpV2App(appOptions));
         try {
           await connection.agent.request(acpV2.methods.agent.initialize, {
             protocolVersion: 2,
@@ -1082,7 +1082,7 @@ describe("ACP v2 (experimental draft)", () => {
             updates.push(ctx.params.update);
           }
         );
-        const connection = client.connect(createAgyAcpV2App(appOptions));
+        const connection = client.connect(createAcpV2App(appOptions));
         try {
           await connection.agent.request(acpV2.methods.agent.initialize, {
             protocolVersion: 2,

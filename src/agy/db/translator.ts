@@ -10,7 +10,7 @@
 //     message at each boundary, applying narration filtering across the group.
 //
 // Everything else — tool calls, titles, user prompts — is identical, so it
-// flows through the same per-step dispatcher (`buildUpdatefromStepPayload`).
+// flows through the same per-step dispatcher (`sessionUpdateFromStep`).
 // This class owns the one row loop; the two modes are just small branches
 // inside it.
 
@@ -18,7 +18,7 @@ import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { filterNarration, isNarration } from "./narration.js";
 import type { FileContentCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
-import { buildUpdatefromStepPayload } from "./updates.js";
+import { sessionUpdateFromStep } from "./updates.js";
 
 export type TranslateMode = "stream" | "replay";
 
@@ -146,7 +146,7 @@ export class Translator {
   }
 
   private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
-    const update = buildUpdatefromStepPayload(row, {
+    const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
       fileContents: this.fileContents
     });

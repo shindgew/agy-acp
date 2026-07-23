@@ -30,8 +30,8 @@ export interface StoredSession {
   lastStepIdx: number;
   /** Matches ACP config option `model` (base slug for agy --model). */
   model: string;
-  /** Matches ACP config option `reasoningEffect` (maps to agy --effort). */
-  reasoningEffect: string;
+  /** Matches ACP config option `reasoningEffort` (maps to agy --effort). */
+  reasoningEffort: string;
   /** Matches ACP config option `mode` (`default` | `accept-edits` | `plan`). Absent on older store files. */
   mode?: string;
   updatedAt: string;
@@ -104,7 +104,7 @@ export class SessionStore {
 /** Legacy disk keys from older agy-acp builds. */
 type LegacyStoredSession = Partial<StoredSession> & {
   modelId?: string;
-  /** Pre-ACP rename of `reasoningEffect`. */
+  /** Pre-ACP rename of `reasoningEffort`. */
   reasoningEffect?: string;
   /** Pre-ACP rename: used to store `[cwd, ...additionalDirectories]`. */
   workspaces?: string[];
@@ -123,7 +123,7 @@ function normalizeStoredSession(raw: LegacyStoredSession): StoredSession {
     conversationId: raw.conversationId ?? null,
     lastStepIdx: raw.lastStepIdx ?? -1,
     model: raw.model ?? raw.modelId ?? "",
-    reasoningEffect: raw.reasoningEffect ?? raw.reasoningEffect ?? "",
+    reasoningEffort: raw.reasoningEffort ?? raw.reasoningEffect ?? "",
     mode: raw.mode,
     updatedAt: raw.updatedAt ?? new Date(0).toISOString()
   };

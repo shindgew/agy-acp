@@ -13,15 +13,15 @@ import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
-  type EditFsBridge
+  type ClientFileSystem
 } from "../file-system/bridge.js";
 import {
   canBridgeInteraction,
   interactionKeys,
   isEditToolCall,
-  normalizeAgyPermissionChoice,
+  normalizePermissionChoice,
   parseAskQuestion,
-  type AgyPermissionChoice
+  type PermissionChoice
 } from "../tool-calls/permissions.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
@@ -44,7 +44,7 @@ export interface PtyFactory {
 export type PermissionCallback = (
   toolCall: SessionUpdate,
   context: { toolName: string }
-) => Promise<AgyPermissionChoice | "cancelled">;
+) => Promise<PermissionChoice | "cancelled">;
 
 export interface SpawnOptions {
   cwd: string;
@@ -58,16 +58,16 @@ export type SpawnFactory = (
 ) => SpawnedProcess;
 
 /** agy execution mode for `--mode` (omit flag when `default`). */
-export type AgyExecutionMode = "default" | "accept-edits" | "plan";
+export type SessionModeId = "default" | "accept-edits" | "plan";
 
-export const AGY_EXECUTION_MODES: readonly AgyExecutionMode[] = [
+export const SESSION_MODE_IDS: readonly SessionModeId[] = [
   "default",
   "accept-edits",
   "plan"
 ] as const;
 
-export function isAgyExecutionMode(value: string): value is AgyExecutionMode {
-  return (AGY_EXECUTION_MODES as readonly string[]).includes(value);
+export function isSessionModeId(value: string): value is SessionModeId {
+  return (SESSION_MODE_IDS as readonly string[]).includes(value);
 }
 
 export interface AgyCliConfig {
@@ -84,7 +84,7 @@ export interface AgyCliConfig {
    * `default` omits the flag (request-review / write confirmation).
    * `accept-edits` and `plan` pass `--mode <value>`.
    */
-  mode: AgyExecutionMode;
+  mode: SessionModeId;
   project?: string;
   printTimeout: string;
   sandbox: boolean;
@@ -102,7 +102,7 @@ export interface AgyCliConfig {
   env?: NodeJS.ProcessEnv;
 }
 
-export interface AgyPromptOutcome {
+export interface PromptOutcome {
   stopReason: "end_turn" | "cancelled";
 }
 
@@ -188,7 +188,7 @@ export class AgyCliSession {
     this.config.effort = effort;
   }
 
-  setMode(mode: AgyExecutionMode): void {
+  setMode(mode: SessionModeId): void {
     this.config.mode = mode;
   }
 
@@ -264,8 +264,8 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission?: PermissionCallback,
-    fsBridge?: EditFsBridge
-  ): Promise<AgyPromptOutcome> {
+    fsBridge?: ClientFileSystem
+  ): Promise<PromptOutcome> {
     if (this.config.interactivePermissions) {
       if (!onPermission) throw new Error("interactive permissions require a permission callback");
       return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge);
@@ -286,8 +286,8 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission: PermissionCallback,
-    fsBridge?: EditFsBridge
-  ): Promise<AgyPromptOutcome> {
+    fsBridge?: ClientFileSystem
+  ): Promise<PromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
@@ -439,7 +439,7 @@ export class AgyCliSession {
             deadline
           );
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          if (normalizeAgyPermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+          if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
         if (this.#cancelled) break;
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
@@ -480,7 +480,7 @@ export class AgyCliSession {
     command: string[],
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>
-  ): Promise<AgyPromptOutcome> {
+  ): Promise<PromptOutcome> {
     const [program, ...args] = command;
     this.#cancelled = false;
 
@@ -802,15 +802,15 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const interactiveDisabled = interactiveSetting === "0" || interactiveSetting === "false" || argv.includes("--no-interactive-permissions");
   const interactivePermissions = !skipPermissions && !interactiveDisabled;
 
-  let mode: AgyExecutionMode = "default";
+  let mode: SessionModeId = "default";
   const modeFromEnv = optional(env.AGY_ACP_MODE);
-  if (modeFromEnv && isAgyExecutionMode(modeFromEnv)) {
+  if (modeFromEnv && isSessionModeId(modeFromEnv)) {
     mode = modeFromEnv;
   }
   const modeFlagIdx = argv.indexOf("--mode");
   if (modeFlagIdx >= 0) {
     const modeArg = argv[modeFlagIdx + 1];
-    if (modeArg && isAgyExecutionMode(modeArg)) {
+    if (modeArg && isSessionModeId(modeArg)) {
       mode = modeArg;
     }
   }

@@ -7,7 +7,7 @@ import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
-  type EditFsBridge
+  type ClientFileSystem
 } from "../src/file-system/bridge.js";
 
 function diffToolCall(blocks: Array<{ path: string; oldText: string | null; newText: string }>): SessionUpdate {
@@ -24,7 +24,7 @@ function diffToolCall(blocks: Array<{ path: string; oldText: string | null; newT
 function recordingBridge() {
   const reads: string[] = [];
   const writes: Array<{ path: string; content: string }> = [];
-  const bridge: EditFsBridge = {
+  const bridge: ClientFileSystem = {
     readTextFile: async (p) => { reads.push(p); },
     writeTextFile: async (p, content) => {
       writes.push({ path: p, content });
@@ -41,7 +41,7 @@ describe("routeEditThroughClient", () => {
     fs.writeFileSync(file, "before\nNEW\nafter", "utf8");
     const { bridge, reads, writes } = recordingBridge();
     const seenDuringRead: string[] = [];
-    const wrapped: EditFsBridge = {
+    const wrapped: ClientFileSystem = {
       readTextFile: async (p) => {
         seenDuringRead.push(fs.readFileSync(p, "utf8"));
         await bridge.readTextFile(p);
@@ -102,7 +102,7 @@ describe("routeEditThroughClient", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
     const file = path.join(dir, "a.txt");
     fs.writeFileSync(file, "before\nNEW\nafter", "utf8");
-    const bridge: EditFsBridge = {
+    const bridge: ClientFileSystem = {
       readTextFile: async () => {},
       writeTextFile: async () => { throw new Error("client rejected"); }
     };

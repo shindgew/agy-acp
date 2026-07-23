@@ -9,7 +9,7 @@ import type { ContentBlock } from "@agentclientprotocol/sdk";
 
 const ATTACHMENTS_DIR = ".agy-acp/attachments";
 
-export async function promptBlocksToAgyPrompt(blocks: ContentBlock[], cwd: string): Promise<string> {
+export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string): Promise<string> {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {
@@ -43,7 +43,7 @@ export async function promptBlocksToAgyPrompt(blocks: ContentBlock[], cwd: strin
   return parts.join("\n");
 }
 
-export function promptBlocksToText(blocks: ContentBlock[]): string {
+export function contentBlocksToText(blocks: ContentBlock[]): string {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {

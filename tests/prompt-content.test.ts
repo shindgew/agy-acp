@@ -2,15 +2,15 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { promptBlocksToAgyPrompt } from "../src/content/index.js";
+import { contentBlocksToPrompt } from "../src/content/index.js";
 
 const PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-describe("promptBlocksToAgyPrompt", () => {
+describe("contentBlocksToPrompt", () => {
   it("writes image blocks to the session workspace and references them for agy", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
     try {
-      const prompt = await promptBlocksToAgyPrompt([
+      const prompt = await contentBlocksToPrompt([
         { type: "text", text: "describe this" },
         { type: "image", mimeType: "image/png", data: PNG_PIXEL }
       ], cwd);
@@ -27,7 +27,7 @@ describe("promptBlocksToAgyPrompt", () => {
   it("references file image resource links directly", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
     try {
-      const prompt = await promptBlocksToAgyPrompt([
+      const prompt = await contentBlocksToPrompt([
         {
           type: "resource_link",
           uri: "file:///tmp/example.png",
