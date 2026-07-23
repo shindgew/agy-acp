@@ -61,6 +61,7 @@ describe("interpretSlashCommand", () => {
     expect(interpretSlashCommand({ name: "mode", input: "turbo" }).kind).toBe("error");
     expect(interpretSlashCommand({ name: "plan", input: "extra" }).kind).toBe("error");
     expect(interpretSlashCommand({ name: "help", input: "" })).toEqual({ kind: "pass" });
+    expect(interpretSlashCommand({ name: "skills", input: "" })).toEqual({ kind: "pass" });
   });
 });
 
@@ -88,7 +89,7 @@ describe("availableCommandsUpdate", () => {
       availableCommands: AVAILABLE_COMMANDS
     });
     expect(AVAILABLE_COMMANDS.map((c) => c.name).sort()).toEqual(
-      ["effort", "mode", "model", "plan"].sort()
+      ["effort", "mode", "model", "plan", "skills"].sort()
     );
   });
 });

@@ -30,6 +30,16 @@ import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sd
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
 
+/**
+ * `available_commands_update` on session/new is deferred past the response
+ * (via setImmediate) so real clients register the session before seeing a
+ * notification for it. Await this once after session/new to drain that
+ * notification before asserting on / resetting the `updates` array.
+ */
+function flushDeferredNotifications(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 describe("contentBlocksToText", () => {
   it("joins text content blocks", () => {
     expect(contentBlocksToText([
@@ -55,12 +65,9 @@ describe("initialize", () => {
       expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
       expect(response.agentCapabilities?.auth?.logout).toEqual({});
-      expect(response.authMethods).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] }),
-          expect.objectContaining({ id: "agy-status" })
-        ])
-      );
+      expect(response.authMethods).toEqual([
+        expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] })
+      ]);
       expect(installSpy).toHaveBeenCalledOnce();
     } finally {
       installSpy.mockRestore();
@@ -120,7 +127,7 @@ describe("authentication", () => {
         clientCapabilities: {}
       });
       await expect(
-        connection.agent.request(methods.agent.authenticate, { methodId: "agy-status" })
+        connection.agent.request(methods.agent.authenticate, { methodId: "agy-login" })
       ).resolves.toEqual({});
     } finally {
       connection.close();
@@ -340,6 +347,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        await flushDeferredNotifications();
         updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
@@ -385,6 +393,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        await flushDeferredNotifications();
         updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
@@ -809,6 +818,7 @@ describe("available_commands_update and slash commands", () => {
         additionalDirectories: [],
         mcpServers: []
       });
+      await flushDeferredNotifications();
 
       const commandUpdate = updates.find((u) => u.sessionUpdate === "available_commands_update");
       expect(commandUpdate).toMatchObject({
