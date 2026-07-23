@@ -60,7 +60,7 @@ import { ReplayCache } from "./agy/db/replay.js";
 import type { ClientFileSystem } from "./file-system/bridge.js";
 import { ensureAgyInstalled } from "./agy/installer.js";
 import {
-  AUTH_METHOD_TERMINAL_LOGIN,
+  AUTH_REQUIRED_MESSAGE,
   isAgyAuthenticated,
   isKnownAuthMethodId,
   logoutAgyViaSlashCommand,
@@ -265,9 +265,10 @@ export class AcpAgent {
     await this.ensureAgyReady();
     const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig(cwd));
     if (status.ok) return;
+    console.error(`[agy-acp] auth required: ${status.reason}`);
     throw RequestError.authRequired(
       { authMethods: v1AuthMethods() },
-      status.reason
+      AUTH_REQUIRED_MESSAGE
     );
   }
 
@@ -282,9 +283,10 @@ export class AcpAgent {
     }
     const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig());
     if (status.ok) return {};
+    console.error(`[agy-acp] auth required: ${status.reason}`);
     throw RequestError.authRequired(
       { authMethods: v1AuthMethods() },
-      `${status.reason} Complete terminal login (method "${AUTH_METHOD_TERMINAL_LOGIN}"), then call authenticate again.`
+      AUTH_REQUIRED_MESSAGE
     );
   }
 

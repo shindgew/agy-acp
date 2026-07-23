@@ -2,18 +2,20 @@
 //
 // Login is interactive (Google AI Pro web code paste, or API key) inside the agy TUI.
 // ACP terminal auth launches `agy-acp --login`, which runs interactive `agy` with
-// inherited stdio so the user can complete that flow. Logout maps to TUI `/logout`
-// via a short-lived PTY, then re-probes with `agy models`.
+// inherited stdio so the user can complete that flow. A background poll watches for
+// the resulting keyring login (via `agy models`) and closes the terminal as soon as
+// it succeeds, so the user isn't left sitting inside agy's own chat TUI afterward.
+// Logout maps to TUI `/logout` via a short-lived PTY, then re-probes with `agy models`.
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import type { AuthMethod as V1AuthMethod } from "@agentclientprotocol/sdk";
 import type { AuthMethod as V2AuthMethod } from "@agentclientprotocol/sdk/experimental/v2";
 import {
+  AgyCliBackend,
   AgyCliError,
   configFromEnv,
   defaultPtyFactory,
-  type AgyCliBackend,
   type AgyCliConfig,
   type PtyFactory,
   type PtyProcess
@@ -23,11 +25,32 @@ import { ensureAgyInstalled } from "./installer.js";
 /** ACP method id for interactive terminal login (client runs agent binary with --login). */
 export const AUTH_METHOD_TERMINAL_LOGIN = "agy-login";
 
-/** ACP method id for re-checking an existing keyring login (agent-side probe only). */
-export const AUTH_METHOD_AGENT_STATUS = "agy-status";
+/**
+ * `_meta["terminal-auth"]` payload some clients (e.g. Zed, prior to the native
+ * `type: "terminal"` auth method stabilizing) look for instead of the native
+ * mechanism: `{ label, command, args, env }` describing exactly what to spawn in
+ * a terminal. Without this, such clients silently skip opening any terminal at
+ * all and just re-call `authenticate`, which can never succeed.
+ * `env` is intentionally omitted: the terminal already inherits a normal shell
+ * environment, and forwarding this process's full `process.env` over the wire
+ * would risk leaking secrets into client logs.
+ */
+function terminalAuthMeta(): { "terminal-auth": { label: string; command: string; args: string[] } } {
+  return {
+    "terminal-auth": {
+      label: "agy /login",
+      command: process.execPath,
+      args: [...process.argv.slice(1), "--login"]
+    }
+  };
+}
 
 const NOT_LOGGED_IN_RE = /not logged into antigravity|not logged in|authentication required|please log in|login required/i;
 const IDLE_MARKER = "for shortcuts";
+/** How often to probe `agy models` in the background during interactive login. */
+const LOGIN_POLL_INTERVAL_MS = 3_000;
+/** Grace period after SIGTERM before escalating to SIGKILL once login succeeds. */
+const LOGIN_KILL_GRACE_MS = 3_000;
 const LOGOUT_SETTLE_MS = 1_500;
 const LOGOUT_IDLE_TIMEOUT_MS = 20_000;
 
@@ -36,18 +59,12 @@ export function v1AuthMethods(): V1AuthMethod[] {
     {
       type: "terminal",
       id: AUTH_METHOD_TERMINAL_LOGIN,
-      name: "Google Antigravity (CLI)",
+      name: "Login",
       description:
         "Opens a terminal to sign in with Google AI Pro (web auth + paste code) or an API key. " +
-        "Complete the agy login prompts, then return to the editor.",
-      args: ["--login"]
-    },
-    {
-      id: AUTH_METHOD_AGENT_STATUS,
-      name: "Use existing Antigravity login",
-      description:
-        "Succeeds if agy is already signed in on this machine (keyring). " +
-        "If not, complete terminal login first."
+        "The terminal closes automatically once sign-in succeeds; no need to exit agy yourself.",
+      args: ["--login"],
+      _meta: terminalAuthMeta()
     }
   ];
 }
@@ -57,26 +74,27 @@ export function v2AuthMethods(): V2AuthMethod[] {
     {
       type: "terminal",
       methodId: AUTH_METHOD_TERMINAL_LOGIN,
-      name: "Google Antigravity (CLI)",
+      name: "Login",
       description:
         "Opens a terminal to sign in with Google AI Pro (web auth + paste code) or an API key. " +
-        "Complete the agy login prompts, then return to the editor.",
-      args: ["--login"]
-    },
-    {
-      type: "agent",
-      methodId: AUTH_METHOD_AGENT_STATUS,
-      name: "Use existing Antigravity login",
-      description:
-        "Succeeds if agy is already signed in on this machine (keyring). " +
-        "If not, complete terminal login first."
+        "The terminal closes automatically once sign-in succeeds; no need to exit agy yourself.",
+      args: ["--login"],
+      _meta: terminalAuthMeta()
     }
   ];
 }
 
 export function isKnownAuthMethodId(methodId: string): boolean {
-  return methodId === AUTH_METHOD_TERMINAL_LOGIN || methodId === AUTH_METHOD_AGENT_STATUS;
+  return methodId === AUTH_METHOD_TERMINAL_LOGIN;
 }
+
+/**
+ * User-facing text shown next to the Login method whenever auth is required.
+ * Deliberately not agy's raw probe error (exit codes / "<no stderr>" are
+ * meaningless to an end user); the real reason is still logged server-side by
+ * callers for debugging.
+ */
+export const AUTH_REQUIRED_MESSAGE = "By continuing, you agree to https://antigravity.google/terms";
 
 /**
  * True when `agy models` succeeds with at least one model.
@@ -120,14 +138,38 @@ export function looksUnauthenticated(reason: string): boolean {
   return NOT_LOGGED_IN_RE.test(reason) || /sign in may be required/i.test(reason);
 }
 
+/** Spawns the interactive login child process (default: real `agy`, inherited stdio). */
+export type InteractiveLoginSpawn = (
+  command: string,
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv }
+) => ChildProcess;
+
+function defaultInteractiveLoginSpawn(
+  command: string,
+  args: string[],
+  options: { cwd: string; env?: NodeJS.ProcessEnv }
+): ChildProcess {
+  return spawn(command, args, { cwd: options.cwd, env: options.env, stdio: "inherit" });
+}
+
 /**
  * Interactive login for `agy-acp --login` (terminal auth method).
  * Runs `agy` with inherited stdio so the user can complete API key or web+code flow.
+ *
+ * A background poll probes `agy models` every few seconds; once it succeeds, the
+ * child is terminated automatically so the caller doesn't need to manually exit
+ * agy's own chat TUI to return control to the ACP client. If the child exits on
+ * its own first (user quit, or login abandoned), its exit code is returned as-is.
  */
 export async function runInteractiveAgyLogin(options: {
   env?: NodeJS.ProcessEnv;
   cwd?: string;
   argv?: string[];
+  backend?: AgyCliBackend;
+  spawnLogin?: InteractiveLoginSpawn;
+  pollIntervalMs?: number;
+  killGraceMs?: number;
 }): Promise<number> {
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? process.cwd();
@@ -137,14 +179,59 @@ export async function runInteractiveAgyLogin(options: {
   });
 
   const config = configFromEnv({ cwd, env, argv: options.argv ?? [] });
-  const child = spawn(config.agyPath, [], {
-    cwd,
-    env: config.env ?? env,
-    stdio: "inherit"
+  const backend = options.backend ?? new AgyCliBackend();
+  const spawnLogin = options.spawnLogin ?? defaultInteractiveLoginSpawn;
+  const pollIntervalMs = options.pollIntervalMs ?? LOGIN_POLL_INTERVAL_MS;
+  const killGraceMs = options.killGraceMs ?? LOGIN_KILL_GRACE_MS;
+
+  const child = spawnLogin(config.agyPath, [], { cwd, env: config.env ?? env });
+
+  let settled = false;
+  let autoClosed = false;
+
+  const exitPromise = once(child, "exit").then(([code]) =>
+    typeof code === "number" ? code : null
+  );
+
+  const pollForCompletion = (async () => {
+    while (!settled) {
+      await sleep(pollIntervalMs);
+      if (settled) return;
+      const status = await isAgyAuthenticated(backend, config).catch(
+        (): { ok: false; reason: string } => ({ ok: false, reason: "" })
+      );
+      if (!status.ok || settled) continue;
+
+      autoClosed = true;
+      settled = true;
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        /* already exited */
+      }
+      const killedPromptly = await Promise.race([
+        once(child, "exit").then(() => true),
+        sleep(killGraceMs).then(() => false)
+      ]);
+      if (!killedPromptly) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already exited */
+        }
+      }
+      return;
+    }
+  })();
+
+  const exitCode = await exitPromise;
+  settled = true;
+  pollForCompletion.catch(() => {
+    // Background probe may still be mid-flight when the child exits on its
+    // own; nothing left to act on once the outer promise has resolved.
   });
 
-  const [code] = await once(child, "exit");
-  return typeof code === "number" ? code : 1;
+  return autoClosed ? 0 : exitCode ?? 1;
 }
 
 /**

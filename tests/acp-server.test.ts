@@ -65,12 +65,9 @@ describe("initialize", () => {
       expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
       expect(response.agentCapabilities?.auth?.logout).toEqual({});
-      expect(response.authMethods).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] }),
-          expect.objectContaining({ id: "agy-status" })
-        ])
-      );
+      expect(response.authMethods).toEqual([
+        expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] })
+      ]);
       expect(installSpy).toHaveBeenCalledOnce();
     } finally {
       installSpy.mockRestore();
@@ -130,7 +127,7 @@ describe("authentication", () => {
         clientCapabilities: {}
       });
       await expect(
-        connection.agent.request(methods.agent.authenticate, { methodId: "agy-status" })
+        connection.agent.request(methods.agent.authenticate, { methodId: "agy-login" })
       ).resolves.toEqual({});
     } finally {
       connection.close();
