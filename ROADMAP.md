@@ -71,13 +71,18 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [ ] Expand interactive `session/request_permission` (multi-select /
       multi-question `ask_question`, remaining status-9 tools;
       unsupported status-9 interactions currently fail closed)
-- [ ] v1 client-executed `terminal/*` (`terminal/create` runs a command in the
-      editor). Blocked while agy owns the shell — re-running would double-execute.
-      v1 keeps content blocks; draft v2 uses agent-owned terminals (see below).
-- [ ] ACP elicitation for free-text / multi-select `ask_question` (single-select
-      MCQ already uses `session/request_permission`)
-- [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
-      (today: all MCP caps are `false` and servers are ignored)
+- [ ] v1 client-executed `terminal/*` suite (`terminal/create`, `terminal/output`,
+      `terminal/release`, `terminal/wait_for_exit`, `terminal/kill`). Blocked
+      while agy owns the shell — re-running would double-execute. v1 keeps
+      content blocks; draft v2 uses agent-owned terminals (see below).
+- [ ] ACP elicitation for free-text / multi-select `ask_question`: client
+      `elicitation/create` + `elicitation/complete` (single-select MCQ already
+      uses `session/request_permission`; today unsupported paths fail closed)
+- [ ] MCP: honor `session/new` `mcpServers`, advertise real `mcpCapabilities`
+      (`http` / `sse` / `acp` as supported), and route wire methods if/when agy
+      can consume external servers — agent `mcp/message`, client `mcp/connect`,
+      `mcp/message`, `mcp/disconnect` (today: all MCP caps are `false` and
+      servers are ignored)
 
 ### Medium priority
 
@@ -95,6 +100,10 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [ ] `usage_update` and prompt-response `usage` when token data is available
 - [ ] Richer `stopReason` values (`max_tokens`, `refusal`, `max_turn_requests`) when
       agy exposes them (today: `end_turn` or `cancelled`)
+- [ ] Confirm `$/cancel_request` (protocol-level request cancellation, separate
+      from `session/cancel`) is handled by the SDK connection layer for in-flight
+      agent requests; add explicit propagation only if clients need it beyond SDK
+      defaults
 
 ### Fidelity improvements
 
@@ -102,15 +111,20 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
 - [x] Decode/show fetch and web-search result bodies (not just URL / title)
 - [x] Better diffs for full-file writes when prior content is knowable
 - [x] Map permission decisions into granted/denied labels (not interactive outcomes)
+- [ ] Optional tool-call `name` (programmatic tool id) alongside `title` / `kind`
+      when agy metadata is available (schema field still marked unstable)
 - [ ] Agent-outbound images / richer content blocks when agy produces them
+- [ ] Unstable id-based v1 `plan_update` / `plan_removed` (and client `plan` cap)
+      if a client prefers that shape over classic `plan` entries
 
 ### Lower priority / unstable ACP
 
 Usually skip unless a client needs them for this wrapper:
 
-- [ ] `providers/*` (LLM provider routing UI)
-- [ ] `nes/*` (next-edit suggestions)
-- [ ] `document/*` (editor document sync)
+- [ ] `providers/*` (`providers/list`, `providers/set`, `providers/disable`)
+- [ ] `nes/*` (`nes/start`, `nes/suggest`, `nes/accept`, `nes/reject`, `nes/close`)
+- [ ] `document/*` (`document/didOpen`, `didChange`, `didClose`, `didSave`, `didFocus`)
+- [ ] `positionEncoding` capability (relevant mainly with nes/document surfaces)
 - [ ] Non-stdio transports (HTTP / WebSocket) — stdio NDJSON is intentional for Zed
 
 ---
@@ -162,12 +176,16 @@ v2-aware clients):
 - [ ] Richer `replayFrom` cursors beyond `{ "type": "start" }` when the draft
       stabilizes incremental replay
 - [ ] Map multi-select / free-text `ask_question` to client `elicitation/create`
-      (today: fail closed; static tool_call text only)
+      + `elicitation/complete` (today: fail closed; static tool_call text only)
 - [ ] Incremental `terminal_output_chunk` while a command is still running, if
       agy ever persists partial stdout before completion (today: full
       `terminal_update.output` snapshot when field 28 is present)
+- [ ] Incremental `tool_call_content_chunk` for progressive tool content while a
+      call is still running (today: content arrives only on `tool_call_update`
+      snapshots from the DB — same limitation as full terminal snapshots)
 - [ ] MCP: honor session `mcpServers`, advertise `capabilities.session.mcp`, and
-      route `mcp/*` if/when agy can consume external MCP servers
+      route `mcp/*` if/when agy can consume external MCP servers — agent
+      `mcp/message`, client `mcp/connect` / `mcp/message` / `mcp/disconnect`
 - [ ] Expand interactive permission bridge to any remaining agy menus once their
       TUI/response channels are verified
 
@@ -185,6 +203,14 @@ v2-aware clients):
       `max_turn_requests`) when agy exposes them
 - [ ] Optional full-message updates (`agent_message` / `agent_thought`) in
       addition to chunk streaming, if clients prefer them
+- [ ] Confirm `$/cancel_request` handling (same as v1 — SDK default vs explicit)
+
+### Fidelity improvements
+
+- [ ] Optional tool-call `name` alongside `title` / `kind` when known
+- [ ] Diff `delete` / rename-style path ops (and richer `fileType`s) when agy
+      exposes deletes or non-text edits — today only `add` / `modify` + text
+- [ ] Agent-outbound images / richer content blocks when agy produces them
 
 ### Draft tracking
 
@@ -198,10 +224,11 @@ v2-aware clients):
 
 Same as v1 lower-priority surface; not advertised in `initialize` capabilities:
 
-- [ ] `providers/*`, `nes/*`, `document/*`
-- [ ] Agent-driven client filesystem methods (agy owns FS)
+- [ ] `providers/*`, `nes/*`, `document/*`, `positionEncoding`
+- [ ] Agent-driven client filesystem methods (draft v2 has no `fs/*` client
+      methods today; agy owns FS either way)
 - [ ] Non-stdio transports (HTTP / WebSocket / SSE)
-
-
+- [ ] JSON-RPC batch framing nuances beyond what the SDK already implements
+      for the chosen transport
 
 
