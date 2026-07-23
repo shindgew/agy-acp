@@ -80,7 +80,7 @@ jobs:
         working-directory: ${{ runner.temp }}/install-check
         run: |
           node --input-type=module <<'EOF'
-          import { defaultPtyFactory } from 'agy-acp/dist/cli.js';
+          import { defaultPtyFactory } from 'agy-acp/dist/agy/cli.js';
           const { spawn } = await defaultPtyFactory();
           const windows = process.platform === 'win32';
           const child = spawn(windows ? 'cmd.exe' : '/bin/sh', windows ? ['/c', 'echo node-pty-ok'] : ['-c', 'echo node-pty-ok'], {

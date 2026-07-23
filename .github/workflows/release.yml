@@ -102,8 +102,8 @@ jobs:
       - name: Syntax-check published entrypoints
         run: |
           node --check dist/main.js
-          node --check dist/acp-server.js
-          node --check dist/cli.js
+          node --check dist/agent.js
+          node --check dist/agy/cli.js
 
       - name: Extract release notes from CHANGELOG
         id: notes
