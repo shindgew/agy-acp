@@ -20,8 +20,8 @@
     "antigravity",
     "google"
   ],
-  "main": "dist/acp-server.js",
-  "types": "dist/acp-server.d.ts",
+  "main": "dist/agent.js",
+  "types": "dist/agent.d.ts",
   "license": "Apache-2.0",
   "bin": {
     "agy-acp": "dist/main.js"

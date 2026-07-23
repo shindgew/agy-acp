@@ -79,7 +79,7 @@ like `User denied permission for write_file(...)` come from **agy**, not the edi
 ```text
 Zed / ACP client
   -> agy-acp (v1 or draft v2 from initialize)
-  -> AgyAcpAgent (sessions, config, prompt lifecycle)
+  -> AcpAgent (sessions, config, prompt lifecycle)
   -> AgyCliSession (interactive agy PTY, --conversation id)
   -> agy --prompt-interactive ... --conversation <id> --sandbox ...
        \-> ~/.gemini/antigravity-cli/conversations/<id>.db
