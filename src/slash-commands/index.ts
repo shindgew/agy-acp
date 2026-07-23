@@ -14,6 +14,7 @@ export const MODE_SLASH = "mode";
 export const PLAN_SLASH = "plan";
 export const MODEL_SLASH = "model";
 export const EFFORT_SLASH = "effort";
+export const SKILLS_SLASH = "skills";
 
 /** Commands advertised to clients for typeahead / slash menus. */
 export const AVAILABLE_COMMANDS: readonly AvailableCommand[] = [
@@ -35,6 +36,10 @@ export const AVAILABLE_COMMANDS: readonly AvailableCommand[] = [
     name: EFFORT_SLASH,
     description: "Set reasoning effort for the current model (agy --effort).",
     input: { hint: "low | medium | high" }
+  },
+  {
+    name: SKILLS_SLASH,
+    description: "List skills discovered by agy for this session."
   }
 ];
 
