@@ -9,7 +9,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { diffBlocks } from "./edit-revert.js";
+import { diffBlocks } from "./revert.js";
 
 export interface EditFsBridge {
   readTextFile(path: string): Promise<void>;

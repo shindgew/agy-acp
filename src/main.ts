@@ -1,4 +1,4 @@
 #!/usr/bin/env node
-import { runAcp } from "./acp-server.js";
+import { runAcp } from "./agent.js";
 
 runAcp({ argv: process.argv });

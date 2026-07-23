@@ -8,7 +8,7 @@ import {
   routeEditThroughClient,
   writeEditThroughClient,
   type EditFsBridge
-} from "../src/edit-fs-bridge.js";
+} from "../src/file-system/bridge.js";
 
 function diffToolCall(blocks: Array<{ path: string; oldText: string | null; newText: string }>): SessionUpdate {
   return {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPlanFile, parsePlanEntries, planIdForPath, planUpdateFromMarkdown } from "../src/db/plan.js";
+import { isPlanFile, parsePlanEntries, planIdForPath, planUpdateFromMarkdown } from "../src/agent-plan/index.js";
 
 describe("isPlanFile", () => {
   it("matches agy brain markdown paths", () => {

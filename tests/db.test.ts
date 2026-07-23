@@ -2,10 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationDb } from "../src/db/database.js";
-import { ReplayCache } from "../src/db/replay.js";
-import { conversationSnapshot, newConversationId } from "../src/db/scan.js";
-import { Translator } from "../src/db/translator.js";
+import { ConversationDb } from "../src/agy/db/database.js";
+import { ReplayCache } from "../src/agy/db/replay.js";
+import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
+import { Translator } from "../src/agy/db/translator.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,

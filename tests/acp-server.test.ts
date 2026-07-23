@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
-import * as installer from "../src/installer.js";
+import * as installer from "../src/agy/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import {
@@ -16,8 +16,8 @@ import {
   promptBlocksToText,
   reasoningEffectConfigOption,
   toModelSlug
-} from "../src/acp-server.js";
-import type { PtyFactory, SpawnFactory } from "../src/cli.js";
+} from "../src/agent.js";
+import type { PtyFactory, SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import {
@@ -25,7 +25,7 @@ import {
   sessionUpdateToV1,
   sessionUpdateToV2,
   terminalIdForToolCall
-} from "../src/session-updates.js";
+} from "../src/session/updates.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { Readable, Writable } from "node:stream";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { describe, expect, it, vi } from "vitest";
-import * as installer from "../src/installer.js";
+import * as installer from "../src/agy/installer.js";
 import {
   AgyCliBackend,
   AgyCliSession,
@@ -18,14 +18,14 @@ import {
   type PtyProcess,
   type SpawnFactory,
   type SpawnOptions
-} from "../src/cli.js";
+} from "../src/agy/cli.js";
 import {
   canBridgeInteraction,
   interactionKeys,
   isBridgeablePermissionTool,
   permissionKeys,
   permissionOptions
-} from "../src/permissions.js";
+} from "../src/tool-calls/permissions.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 

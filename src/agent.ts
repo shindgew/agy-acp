@@ -42,9 +42,9 @@ import type {
   SetSessionConfigOptionRequest as V2SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
-import { ReplayCache } from "./db/replay.js";
-import type { EditFsBridge } from "./edit-fs-bridge.js";
-import { ensureAgyInstalled } from "./installer.js";
+import { ReplayCache } from "./agy/db/replay.js";
+import type { EditFsBridge } from "./file-system/bridge.js";
+import { ensureAgyInstalled } from "./agy/installer.js";
 import {
   AgyCliBackend,
   AGY_EXECUTION_MODES,
@@ -55,11 +55,11 @@ import {
   type AgyExecutionMode,
   type PtyFactory,
   type SpawnFactory
-} from "./cli.js";
-import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
-import { promptBlocksToAgyPrompt } from "./prompt-content.js";
-import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
-import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
+} from "./agy/cli.js";
+import { permissionOptions, type AgyPermissionChoice } from "./tool-calls/permissions.js";
+import { promptBlocksToAgyPrompt } from "./content/index.js";
+import { defaultStateDir, SessionStore, type StoredSession } from "./session/store.js";
+import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session/updates.js";
 
 /** Prefer re-exporting stable v1 symbols used by existing tests and consumers. */
 export const methods = v1.methods;
@@ -859,7 +859,7 @@ export function runAcp(options: AgyAcpOptions = {}) {
   return createDualAgyAcpApp(options).connect(stream);
 }
 
-export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
+export { promptBlocksToAgyPrompt, promptBlocksToText } from "./content/index.js";
 
 function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermissionChoice | "cancelled" {
   if (signal?.aborted || !response || typeof response !== "object") return "cancelled";
