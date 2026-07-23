@@ -12,6 +12,10 @@ still change before stabilization — see the
 [ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
 [migration guide](https://agentclientprotocol.com/protocol/v2/migration).
 
+Protocol surface is tracked against `@agentclientprotocol/sdk` (full schema), not
+only the abbreviated [v1](https://agentclientprotocol.com/protocol/v1/overview) /
+[v2](https://agentclientprotocol.com/protocol/v2/overview) overview pages.
+
 ---
 
 ## ACP v1
@@ -22,7 +26,8 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 
 - [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
 - [x] `session/load` and `session/resume` with persisted bindings
-- [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`)
+- [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`) — select
+      options only (no boolean config options yet)
 - [x] Native session modes: `modes` on new/load/resume, `session/set_mode`,
       `current_mode_update` (ids match config `mode` / `agy --mode`)
 - [x] `config_option_update` when mode changes via `session/set_mode`
@@ -31,6 +36,8 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
       `user_message_chunk` (replay), progressive `tool_call` / `tool_call_update`,
       `session_info_update`
+- [x] Optional `messageId` on v1 message/thought chunks (same ids the v2 boundary
+      requires; optional in v1, required in draft v2)
 - [x] Tool kinds, locations, `rawInput` / `rawOutput`, edit content type `diff`
 - [x] `session/list` from the session store
 - [x] Execute tool output when present in the conversation DB (field 28)
@@ -49,10 +56,12 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
       if the client lacks the capability or rejects the write-through.
 - [x] Execute tools surface command + captured output as content blocks (v1) and
       draft-v2 agent-owned `terminal_update` + `type: "terminal"` embeds
-- [x] Structured plan from brain markdown artifacts: classic v1 `plan` entries
-      (list/checkbox parse) and draft-v2 `plan_update` (`markdown` when body is
-      known, else `items`). Status only reflects checkbox markers in the file —
-      no live task progress from agy. `plan_removed` not emitted.
+- [x] Structured plan from brain markdown artifacts: **classic** v1
+      `sessionUpdate: "plan"` (checklist entries only — not the unstable
+      id-based v1 `plan_update` / `plan_removed` shape) and draft-v2
+      `plan_update` (`markdown` when body is known, else `items`). Status only
+      reflects checkbox markers in the file — no live task progress from agy.
+      Neither protocol emits `plan_removed` (agy does not delete plans).
 
 ### High priority
 
@@ -132,6 +141,7 @@ differs or is incomplete.
       v1 `session/load`; omit `replayFrom` to reattach without replay)
 - [x] Collapse first-sight `tool_call` → v2 `tool_call_update` (upsert shape)
 - [x] Structured diff content: `changes[]` + optional `git_patch` patch block
+      (`operation: "add" | "modify"`, `fileType: "text"` for known text edits)
 - [x] Tool status `cancelled` preserved for v2 (mapped to `failed` for v1)
 - [x] `session/request_permission` with v2 `subject: { type: "tool_call", … }`
       + `title` (same interactive bridge as v1)
