@@ -9,6 +9,12 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-23
+
+Authentication, curated slash commands, native session modes, structured plans,
+draft-v2 agent-owned terminals, and an ACP-aligned package layout. **Requires
+Node.js 22+** (`better-sqlite3` 13).
+
 ### Added
 
 - Draft ACP v2 agent-owned terminals for `run_command` / execute tools: emit
@@ -52,6 +58,9 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Package `main` / `types` entry is `dist/agent.js` (was `dist/acp-server.js`).
 - ROADMAP expanded against the full ACP schema (not only overviews), with doc
   links on protocol items.
+- `engines.node` is `>=22`; CI no longer runs Node 20. Dependency bumps include
+  `better-sqlite3` 13, TypeScript 7, `@types/node` 26, `@bufbuild/protobuf`, and
+  vitest.
 
 ### Removed
 

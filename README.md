@@ -4,10 +4,11 @@ ACP adapter for Google Antigravity's `agy` CLI. TypeScript, `npx`-runnable, buil
 `@agentclientprotocol/sdk`. Runs a persistent interactive `agy` process so ACP clients
 can answer permission requests while keeping the logged-in Antigravity CLI experience.
 
-**Package:** `0.2.8` (`latest`) — ACP v1 + experimental draft ACP v2 via `initialize`
+**Package:** `0.3.0` (`latest`) — ACP v1 + experimental draft ACP v2 via `initialize`
 negotiation. Draft v2 continues on the `alpha` dist-tag (`1.0.0-alpha.*`). See the
 [ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
-[migration guide](https://agentclientprotocol.com/protocol/v2/migration).
+[migration guide](https://agentclientprotocol.com/protocol/v2/migration). Requires
+**Node.js 22+**.
 
 ## Usage
 
@@ -20,7 +21,7 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
 ```sh
-npx agy-acp                 # stable (0.2.8)
+npx agy-acp                 # stable (0.3.0)
 npx agy-acp@alpha           # draft ACP v2 channel
 npx agy-acp@1.0.0-alpha.0   # pin a pre-release
 ```
