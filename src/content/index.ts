@@ -1,3 +1,6 @@
+// ACP Content: map prompt ContentBlock[] (text / image / resource) onto agy input.
+// Docs: https://agentclientprotocol.com/protocol/v1/content
+
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
@@ -6,7 +9,7 @@ import type { ContentBlock } from "@agentclientprotocol/sdk";
 
 const ATTACHMENTS_DIR = ".agy-acp/attachments";
 
-export async function promptBlocksToAgyPrompt(blocks: ContentBlock[], cwd: string): Promise<string> {
+export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string): Promise<string> {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {
@@ -34,13 +37,13 @@ export async function promptBlocksToAgyPrompt(blocks: ContentBlock[], cwd: strin
     }
 
     if (block.type === "resource") {
-      parts.push(await resourceBlockToAgyPrompt(block, cwd));
+      parts.push(await resourceBlockToPrompt(block, cwd));
     }
   }
   return parts.join("\n");
 }
 
-export function promptBlocksToText(blocks: ContentBlock[]): string {
+export function contentBlocksToText(blocks: ContentBlock[]): string {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {
@@ -56,7 +59,7 @@ export function promptBlocksToText(blocks: ContentBlock[]): string {
   return parts.join("\n");
 }
 
-async function resourceBlockToAgyPrompt(
+async function resourceBlockToPrompt(
   block: Extract<ContentBlock, { type: "resource" }>,
   cwd: string
 ): Promise<string> {

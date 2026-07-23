@@ -17,7 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         node-version:
-          - "20"
           - "22"
 
     steps:
@@ -42,5 +41,5 @@ jobs:
       - name: Syntax-check published entrypoints
         run: |
           node --check dist/main.js
-          node --check dist/acp-server.js
-          node --check dist/cli.js
+          node --check dist/agent.js
+          node --check dist/agy/cli.js

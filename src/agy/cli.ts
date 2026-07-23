@@ -8,21 +8,21 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
-import { revertEditToolCall } from "./edit-revert.js";
+import { revertEditToolCall } from "../file-system/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
-  type EditFsBridge
-} from "./edit-fs-bridge.js";
+  type ClientFileSystem
+} from "../file-system/bridge.js";
 import {
   canBridgeInteraction,
   interactionKeys,
   isEditToolCall,
   normalizePermissionChoice,
   parseAskQuestion,
-  type AgyPermissionChoice
-} from "./permissions.js";
+  type PermissionChoice
+} from "../tool-calls/permissions.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
@@ -44,7 +44,7 @@ export interface PtyFactory {
 export type PermissionCallback = (
   toolCall: SessionUpdate,
   context: { toolName: string }
-) => Promise<AgyPermissionChoice | "cancelled">;
+) => Promise<PermissionChoice | "cancelled">;
 
 export interface SpawnOptions {
   cwd: string;
@@ -58,21 +58,22 @@ export type SpawnFactory = (
 ) => SpawnedProcess;
 
 /** agy execution mode for `--mode` (omit flag when `default`). */
-export type AgyExecutionMode = "default" | "accept-edits" | "plan";
+export type SessionModeId = "default" | "accept-edits" | "plan";
 
-export const AGY_EXECUTION_MODES: readonly AgyExecutionMode[] = [
+export const SESSION_MODE_IDS: readonly SessionModeId[] = [
   "default",
   "accept-edits",
   "plan"
 ] as const;
 
-export function isAgyExecutionMode(value: string): value is AgyExecutionMode {
-  return (AGY_EXECUTION_MODES as readonly string[]).includes(value);
+export function isSessionModeId(value: string): value is SessionModeId {
+  return (SESSION_MODE_IDS as readonly string[]).includes(value);
 }
 
 export interface AgyCliConfig {
   cwd: string;
-  workspaces: string[];
+  /** ACP `additionalDirectories` (extra roots for `agy --add-dir`; excludes cwd). */
+  additionalDirectories: string[];
   agyPath: string;
   /** Value for `--model` (base model slug or display name). */
   model?: string;
@@ -83,7 +84,7 @@ export interface AgyCliConfig {
    * `default` omits the flag (request-review / write confirmation).
    * `accept-edits` and `plan` pass `--mode <value>`.
    */
-  mode: AgyExecutionMode;
+  mode: SessionModeId;
   project?: string;
   printTimeout: string;
   sandbox: boolean;
@@ -101,13 +102,13 @@ export interface AgyCliConfig {
   env?: NodeJS.ProcessEnv;
 }
 
-export interface AgyPromptOutcome {
+export interface PromptOutcome {
   stopReason: "end_turn" | "cancelled";
 }
 
 export interface AgyCliConfigInput {
   cwd: string;
-  workspaces?: string[];
+  additionalDirectories?: string[];
   env?: NodeJS.ProcessEnv;
   argv?: string[];
 }
@@ -187,7 +188,7 @@ export class AgyCliSession {
     this.config.effort = effort;
   }
 
-  setMode(mode: AgyExecutionMode): void {
+  setMode(mode: SessionModeId): void {
     this.config.mode = mode;
   }
 
@@ -228,9 +229,11 @@ export class AgyCliSession {
       command.push("--conversation", this.#conversationId);
     }
 
+    // Pass cwd + additionalDirectories as --add-dir roots (cwd included so agy
+    // treats the workspace the same way the previous workspaces[] list did).
     const seen = new Set<string>();
-    for (const workspace of this.config.workspaces) {
-      const resolved = path.resolve(workspace);
+    for (const root of [this.config.cwd, ...this.config.additionalDirectories]) {
+      const resolved = path.resolve(root);
       if (seen.has(resolved)) {
         continue;
       }
@@ -261,8 +264,8 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission?: PermissionCallback,
-    fsBridge?: EditFsBridge
-  ): Promise<AgyPromptOutcome> {
+    fsBridge?: ClientFileSystem
+  ): Promise<PromptOutcome> {
     if (this.config.interactivePermissions) {
       if (!onPermission) throw new Error("interactive permissions require a permission callback");
       return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge);
@@ -283,8 +286,8 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission: PermissionCallback,
-    fsBridge?: EditFsBridge
-  ): Promise<AgyPromptOutcome> {
+    fsBridge?: ClientFileSystem
+  ): Promise<PromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
@@ -477,7 +480,7 @@ export class AgyCliSession {
     command: string[],
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>
-  ): Promise<AgyPromptOutcome> {
+  ): Promise<PromptOutcome> {
     const [program, ...args] = command;
     this.#cancelled = false;
 
@@ -799,22 +802,22 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const interactiveDisabled = interactiveSetting === "0" || interactiveSetting === "false" || argv.includes("--no-interactive-permissions");
   const interactivePermissions = !skipPermissions && !interactiveDisabled;
 
-  let mode: AgyExecutionMode = "default";
+  let mode: SessionModeId = "default";
   const modeFromEnv = optional(env.AGY_ACP_MODE);
-  if (modeFromEnv && isAgyExecutionMode(modeFromEnv)) {
+  if (modeFromEnv && isSessionModeId(modeFromEnv)) {
     mode = modeFromEnv;
   }
   const modeFlagIdx = argv.indexOf("--mode");
   if (modeFlagIdx >= 0) {
     const modeArg = argv[modeFlagIdx + 1];
-    if (modeArg && isAgyExecutionMode(modeArg)) {
+    if (modeArg && isSessionModeId(modeArg)) {
       mode = modeArg;
     }
   }
 
   return {
     cwd: input.cwd,
-    workspaces: input.workspaces ?? [input.cwd],
+    additionalDirectories: input.additionalDirectories ?? [],
     agyPath: "agy",
     model: undefined,
     effort: undefined,

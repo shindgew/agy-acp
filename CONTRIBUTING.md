@@ -4,7 +4,7 @@ Thanks for improving `agy-acp`.
 
 ## Development Setup
 
-Use Node.js 20 or newer.
+Use Node.js 22 or newer.
 
 ```sh
 npm test
@@ -18,8 +18,8 @@ Run the same checks used by CI before opening a pull request:
 npm run build
 npm test
 node --check dist/main.js
-node --check dist/acp-server.js
-node --check dist/cli.js
+node --check dist/agent.js
+node --check dist/agy/cli.js
 ```
 
 ## Pull Requests

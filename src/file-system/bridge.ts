@@ -1,5 +1,8 @@
-// Route an already-applied edit (no live agy gate) through the ACP client's
-// own fs/read_text_file + fs/write_text_file so its native diff/review UI
+// ACP File System: route completed edits through client fs/read_text_file +
+// fs/write_text_file so the editor's native review UI owns the change.
+// Docs: https://agentclientprotocol.com/protocol/v1/file-system
+//
+// Used when there is no live agy gate (or after one), so Zed's review panel
 // (e.g. Zed's Review Changes panel, populated via its own buffer/action-log
 // tracking) owns the change instead of agy-acp's local permission-bridge
 // modal. See acp_thread.rs::write_text_file: Zed diffs the write's content
@@ -9,9 +12,9 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { diffBlocks } from "./edit-revert.js";
+import { diffBlocks } from "./revert.js";
 
-export interface EditFsBridge {
+export interface ClientFileSystem {
   readTextFile(path: string): Promise<void>;
   writeTextFile(path: string, content: string): Promise<void>;
 }
@@ -23,7 +26,7 @@ export interface EditFsBridge {
  * rejected the write-through, so the caller can fall back to the local
  * permission-bridge review.
  */
-export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: EditFsBridge): Promise<boolean> {
+export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<boolean> {
   const blocks = diffBlocks(toolCall);
   if (blocks.length === 0) return false;
 
@@ -72,7 +75,7 @@ export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: Ed
  * are swallowed, since a missed prime just means the later write-through
  * won't produce a clean diff and the caller falls back silently.
  */
-export async function primeEditReadThroughClient(toolCall: SessionUpdate, bridge: EditFsBridge): Promise<void> {
+export async function primeEditReadThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<void> {
   const paths = new Set(diffBlocks(toolCall).map((block) => block.path));
   for (const path of paths) {
     try {
@@ -88,7 +91,7 @@ export async function primeEditReadThroughClient(toolCall: SessionUpdate, bridge
  * the pre-edit state was primed via {@link primeEditReadThroughClient} —
  * no local revert needed, since disk was never touched by us in between.
  */
-export async function writeEditThroughClient(toolCall: SessionUpdate, bridge: EditFsBridge): Promise<boolean> {
+export async function writeEditThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<boolean> {
   const paths = new Set(diffBlocks(toolCall).map((block) => block.path));
   if (paths.size === 0) return false;
   try {

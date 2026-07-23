@@ -1,7 +1,6 @@
-// Persists ACP session bindings (which agy conversation a session is bound to,
-// and the caller's last config choices) across server restarts, so
-// `session/load`, `session/resume`, and `session/list` can reconstruct a
-// session after the ACP client reconnects.
+// ACP Session Setup / List: persist bindings for session/load, session/resume,
+// and session/list across server restarts.
+// Docs: https://agentclientprotocol.com/protocol/v1/session-setup
 //
 // Writes are serialized through an in-process promise chain (so concurrent
 // persists can't clobber each other) and committed atomically via temp-file +
@@ -22,9 +21,11 @@ export function defaultStateDir(env: NodeJS.ProcessEnv): string {
   return optional(env.AGY_ACP_STATE_DIR) ?? path.join(os.homedir(), ".agy-acp-state");
 }
 
+/** Persisted ACP session binding (fields aligned with session config + setup). */
 export interface StoredSession {
   cwd: string;
-  workspaces: string[];
+  /** ACP `additionalDirectories` (does not include `cwd`). */
+  additionalDirectories: string[];
   conversationId: string | null;
   lastStepIdx: number;
   /** Matches ACP config option `model` (base slug for agy --model). */
@@ -103,21 +104,28 @@ export class SessionStore {
 /** Legacy disk keys from older agy-acp builds. */
 type LegacyStoredSession = Partial<StoredSession> & {
   modelId?: string;
+  /** Pre-ACP rename of `reasoningEffort`. */
   reasoningEffect?: string;
+  /** Pre-ACP rename: used to store `[cwd, ...additionalDirectories]`. */
+  workspaces?: string[];
 };
 
-/** Map legacy disk keys (`modelId`, `reasoningEffect`) to current field names. */
+/** Map legacy disk keys to current ACP-aligned field names. */
 function normalizeStoredSession(raw: LegacyStoredSession): StoredSession {
-  const { modelId, reasoningEffect, ...rest } = raw;
+  const cwd = raw.cwd ?? "";
+  const additionalDirectories =
+    raw.additionalDirectories ??
+    (Array.isArray(raw.workspaces) ? raw.workspaces.filter((w) => w !== cwd) : []);
+
   return {
-    cwd: rest.cwd ?? "",
-    workspaces: rest.workspaces ?? [],
-    conversationId: rest.conversationId ?? null,
-    lastStepIdx: rest.lastStepIdx ?? -1,
-    model: rest.model ?? modelId ?? "",
-    reasoningEffort: rest.reasoningEffort ?? reasoningEffect ?? "",
-    mode: rest.mode,
-    updatedAt: rest.updatedAt ?? new Date(0).toISOString()
+    cwd,
+    additionalDirectories,
+    conversationId: raw.conversationId ?? null,
+    lastStepIdx: raw.lastStepIdx ?? -1,
+    model: raw.model ?? raw.modelId ?? "",
+    reasoningEffort: raw.reasoningEffort ?? raw.reasoningEffect ?? "",
+    mode: raw.mode,
+    updatedAt: raw.updatedAt ?? new Date(0).toISOString()
   };
 }
 

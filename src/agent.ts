@@ -1,17 +1,27 @@
+// ACP Agent: dual v1 / draft-v2 agent methods (initialize, session/*, prompt loop).
+// Section helpers live under folders named after ACP docs slugs
+// (content/, session/, slash-commands/, tool-calls/, file-system/, agent-plan/).
+// Backend (agy CLI + conversation DB) lives under agy/.
+
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { Readable, Writable } from "node:stream";
 import * as v1 from "@agentclientprotocol/sdk";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
+import { RequestError } from "@agentclientprotocol/sdk";
 import type {
   AgentContext as V1AgentContext,
   AgentApp as V1AgentApp,
+  AuthenticateRequest,
+  AuthenticateResponse,
   CloseSessionRequest,
   CloseSessionResponse,
   InitializeRequest as V1InitializeRequest,
   InitializeResponse as V1InitializeResponse,
   LoadSessionRequest,
   LoadSessionResponse,
+  LogoutRequest,
+  LogoutResponse,
   NewSessionRequest as V1NewSessionRequest,
   NewSessionResponse as V1NewSessionResponse,
   PromptRequest as V1PromptRequest,
@@ -32,6 +42,10 @@ import type {
   InitializeResponse as V2InitializeResponse,
   ListSessionsRequest,
   ListSessionsResponse,
+  LoginAuthRequest,
+  LoginAuthResponse,
+  LogoutAuthRequest,
+  LogoutAuthResponse,
   NewSessionRequest as V2NewSessionRequest,
   NewSessionResponse as V2NewSessionResponse,
   PromptRequest as V2PromptRequest,
@@ -42,31 +56,38 @@ import type {
   SetSessionConfigOptionRequest as V2SetSessionConfigOptionRequest,
   SetSessionConfigOptionResponse as V2SetSessionConfigOptionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
-import { ReplayCache } from "./db/replay.js";
-import type { EditFsBridge } from "./edit-fs-bridge.js";
-import { ensureAgyInstalled } from "./installer.js";
+import { ReplayCache } from "./agy/db/replay.js";
+import type { ClientFileSystem } from "./file-system/bridge.js";
+import { ensureAgyInstalled } from "./agy/installer.js";
+import {
+  AUTH_METHOD_TERMINAL_LOGIN,
+  isAgyAuthenticated,
+  isKnownAuthMethodId,
+  logoutAgyViaSlashCommand,
+  v1AuthMethods,
+  v2AuthMethods
+} from "./agy/auth.js";
 import {
   AgyCliBackend,
-  AGY_EXECUTION_MODES,
+  SESSION_MODE_IDS,
   configFromEnv,
-  isAgyExecutionMode,
+  isSessionModeId,
   type AgyCliConfig,
   type AgyCliSession,
-  type AgyExecutionMode,
+  type SessionModeId,
   type PtyFactory,
   type SpawnFactory
-} from "./cli.js";
-import { permissionOptions, type AgyPermissionChoice } from "./permissions.js";
-import { promptBlocksToAgyPrompt } from "./prompt-content.js";
-import { defaultStateDir, SessionStore, type StoredSession } from "./session-store.js";
-import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session-updates.js";
-
-/** Prefer re-exporting stable v1 symbols used by existing tests and consumers. */
-export const methods = v1.methods;
-export const PROTOCOL_VERSION = v1.PROTOCOL_VERSION;
-export type SessionConfigOption = V1SessionConfigOption;
-export type AgentApp = V1AgentApp;
-export type AgentContext = V1AgentContext;
+} from "./agy/cli.js";
+import { permissionOptions, type PermissionChoice } from "./tool-calls/permissions.js";
+import { contentBlocksToPrompt } from "./content/index.js";
+import { defaultStateDir, SessionStore, type StoredSession } from "./session/store.js";
+import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "./session/updates.js";
+import {
+  availableCommandsUpdate,
+  interpretSlashCommand,
+  parseSlashCommand,
+  resolveModelValue
+} from "./slash-commands/index.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../package.json") as { version?: string };
@@ -88,9 +109,9 @@ const REPLAY_CACHE_CAPACITY = 32;
 interface ModelCatalog {
   readonly entries: readonly string[];
   baseModels(): string[];
-  effectsFor(baseModel: string): string[];
-  resolve(baseModel: string, reasoningEffect: string): string;
-  split(fullModel: string): { base: string; reasoningEffect?: string };
+  effortsFor(baseModel: string): string[];
+  resolve(baseModel: string, reasoningEffort: string): string;
+  split(fullModel: string): { base: string; reasoningEffort?: string };
   /** Map a legacy agy display name (or base slug) to its ACP model slug, if known. */
   slugForAgyBase(agyBase: string): string | undefined;
   /**
@@ -102,7 +123,7 @@ interface ModelCatalog {
   displayName(slug: string): string;
 }
 
-export interface AgyAcpOptions {
+export interface AcpAgentOptions {
   stdin?: NodeJS.ReadableStream;
   stdout?: NodeJS.WritableStream;
   env?: NodeJS.ProcessEnv;
@@ -112,19 +133,20 @@ export interface AgyAcpOptions {
 }
 
 interface SessionState {
-  id: string;
+  sessionId: string;
   cwd: string;
-  workspaces: string[];
+  /** ACP additionalDirectories (excludes cwd). */
+  additionalDirectories: string[];
   agy: AgyCliSession;
   catalog: ModelCatalog;
   selectedBaseModel: string;
-  selectedReasoningEffect: string;
+  selectedReasoningEffort: string;
   activePrompt: boolean;
   /** Active v2 prompt-turn abort controller, if any. */
   promptAbort?: AbortController;
 }
 
-export class AgyAcpAgent {
+export class AcpAgent {
   readonly #env: NodeJS.ProcessEnv;
   readonly #argv: string[];
   readonly #backend: AgyCliBackend;
@@ -135,7 +157,7 @@ export class AgyAcpAgent {
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
   #clientFs = { readTextFile: false, writeTextFile: false };
 
-  constructor(options: AgyAcpOptions = {}) {
+  constructor(options: AcpAgentOptions = {}) {
     this.#env = options.env ?? process.env;
     this.#argv = options.argv ?? [];
     this.#backend = new AgyCliBackend(options.spawnProcess, options.ptyFactory);
@@ -168,8 +190,12 @@ export class AgyAcpAgent {
           additionalDirectories: {},
           resume: {},
           close: {}
+        },
+        auth: {
+          logout: {}
         }
       },
+      authMethods: v1AuthMethods(),
       agentInfo: {
         name: "agy-acp",
         title: "Google Antigravity CLI",
@@ -196,15 +222,12 @@ export class AgyAcpAgent {
             embeddedContext: {}
           },
           additionalDirectories: {}
-        }
+        },
+        auth: {}
       },
-      authMethods: []
+      // Non-empty authMethods commits the agent to auth/login + auth/logout.
+      authMethods: v2AuthMethods()
     };
-  }
-
-  /** @deprecated Use initializeV1 — kept for tests that call initialize directly. */
-  async initialize(params: V1InitializeRequest): Promise<V1InitializeResponse> {
-    return this.initializeV1(params);
   }
 
   private ensureAgyReady(): Promise<string | null> {
@@ -215,13 +238,74 @@ export class AgyAcpAgent {
     return this.#ensureAgyPromise;
   }
 
+  /** Probe config for auth checks (cwd only; no workspace roots required). */
+  private authProbeConfig(cwd = process.cwd()): AgyCliConfig {
+    return configFromEnv({ cwd, env: this.#env, argv: this.#argv });
+  }
+
+  /**
+   * Ensure agy is signed in. Throws ACP `auth_required` when not authenticated.
+   */
+  private async requireAuthenticated(cwd?: string): Promise<void> {
+    await this.ensureAgyReady();
+    const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig(cwd));
+    if (status.ok) return;
+    throw RequestError.authRequired(
+      { authMethods: v1AuthMethods() },
+      status.reason
+    );
+  }
+
+  /**
+   * v1 `authenticate` / v2 `auth/login`: confirm keyring login after terminal auth,
+   * or succeed immediately when already signed in.
+   */
+  async authenticate(params: AuthenticateRequest): Promise<AuthenticateResponse> {
+    await this.ensureAgyReady();
+    if (!isKnownAuthMethodId(params.methodId)) {
+      throw RequestError.invalidParams({ methodId: params.methodId }, `Unknown auth method: ${params.methodId}`);
+    }
+    const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig());
+    if (status.ok) return {};
+    throw RequestError.authRequired(
+      { authMethods: v1AuthMethods() },
+      `${status.reason} Complete terminal login (method "${AUTH_METHOD_TERMINAL_LOGIN}"), then call authenticate again.`
+    );
+  }
+
+  async loginAuth(params: LoginAuthRequest): Promise<LoginAuthResponse> {
+    // v2 uses methodId; same probe semantics as v1 authenticate.
+    return this.authenticate({ methodId: params.methodId });
+  }
+
+  /** v1 `logout` / v2 `auth/logout`: best-effort agy TUI `/logout`. */
+  async logout(_params: LogoutRequest = {}): Promise<LogoutResponse> {
+    await this.ensureAgyReady();
+    const config = this.authProbeConfig();
+    try {
+      await logoutAgyViaSlashCommand({
+        backend: this.#backend,
+        config,
+        ptyFactory: this.#backend.ptyFactory
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw RequestError.internalError(undefined, `agy logout failed: ${message}`);
+    }
+    return {};
+  }
+
+  async logoutAuth(params: LogoutAuthRequest = {}): Promise<LogoutAuthResponse> {
+    return this.logout(params);
+  }
+
   /**
    * When the client advertises `fs.readTextFile` + `fs.writeTextFile`, route
    * already-applied edits through those methods so the client's own
    * diff/review UI (e.g. Zed's Review Changes panel) tracks them. Draft v2
    * has no fs/* client methods, so this is v1-only.
    */
-  private editFsBridgeV1(client: V1AgentContext, sessionId: string): EditFsBridge | undefined {
+  private clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined {
     if (!this.#clientFs.readTextFile || !this.#clientFs.writeTextFile) return undefined;
     return {
       readTextFile: async (path) => {
@@ -233,27 +317,36 @@ export class AgyAcpAgent {
     };
   }
 
-  async newSessionV1(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
+  async newSessionV1(
+    params: V1NewSessionRequest,
+    client?: V1AgentContext
+  ): Promise<V1NewSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const session = await this.createSession(params.cwd, params.additionalDirectories);
+    if (client) {
+      await this.notifyAvailableCommandsV1(client, session.sessionId);
+    }
     return {
-      sessionId: session.id,
+      sessionId: session.sessionId,
       modes: sessionModeState(session.agy.config.mode),
       configOptions: sessionConfigOptionsV1(session)
     };
   }
 
-  async newSessionV2(params: V2NewSessionRequest): Promise<V2NewSessionResponse> {
+  async newSessionV2(
+    params: V2NewSessionRequest,
+    client?: V2AgentContext
+  ): Promise<V2NewSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     // Draft v2 has no native session/set_mode surface; mode is the config option only.
+    if (client) {
+      await this.notifyAvailableCommandsV2(client, session.sessionId);
+    }
     return {
-      sessionId: session.id,
+      sessionId: session.sessionId,
       configOptions: sessionConfigOptionsV2(session)
     };
-  }
-
-  /** @deprecated Prefer newSessionV1. */
-  async newSession(params: V1NewSessionRequest): Promise<V1NewSessionResponse> {
-    return this.newSessionV1(params);
   }
 
   async listSessions(params: ListSessionsRequest = {}): Promise<ListSessionsResponse> {
@@ -262,7 +355,7 @@ export class AgyAcpAgent {
       sessions: listed.map((entry) => ({
         sessionId: entry.sessionId,
         cwd: entry.cwd,
-        additionalDirectories: entry.workspaces.filter((w) => w !== entry.cwd),
+        additionalDirectories: entry.additionalDirectories,
         updatedAt: entry.updatedAt
       }))
     };
@@ -273,6 +366,7 @@ export class AgyAcpAgent {
    * agy conversation history (if bound to one) before returning.
    */
   async loadSession(params: LoadSessionRequest, client: V1AgentContext): Promise<LoadSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session, cwd, stored } = await this.reloadSession(
       params.sessionId,
       params.cwd,
@@ -288,6 +382,8 @@ export class AgyAcpAgent {
       });
     }
 
+    await this.notifyAvailableCommandsV1(client, params.sessionId);
+
     return {
       modes: sessionModeState(session.agy.config.mode),
       configOptions: sessionConfigOptionsV1(session)
@@ -295,17 +391,19 @@ export class AgyAcpAgent {
   }
 
   /** v1 `session/resume`: reattach without replaying history. */
-  async resumeSessionV1(params: V1ResumeSessionRequest): Promise<V1ResumeSessionResponse> {
+  async resumeSessionV1(
+    params: V1ResumeSessionRequest,
+    client?: V1AgentContext
+  ): Promise<V1ResumeSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
+    if (client) {
+      await this.notifyAvailableCommandsV1(client, params.sessionId);
+    }
     return {
       modes: sessionModeState(session.agy.config.mode),
       configOptions: sessionConfigOptionsV1(session)
     };
-  }
-
-  /** @deprecated Prefer resumeSessionV1. */
-  async resumeSession(params: V1ResumeSessionRequest): Promise<V1ResumeSessionResponse> {
-    return this.resumeSessionV1(params);
   }
 
   /**
@@ -316,6 +414,7 @@ export class AgyAcpAgent {
     params: V2ResumeSessionRequest,
     client: V2AgentContext
   ): Promise<V2ResumeSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session, cwd, stored } = await this.reloadSession(
       params.sessionId,
       params.cwd,
@@ -338,6 +437,8 @@ export class AgyAcpAgent {
         });
       }
     }
+
+    await this.notifyAvailableCommandsV2(client, params.sessionId);
 
     return { configOptions: sessionConfigOptionsV2(session) };
   }
@@ -369,14 +470,6 @@ export class AgyAcpAgent {
     return { configOptions: sessionConfigOptionsV2(this.requireSession(params.sessionId)) };
   }
 
-  /** @deprecated Prefer setConfigOptionV1. */
-  async setConfigOption(
-    params: V1SetSessionConfigOptionRequest,
-    client?: V1AgentContext
-  ): Promise<V1SetSessionConfigOptionResponse> {
-    return this.setConfigOptionV1(params, client);
-  }
-
   /**
    * v1 `session/set_mode`: mirrors the `mode` config option onto agy `--mode`.
    * Pushes `config_option_update` so clients that only watch config options stay
@@ -402,7 +495,7 @@ export class AgyAcpAgent {
   private async notifyCurrentModeUpdate(
     client: V1AgentContext,
     sessionId: string,
-    mode: AgyExecutionMode
+    mode: SessionModeId
   ): Promise<void> {
     await client.notify(v1.methods.client.session.update, {
       sessionId,
@@ -427,7 +520,80 @@ export class AgyAcpAgent {
     });
   }
 
+  private async notifyAvailableCommandsV1(client: V1AgentContext, sessionId: string): Promise<void> {
+    await client.notify(v1.methods.client.session.update, {
+      sessionId,
+      update: sessionUpdateToV1(availableCommandsUpdate())
+    });
+  }
 
+  private async notifyAvailableCommandsV2(client: V2AgentContext, sessionId: string): Promise<void> {
+    await client.notify(v2.methods.client.session.update, {
+      sessionId,
+      update: sessionUpdateToV2(availableCommandsUpdate())
+    });
+  }
+
+  private async notifyConfigOptionUpdateV2(
+    client: V2AgentContext,
+    sessionId: string,
+    session: SessionState
+  ): Promise<void> {
+    await client.notify(v2.methods.client.session.update, {
+      sessionId,
+      update: {
+        sessionUpdate: "config_option_update",
+        configOptions: sessionConfigOptionsV2(session)
+      }
+    });
+  }
+
+  /**
+   * Honor curated ACP slash commands that map onto session config (mode / model /
+   * reasoningEffort). Returns true when the prompt was fully handled without
+   * spawning agy. Unknown or non-slash prompts return false (pass through).
+   */
+  private async applyCuratedSlashCommand(
+    sessionId: string,
+    promptText: string,
+    notify: {
+      modeChanged?: (mode: SessionModeId) => Promise<void>;
+      configChanged: () => Promise<void>;
+    }
+  ): Promise<boolean> {
+    const parsed = parseSlashCommand(promptText);
+    if (!parsed) return false;
+
+    const result = interpretSlashCommand(parsed);
+    if (result.kind === "pass") return false;
+    if (result.kind === "error") {
+      throw new Error(result.message);
+    }
+
+    const session = this.requireSession(sessionId);
+    let value = result.value;
+    if (result.configId === MODEL_CONFIG_ID) {
+      const resolved = resolveModelValue(value, session.catalog);
+      if (!resolved) {
+        throw new Error(`Unknown model: ${value}`);
+      }
+      value = resolved;
+    }
+
+    const previousMode = session.agy.config.mode;
+    await this.applyConfigOption(sessionId, result.configId, value);
+    const after = this.requireSession(sessionId);
+
+    if (
+      result.configId === MODE_CONFIG_ID &&
+      after.agy.config.mode !== previousMode &&
+      notify.modeChanged
+    ) {
+      await notify.modeChanged(after.agy.config.mode);
+    }
+    await notify.configChanged();
+    return true;
+  }
 
   /**
    * v1 prompt lifecycle: response carries stopReason after the full turn.
@@ -442,7 +608,23 @@ export class AgyAcpAgent {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
 
-    const prompt = await promptBlocksToAgyPrompt(params.prompt, session.cwd);
+    const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
+
+    // Curated slash commands → config options; do not spawn agy for those.
+    const handled = await this.applyCuratedSlashCommand(params.sessionId, prompt, {
+      modeChanged: (mode) => this.notifyCurrentModeUpdate(client, params.sessionId, mode),
+      configChanged: async () => {
+        await this.notifyConfigOptionUpdateV1(
+          client,
+          params.sessionId,
+          this.requireSession(params.sessionId)
+        );
+      }
+    });
+    if (handled) {
+      return { stopReason: signal?.aborted ? "cancelled" : "end_turn" };
+    }
+
     session.activePrompt = true;
     const cancelPrompt = () => {
       session.agy.cancel().catch(() => {
@@ -466,7 +648,7 @@ export class AgyAcpAgent {
           options: permissionOptions(toolCall, toolName)
         }), signal);
         return selectedPermission(response, signal);
-      }, this.editFsBridgeV1(client, params.sessionId));
+      }, this.clientFileSystemV1(client, params.sessionId));
       await this.persistSession(params.sessionId, session);
       return {
         stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
@@ -494,7 +676,7 @@ export class AgyAcpAgent {
     }
 
     // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
-    const promptText = await promptBlocksToAgyPrompt(params.prompt as v1.ContentBlock[], session.cwd);
+    const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
     session.activePrompt = true;
     const controller = new AbortController();
     session.promptAbort = controller;
@@ -520,15 +702,6 @@ export class AgyAcpAgent {
     return {};
   }
 
-  /** @deprecated Prefer promptV1. */
-  async prompt(
-    params: V1PromptRequest,
-    client: V1AgentContext,
-    signal?: AbortSignal
-  ): Promise<V1PromptResponse> {
-    return this.promptV1(params, client, signal);
-  }
-
   async cancel(params: { sessionId: string }): Promise<void> {
     const session = this.#sessions.get(params.sessionId);
     session?.promptAbort?.abort();
@@ -548,21 +721,20 @@ export class AgyAcpAgent {
     requestedDirs: string[] | undefined
   ): Promise<SessionState> {
     const cwd = requestedCwd || process.cwd();
-    const additionalDirectories = requestedDirs ?? [];
-    const workspaces = dedupe([cwd, ...additionalDirectories]);
-    const id = randomUUID();
-    const session = await this.buildSession(cwd, workspaces, null);
-    session.id = id;
-    this.#sessions.set(id, session);
-    await this.persistSession(id, session);
+    const additionalDirectories = dedupe(requestedDirs ?? []);
+    const sessionId = randomUUID();
+    const session = await this.buildSession(cwd, additionalDirectories, null);
+    session.sessionId = sessionId;
+    this.#sessions.set(sessionId, session);
+    await this.persistSession(sessionId, session);
     return session;
   }
 
   private async applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
     const session = this.requireSession(sessionId);
     if (configId === MODE_CONFIG_ID) {
-      if (typeof value !== "string" || !isAgyExecutionMode(value)) {
-        throw new Error(`Mode must be one of: ${AGY_EXECUTION_MODES.join(", ")}`);
+      if (typeof value !== "string" || !isSessionModeId(value)) {
+        throw new Error(`Mode must be one of: ${SESSION_MODE_IDS.join(", ")}`);
       }
       session.agy.setMode(value);
       await this.persistSession(sessionId, session);
@@ -578,11 +750,11 @@ export class AgyAcpAgent {
       }
 
       session.selectedBaseModel = value;
-      session.selectedReasoningEffect = defaultReasoningEffectForBase(value, session.catalog);
+      session.selectedReasoningEffort = defaultReasoningEffortForBase(value, session.catalog);
       applyModelSelection(
         session.agy,
         session.selectedBaseModel,
-        session.selectedReasoningEffect,
+        session.selectedReasoningEffort,
         session.catalog
       );
       await this.persistSession(sessionId, session);
@@ -593,16 +765,16 @@ export class AgyAcpAgent {
       if (typeof value !== "string") {
         throw new Error("reasoningEffort config value must be a string");
       }
-      const allowedEffects = reasoningEffectValues(session.selectedBaseModel, session.catalog);
-      if (!allowedEffects.includes(value)) {
+      const allowedEfforts = reasoningEffortValues(session.selectedBaseModel, session.catalog);
+      if (!allowedEfforts.includes(value)) {
         throw new Error(`Unknown reasoningEffort: ${value}`);
       }
 
-      session.selectedReasoningEffect = value;
+      session.selectedReasoningEffort = value;
       applyModelSelection(
         session.agy,
         session.selectedBaseModel,
-        session.selectedReasoningEffect,
+        session.selectedReasoningEffort,
         session.catalog
       );
       await this.persistSession(sessionId, session);
@@ -657,6 +829,21 @@ export class AgyAcpAgent {
 
       signal.throwIfAborted();
       await notify({ sessionUpdate: "state_update", state: "running" });
+
+      // Curated slash commands → config options (no agy spawn).
+      const slashHandled = await this.applyCuratedSlashCommand(params.sessionId, promptText, {
+        configChanged: async () => {
+          await this.notifyConfigOptionUpdateV2(client, params.sessionId, this.requireSession(params.sessionId));
+        }
+      });
+      if (slashHandled) {
+        await notify({
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: signal.aborted ? "cancelled" : "end_turn"
+        });
+        return;
+      }
 
       const cancelPrompt = () => {
         session.agy.cancel().catch(() => {});
@@ -733,10 +920,13 @@ export class AgyAcpAgent {
     }
   }
 
-  /** Build a fresh session bound to `cwd`/`workspaces`, optionally resuming an
-   *  agy conversation and a caller's prior model/mode selection. */
-  private async buildSession(cwd: string, workspaces: string[], stored: StoredSession | null): Promise<SessionState> {
-    const config = configFromEnv({ cwd, workspaces, env: this.#env, argv: this.#argv });
+  /** Build a fresh session bound to `cwd` + ACP `additionalDirectories`. */
+  private async buildSession(
+    cwd: string,
+    additionalDirectories: string[],
+    stored: StoredSession | null
+  ): Promise<SessionState> {
+    const config = configFromEnv({ cwd, additionalDirectories, env: this.#env, argv: this.#argv });
     const modelOptions = await this.modelOptionsForConfig(config);
     const catalog = buildModelCatalog(modelOptions);
     const agy = await this.#backend.startSession(config);
@@ -748,19 +938,19 @@ export class AgyAcpAgent {
     const selection = stored
       ? restoredModelSelection(stored, catalog)
       : initialModelSelection(config.model, catalog);
-    applyModelSelection(agy, selection.baseModel, selection.reasoningEffect, catalog);
-    if (stored?.mode && isAgyExecutionMode(stored.mode)) {
+    applyModelSelection(agy, selection.baseModel, selection.reasoningEffort, catalog);
+    if (stored?.mode && isSessionModeId(stored.mode)) {
       agy.setMode(stored.mode);
     }
 
     return {
-      id: "", // set by the caller once the ACP session id is known
+      sessionId: "", // set by the caller once the ACP session id is known
       cwd,
-      workspaces,
+      additionalDirectories,
       agy,
       catalog,
       selectedBaseModel: selection.baseModel,
-      selectedReasoningEffect: selection.reasoningEffect,
+      selectedReasoningEffort: selection.reasoningEffort,
       activePrompt: false
     };
   }
@@ -777,10 +967,12 @@ export class AgyAcpAgent {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     const cwd = requestedCwd || stored.cwd;
-    const workspaces = dedupe([cwd, ...(requestedDirs ?? stored.workspaces.filter((w) => w !== stored.cwd))]);
+    const additionalDirectories = dedupe(
+      requestedDirs ?? stored.additionalDirectories
+    );
 
-    const session = await this.buildSession(cwd, workspaces, stored);
-    session.id = sessionId;
+    const session = await this.buildSession(cwd, additionalDirectories, stored);
+    session.sessionId = sessionId;
     this.#sessions.set(sessionId, session);
     return { session, cwd, stored };
   }
@@ -788,11 +980,11 @@ export class AgyAcpAgent {
   private sessionRecord(session: SessionState): StoredSession {
     return {
       cwd: session.cwd,
-      workspaces: session.workspaces,
+      additionalDirectories: session.additionalDirectories,
       conversationId: session.agy.conversationId,
       lastStepIdx: session.agy.lastStepIdx,
       model: session.selectedBaseModel,
-      reasoningEffort: session.selectedReasoningEffect,
+      reasoningEffort: session.selectedReasoningEffort,
       mode: session.agy.config.mode,
       updatedAt: new Date().toISOString()
     };
@@ -804,51 +996,55 @@ export class AgyAcpAgent {
 }
 
 /** ACP v1 agent app (stable protocol). */
-export function createAgyAcpApp(options: AgyAcpOptions = {}): V1AgentApp {
-  const agy = new AgyAcpAgent(options);
+export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
+  const agent = new AcpAgent(options);
   return v1
     .agent({ name: "agy-acp" })
-    .onRequest(v1.methods.agent.initialize, (ctx) => agy.initializeV1(ctx.params))
-    .onRequest(v1.methods.agent.session.new, (ctx) => agy.newSessionV1(ctx.params))
-    .onRequest(v1.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
-    .onRequest(v1.methods.agent.session.load, (ctx) => agy.loadSession(ctx.params, ctx.client))
-    .onRequest(v1.methods.agent.session.resume, (ctx) => agy.resumeSessionV1(ctx.params))
-    .onRequest(v1.methods.agent.session.setMode, (ctx) => agy.setSessionMode(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.initialize, (ctx) => agent.initializeV1(ctx.params))
+    .onRequest(v1.methods.agent.authenticate, (ctx) => agent.authenticate(ctx.params))
+    .onRequest(v1.methods.agent.logout, (ctx) => agent.logout(ctx.params))
+    .onRequest(v1.methods.agent.session.new, (ctx) => agent.newSessionV1(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
+    .onRequest(v1.methods.agent.session.load, (ctx) => agent.loadSession(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.resume, (ctx) => agent.resumeSessionV1(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.setMode, (ctx) => agent.setSessionMode(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.setConfigOption, (ctx) =>
-      agy.setConfigOptionV1(ctx.params, ctx.client)
+      agent.setConfigOptionV1(ctx.params, ctx.client)
     )
-    .onRequest(v1.methods.agent.session.prompt, (ctx) => agy.promptV1(ctx.params, ctx.client, ctx.signal))
-    .onRequest(v1.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
-    .onNotification(v1.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
+    .onRequest(v1.methods.agent.session.prompt, (ctx) => agent.promptV1(ctx.params, ctx.client, ctx.signal))
+    .onRequest(v1.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
+    .onNotification(v1.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
 }
 
 /**
  * Experimental draft ACP v2 agent app.
- * Prefer {@link createDualAgyAcpApp} / {@link runAcp} so v1 clients still work.
+ * Prefer {@link createDualAcpApp} / {@link runAcp} so v1 clients still work.
  */
-export function createAgyAcpV2App(options: AgyAcpOptions = {}): V2AgentApp {
-  const agy = new AgyAcpAgent(options);
+export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
+  const agent = new AcpAgent(options);
   return v2
     .agent({ name: "agy-acp" })
-    .onRequest(v2.methods.agent.initialize, (ctx) => agy.initializeV2(ctx.params))
-    .onRequest(v2.methods.agent.session.new, (ctx) => agy.newSessionV2(ctx.params))
-    .onRequest(v2.methods.agent.session.list, (ctx) => agy.listSessions(ctx.params))
-    .onRequest(v2.methods.agent.session.resume, (ctx) => agy.resumeSessionV2(ctx.params, ctx.client))
-    .onRequest(v2.methods.agent.session.setConfigOption, (ctx) => agy.setConfigOptionV2(ctx.params))
-    .onRequest(v2.methods.agent.session.prompt, (ctx) => agy.promptV2(ctx.params, ctx.client))
-    .onRequest(v2.methods.agent.session.close, (ctx) => agy.closeSession(ctx.params))
-    .onNotification(v2.methods.agent.session.cancel, (ctx) => agy.cancel(ctx.params));
+    .onRequest(v2.methods.agent.initialize, (ctx) => agent.initializeV2(ctx.params))
+    .onRequest(v2.methods.agent.auth.login, (ctx) => agent.loginAuth(ctx.params))
+    .onRequest(v2.methods.agent.auth.logout, (ctx) => agent.logoutAuth(ctx.params))
+    .onRequest(v2.methods.agent.session.new, (ctx) => agent.newSessionV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
+    .onRequest(v2.methods.agent.session.resume, (ctx) => agent.resumeSessionV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.setConfigOption, (ctx) => agent.setConfigOptionV2(ctx.params))
+    .onRequest(v2.methods.agent.session.prompt, (ctx) => agent.promptV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
+    .onNotification(v2.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
 }
 
 /**
  * Dual-version agent connector: negotiates ACP v1 or experimental draft v2 from
  * the client's `initialize.protocolVersion`.
  */
-export function createDualAgyAcpApp(options: AgyAcpOptions = {}): v2.AgentProtocolRouter {
-  return v2.agentProtocolRouter().withV1(createAgyAcpApp(options)).withV2(createAgyAcpV2App(options));
+export function createDualAcpApp(options: AcpAgentOptions = {}): v2.AgentProtocolRouter {
+  return v2.agentProtocolRouter().withV1(createAcpApp(options)).withV2(createAcpV2App(options));
 }
 
-export function runAcp(options: AgyAcpOptions = {}) {
+export function runAcp(options: AcpAgentOptions = {}) {
   const stdout = (options.stdout ?? process.stdout) as Writable;
   const stdin = (options.stdin ?? process.stdin) as Readable;
   // v1 ndJsonStream is sufficient: framing is shared; the router peeks initialize.
@@ -856,12 +1052,12 @@ export function runAcp(options: AgyAcpOptions = {}) {
     Writable.toWeb(stdout) as WritableStream<Uint8Array>,
     Readable.toWeb(stdin) as ReadableStream<Uint8Array>
   );
-  return createDualAgyAcpApp(options).connect(stream);
+  return createDualAcpApp(options).connect(stream);
 }
 
-export { promptBlocksToAgyPrompt, promptBlocksToText } from "./prompt-content.js";
+export { contentBlocksToPrompt, contentBlocksToText } from "./content/index.js";
 
-function selectedPermission(response: unknown, signal?: AbortSignal): AgyPermissionChoice | "cancelled" {
+function selectedPermission(response: unknown, signal?: AbortSignal): PermissionChoice | "cancelled" {
   if (signal?.aborted || !response || typeof response !== "object") return "cancelled";
   const outcome = (response as { outcome?: unknown }).outcome;
   if (!outcome || typeof outcome !== "object" || (outcome as { outcome?: string }).outcome !== "selected") return "cancelled";
@@ -914,17 +1110,17 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   const displayNameBySlug = new Map<string, string>();
 
   for (const entry of uniqueEntries) {
-    const { agyBase, base, reasoningEffect, displayBase } = splitModelEntry(entry);
+    const { agyBase, base, reasoningEffort, displayBase } = splitModelEntry(entry);
     if (!effectsByBase.has(base)) {
       baseOrder.push(base);
       effectsByBase.set(base, []);
       agyBaseBySlug.set(base, agyBase);
       displayNameBySlug.set(base, displayBase);
     }
-    if (reasoningEffect) {
+    if (reasoningEffort) {
       const effects = effectsByBase.get(base)!;
-      if (!effects.includes(reasoningEffect)) {
-        effects.push(reasoningEffect);
+      if (!effects.includes(reasoningEffort)) {
+        effects.push(reasoningEffort);
       }
     }
   }
@@ -932,20 +1128,20 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
   return {
     entries: uniqueEntries,
     baseModels: () => baseOrder,
-    effectsFor: (baseModel: string) => effectsByBase.get(baseModel) ?? [],
-    resolve: (baseModel: string, reasoningEffect: string) => {
+    effortsFor: (baseModel: string) => effectsByBase.get(baseModel) ?? [],
+    resolve: (baseModel: string, reasoningEffort: string) => {
       const resolved = uniqueEntries.find((entry) => {
         const parsed = splitModelEntry(entry);
-        return parsed.base === baseModel && parsed.reasoningEffect === reasoningEffect;
+        return parsed.base === baseModel && parsed.reasoningEffort === reasoningEffort;
       });
       if (!resolved) {
-        throw new Error(`Unknown model selection: ${baseModel} (${reasoningEffect})`);
+        throw new Error(`Unknown model selection: ${baseModel} (${reasoningEffort})`);
       }
       return resolved;
     },
     split: (fullModel: string) => {
-      const { base, reasoningEffect } = splitModelEntry(fullModel);
-      return { base, reasoningEffect };
+      const { base, reasoningEffort } = splitModelEntry(fullModel);
+      return { base, reasoningEffort };
     },
     slugForAgyBase: (agyBase: string) => {
       const slug = toModelSlug(agyBase);
@@ -975,7 +1171,7 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
 
 /** Shared labels/descriptions for config option `mode` and native ACP session modes. */
 const AGY_MODE_OPTIONS: ReadonlyArray<{
-  value: AgyExecutionMode;
+  value: SessionModeId;
   name: string;
   description: string;
 }> = [
@@ -997,7 +1193,7 @@ const AGY_MODE_OPTIONS: ReadonlyArray<{
 ];
 
 /** Native ACP session mode state (v1 `modes` on new/load/resume). Same ids as config `mode`. */
-export function sessionModeState(mode: AgyExecutionMode): SessionModeState {
+export function sessionModeState(mode: SessionModeId): SessionModeState {
   return {
     currentModeId: mode,
     availableModes: AGY_MODE_OPTIONS.map((option) => ({
@@ -1008,7 +1204,7 @@ export function sessionModeState(mode: AgyExecutionMode): SessionModeState {
   };
 }
 
-export function modeConfigOption(mode: AgyExecutionMode): V1SessionConfigOption {
+export function modeConfigOption(mode: SessionModeId): V1SessionConfigOption {
   return {
     id: MODE_CONFIG_ID,
     name: "Mode",
@@ -1040,9 +1236,9 @@ export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatal
   };
 }
 
-export function reasoningEffectConfigOption(
+export function reasoningEffortConfigOption(
   selectedBaseModel: string,
-  selectedReasoningEffect: string,
+  selectedReasoningEffort: string,
   catalog: ModelCatalog
 ): V1SessionConfigOption {
   return {
@@ -1051,8 +1247,8 @@ export function reasoningEffectConfigOption(
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
-    currentValue: selectedReasoningEffect,
-    options: reasoningEffectOptions(selectedBaseModel, catalog)
+    currentValue: selectedReasoningEffort,
+    options: reasoningEffortOptions(selectedBaseModel, catalog)
   };
 }
 
@@ -1060,9 +1256,9 @@ function sessionConfigOptionsV1(session: SessionState): V1SessionConfigOption[] 
   return [
     modeConfigOption(session.agy.config.mode),
     modelConfigOption(session.selectedBaseModel, session.catalog),
-    reasoningEffectConfigOption(
+    reasoningEffortConfigOption(
       session.selectedBaseModel,
-      session.selectedReasoningEffect,
+      session.selectedReasoningEffort,
       session.catalog
     )
   ];
@@ -1098,7 +1294,7 @@ function splitModelEntry(model: string): {
   agyBase: string;
   base: string;
   displayBase: string;
-  reasoningEffect?: string;
+  reasoningEffort?: string;
 } {
   const trimmed = model.trim();
 
@@ -1116,7 +1312,7 @@ function splitModelEntry(model: string): {
       agyBase: displayBase,
       base: toModelSlug(displayBase),
       displayBase,
-      reasoningEffect: legacyEffort[1].toLowerCase()
+      reasoningEffort: legacyEffort[1].toLowerCase()
     };
   }
 
@@ -1138,7 +1334,7 @@ function splitModelEntry(model: string): {
       agyBase: base,
       base,
       displayBase: prettifyModelSlug(base),
-      reasoningEffect: slugEffort[2].toLowerCase()
+      reasoningEffort: slugEffort[2].toLowerCase()
     };
   }
 
@@ -1190,11 +1386,11 @@ export function prettifyModelSlug(slug: string): string {
   return merged.join(" ");
 }
 
-function reasoningEffectOptions(
+function reasoningEffortOptions(
   selectedBaseModel: string,
   catalog: ModelCatalog
 ): Extract<V1SessionConfigOption, { type: "select" }>["options"] {
-  const effects = catalog.effectsFor(selectedBaseModel);
+  const effects = catalog.effortsFor(selectedBaseModel);
   if (effects.length === 0) {
     return [
       {
@@ -1206,11 +1402,11 @@ function reasoningEffectOptions(
 
   return effects.map((effect) => ({
     value: effect,
-    name: reasoningEffectDisplayName(effect)
+    name: reasoningEffortDisplayName(effect)
   }));
 }
 
-function reasoningEffectDisplayName(value: string): string {
+function reasoningEffortDisplayName(value: string): string {
   const labels: Record<string, string> = {
     low: "Low",
     medium: "Medium",
@@ -1219,21 +1415,21 @@ function reasoningEffectDisplayName(value: string): string {
   return labels[value] ?? value;
 }
 
-function reasoningEffectValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {
-  return reasoningEffectOptions(selectedBaseModel, catalog)
+function reasoningEffortValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {
+  return reasoningEffortOptions(selectedBaseModel, catalog)
     .map((option) => ("value" in option ? option.value : undefined))
     .filter((value): value is string => value !== undefined);
 }
 
-function defaultReasoningEffectForBase(selectedBaseModel: string, catalog: ModelCatalog): string {
-  const effects = catalog.effectsFor(selectedBaseModel);
+function defaultReasoningEffortForBase(selectedBaseModel: string, catalog: ModelCatalog): string {
+  const effects = catalog.effortsFor(selectedBaseModel);
   return effects[0] ?? NO_REASONING_VALUE;
 }
 
 function initialModelSelection(
   configuredModel: string | undefined,
   catalog: ModelCatalog
-): { baseModel: string; reasoningEffect: string } {
+): { baseModel: string; reasoningEffort: string } {
   if (!configuredModel) {
     const [firstBaseModel] = catalog.baseModels();
     if (!firstBaseModel) {
@@ -1241,23 +1437,23 @@ function initialModelSelection(
     }
     return {
       baseModel: firstBaseModel,
-      reasoningEffect: defaultReasoningEffectForBase(firstBaseModel, catalog)
+      reasoningEffort: defaultReasoningEffortForBase(firstBaseModel, catalog)
     };
   }
 
-  const { base, reasoningEffect } = catalog.split(configuredModel);
-  const effects = catalog.effectsFor(base);
+  const { base, reasoningEffort } = catalog.split(configuredModel);
+  const effects = catalog.effortsFor(base);
   if (effects.length === 0) {
     return {
       baseModel: base,
-      reasoningEffect: NO_REASONING_VALUE
+      reasoningEffort: NO_REASONING_VALUE
     };
   }
 
   return {
     baseModel: base,
-    reasoningEffect: reasoningEffect && effects.includes(reasoningEffect)
-      ? reasoningEffect
+    reasoningEffort: reasoningEffort && effects.includes(reasoningEffort)
+      ? reasoningEffort
       : effects[0]
   };
 }
@@ -1267,18 +1463,18 @@ function initialModelSelection(
 function restoredModelSelection(
   stored: StoredSession,
   catalog: ModelCatalog
-): { baseModel: string; reasoningEffect: string } {
+): { baseModel: string; reasoningEffort: string } {
   const baseModel = normalizeStoredBaseModel(stored.model, catalog);
   if (!baseModel) {
     return initialModelSelection(undefined, catalog);
   }
-  const effects = catalog.effectsFor(baseModel);
+  const effects = catalog.effortsFor(baseModel);
   if (effects.length === 0) {
-    return { baseModel, reasoningEffect: NO_REASONING_VALUE };
+    return { baseModel, reasoningEffort: NO_REASONING_VALUE };
   }
   return {
     baseModel,
-    reasoningEffect: normalizeStoredReasoningEffect(stored.reasoningEffort, effects)
+    reasoningEffort: normalizeStoredReasoningEffort(stored.reasoningEffort, effects)
   };
 }
 
@@ -1289,7 +1485,7 @@ function normalizeStoredBaseModel(modelId: string, catalog: ModelCatalog): strin
   return catalog.slugForAgyBase(modelId);
 }
 
-function normalizeStoredReasoningEffect(storedEffect: string, effects: string[]): string {
+function normalizeStoredReasoningEffort(storedEffect: string, effects: string[]): string {
   if (effects.includes(storedEffect)) {
     return storedEffect;
   }
@@ -1315,22 +1511,22 @@ function normalizeStoredReasoningEffect(storedEffect: string, effects: string[])
 function applyModelSelection(
   agy: AgyCliSession,
   selectedBaseModel: string,
-  selectedReasoningEffect: string,
+  selectedReasoningEffort: string,
   catalog: ModelCatalog
 ): void {
   // agy ≥1.1.5: --model is the base (slug or legacy display base), --effort is separate.
   agy.setModel(catalog.agyBaseName(selectedBaseModel));
 
-  const effects = catalog.effectsFor(selectedBaseModel);
+  const effects = catalog.effortsFor(selectedBaseModel);
   if (effects.length === 0) {
     agy.setEffort(undefined);
     return;
   }
 
-  if (selectedReasoningEffect === NO_REASONING_VALUE || !effects.includes(selectedReasoningEffect)) {
+  if (selectedReasoningEffort === NO_REASONING_VALUE || !effects.includes(selectedReasoningEffort)) {
     agy.setEffort(effects[0]);
     return;
   }
 
-  agy.setEffort(selectedReasoningEffect);
+  agy.setEffort(selectedReasoningEffort);
 }

@@ -1,4 +1,5 @@
-// Map agy brain-plan markdown artifacts onto ACP plan session updates.
+// ACP Agent Plan: map agy brain-plan markdown artifacts onto plan session updates.
+// Docs: https://agentclientprotocol.com/protocol/v1/agent-plan
 //
 // agy does not expose a structured plan control plane — only markdown files
 // under ~/.gemini/antigravity-cli/brain/**. We surface those as:

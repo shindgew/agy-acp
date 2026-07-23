@@ -1,3 +1,6 @@
+// ACP Tool Calls: session/request_permission option menus for agy status-9 tools.
+// Docs: https://agentclientprotocol.com/protocol/v1/tool-calls
+
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
 /**
@@ -5,10 +8,10 @@ import type { SessionUpdate } from "@agentclientprotocol/sdk";
  * Edit tools use standard ACP ids (`allow-once` / `reject-once` / `allow-always`)
  * so clients can map them to native Keep / Reject UI.
  */
-export type AgyPermissionChoice = string;
+export type PermissionChoice = string;
 
-export interface AgyPermissionOption {
-  optionId: AgyPermissionChoice;
+export interface PermissionMenuOption {
+  optionId: PermissionChoice;
   kind: "allow_once" | "allow_always" | "reject_once";
   name: string;
 }
@@ -58,7 +61,7 @@ export function isBridgeableAskQuestion(ask: AskQuestionPayload): boolean {
 }
 
 /** Normalize client-selected option ids (standard ACP or legacy agy-*). */
-export function normalizePermissionChoice(choice: string): AgyPermissionChoice {
+export function normalizePermissionChoice(choice: string): PermissionChoice {
   switch (choice) {
     case "allow-once":
     case "allow_once":
@@ -77,7 +80,7 @@ export function normalizePermissionChoice(choice: string): AgyPermissionChoice {
   }
 }
 
-export function permissionKeys(choice: AgyPermissionChoice): string | null {
+export function permissionKeys(choice: PermissionChoice): string | null {
   const id = normalizePermissionChoice(choice);
   switch (id) {
     case "agy-allow-once": return "\r";
@@ -93,7 +96,7 @@ export function permissionKeys(choice: AgyPermissionChoice): string | null {
  * Returns null when the choice cannot be applied safely.
  */
 export function interactionKeys(
-  choice: AgyPermissionChoice,
+  choice: PermissionChoice,
   toolName: string,
   toolCall?: SessionUpdate
 ): string | null {
@@ -173,7 +176,7 @@ export function parseAskQuestion(toolCall: SessionUpdate): AskQuestionPayload | 
 }
 
 /** Build ACP permission options for the given pending tool interaction. */
-export function permissionOptions(toolCall: SessionUpdate, toolName?: string): AgyPermissionOption[] {
+export function permissionOptions(toolCall: SessionUpdate, toolName?: string): PermissionMenuOption[] {
   if (toolName === "ask_question") {
     return askQuestionOptions(toolCall);
   }
@@ -243,7 +246,7 @@ export function permissionOptions(toolCall: SessionUpdate, toolName?: string): A
  * Clients (Zed, Grok Build as ACP host, etc.) key off `kind` for Keep/Reject UI.
  * @see https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission
  */
-function standardEditPermissionOptions(): AgyPermissionOption[] {
+function standardEditPermissionOptions(): PermissionMenuOption[] {
   return [
     { optionId: "allow-once", kind: "allow_once", name: "Allow" },
     { optionId: "allow-always", kind: "allow_always", name: "Always allow" },
@@ -251,12 +254,12 @@ function standardEditPermissionOptions(): AgyPermissionOption[] {
   ];
 }
 
-function askQuestionOptions(toolCall: SessionUpdate): AgyPermissionOption[] {
+function askQuestionOptions(toolCall: SessionUpdate): PermissionMenuOption[] {
   const ask = parseAskQuestion(toolCall);
   if (!ask || !isBridgeableAskQuestion(ask)) {
     return [{ optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }];
   }
-  const options: AgyPermissionOption[] = ask.options.map((name, index) => ({
+  const options: PermissionMenuOption[] = ask.options.map((name, index) => ({
     optionId: `agy-q-${index}`,
     kind: "allow_once" as const,
     name

@@ -10,7 +10,16 @@ as a full interactive agent.
 Draft ACP v2 tracks the `alpha` dist-tag (`1.0.0-alpha.*`). The wire protocol may
 still change before stabilization — see the
 [ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
-[migration guide](https://agentclientprotocol.com/protocol/v2/migration).
+[Migrating from v1](https://agentclientprotocol.com/protocol/v2/migration).
+
+Protocol surface is tracked against `@agentclientprotocol/sdk` (full
+[v1 schema](https://agentclientprotocol.com/protocol/v1/schema) /
+[v2 schema](https://agentclientprotocol.com/protocol/v2/schema)), not only the
+abbreviated [v1 Overview](https://agentclientprotocol.com/protocol/v1/overview) /
+[v2 Overview](https://agentclientprotocol.com/protocol/v2/overview) pages.
+
+Each checklist item uses **`[method_or_type](link): description`** with ACP wire
+names (e.g. `session/new`, `tool_call_update`).
 
 ---
 
@@ -20,89 +29,73 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 
 ### Done
 
-- [x] `initialize`, `session/new`, `session/prompt`, `session/cancel`, `session/close`
-- [x] `session/load` and `session/resume` with persisted bindings
-- [x] `session/set_config_option` (`mode`, `model`, `reasoningEffort`)
-- [x] Native session modes: `modes` on new/load/resume, `session/set_mode`,
-      `current_mode_update` (ids match config `mode` / `agy --mode`)
-- [x] `config_option_update` when mode changes via `session/set_mode`
-- [x] `additionalDirectories` → `agy --add-dir`
-- [x] Prompt content: text, image, embedded resource, resource link (`audio: false`)
-- [x] Streamed `session/update`: `agent_message_chunk`, `agent_thought_chunk`,
-      `user_message_chunk` (replay), progressive `tool_call` / `tool_call_update`,
-      `session_info_update`
-- [x] Tool kinds, locations, `rawInput` / `rawOutput`, edit content type `diff`
-- [x] `session/list` from the session store
-- [x] Execute tool output when present in the conversation DB (field 28)
-- [x] Decode/show fetch and web-search result bodies when present in the DB
-      (search_web hit lists are not persisted by agy; query metadata only)
-- [x] Full-file write diffs with prior content when known from earlier view/write steps
-- [x] Permission notes map decision varint to granted/denied labels
-- [x] Experimental interactive permission bridge via persistent PTY for the
-      four-choice menu (`run_command` + file tools sharing ToolConfirmationPanel)
-- [x] Agent-driven client `fs/read_text_file` / `fs/write_text_file`: when the
-      client advertises both, every completed edit is routed through them —
-      whether it landed on disk without a live agy gate (accept-edits) or
-      just passed one (default mode, after the live permission prompt) —
-      so the client's own diff/review UI (e.g. Zed's Review Changes panel)
-      tracks it in either mode. Falls back to the local permission bridge
-      if the client lacks the capability or rejects the write-through.
-- [x] Execute tools surface command + captured output as content blocks (v1) and
-      draft-v2 agent-owned `terminal_update` + `type: "terminal"` embeds
-- [x] Structured plan from brain markdown artifacts: classic v1 `plan` entries
-      (list/checkbox parse) and draft-v2 `plan_update` (`markdown` when body is
-      known, else `items`). Status only reflects checkbox markers in the file —
-      no live task progress from agy. `plan_removed` not emitted.
+- [x] [`initialize`](https://agentclientprotocol.com/protocol/v1/initialization): version negotiation, agent info, capabilities
+- [x] [`authMethods`](https://agentclientprotocol.com/protocol/v1/authentication): terminal `agy-login` + agent status methods advertised on initialize
+- [x] [`authenticate`](https://agentclientprotocol.com/protocol/v1/authentication): confirms keyring login after terminal auth or existing session
+- [x] [`logout`](https://agentclientprotocol.com/protocol/v1/authentication#logging-out): best-effort agy TUI `/logout` via PTY; `agentCapabilities.auth.logout`
+- [x] [`auth_required`](https://agentclientprotocol.com/protocol/v1/authentication): returned on session new/load/resume when not signed into Antigravity
+- [x] [`session/new`](https://agentclientprotocol.com/protocol/v1/session-setup): create session with persisted bindings
+- [x] [`session/load`](https://agentclientprotocol.com/protocol/v1/session-setup): restore and replay conversation history
+- [x] [`session/resume`](https://agentclientprotocol.com/rfds/session-resume): reattach without replaying history
+- [x] [`session/close`](https://agentclientprotocol.com/rfds/session-close): close active session
+- [x] [`session/list`](https://agentclientprotocol.com/protocol/v1/session-list): list sessions from the session store
+- [x] [`session/prompt`](https://agentclientprotocol.com/protocol/v1/prompt-turn): send user prompt; full turn response with `stopReason`
+- [x] [`session/cancel`](https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation): interrupt turn (SIGINT then SIGKILL on agy)
+- [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v1/session-config-options): `mode`, `model`, `reasoningEffort` (select only)
+- [x] [`session/set_mode`](https://agentclientprotocol.com/protocol/v1/session-modes): native modes; ids match config `mode` / `agy --mode`
+- [x] [`modes`](https://agentclientprotocol.com/protocol/v1/session-modes): advertised on new/load/resume (`default` / `accept-edits` / `plan`)
+- [x] [`current_mode_update`](https://agentclientprotocol.com/protocol/v1/session-modes): pushed when mode changes
+- [x] [`config_option_update`](https://agentclientprotocol.com/protocol/v1/session-config-options): after `session/set_mode` and curated slash config changes
+- [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): mapped to `agy --add-dir`
+- [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v1/content): prompt text, image, embedded resource, resource link (`audio: false`)
+- [x] [`agent_message_chunk`](https://agentclientprotocol.com/protocol/v1/content): streamed agent text
+- [x] [`agent_thought_chunk`](https://agentclientprotocol.com/protocol/v1/content): streamed thoughts / title narration
+- [x] [`user_message_chunk`](https://agentclientprotocol.com/protocol/v1/content): user message replay
+- [x] [`messageId`](https://agentclientprotocol.com/rfds/message-id): optional on v1 message/thought chunks
+- [x] [`tool_call`](https://agentclientprotocol.com/protocol/v1/tool-calls): first-sight tool call with kinds, locations, `rawInput` / `rawOutput`
+- [x] [`tool_call_update`](https://agentclientprotocol.com/protocol/v1/tool-calls): progressive status/content updates
+- [x] [`diff`](https://agentclientprotocol.com/protocol/v1/schema#diff): edit content type; full-file writes use prior content when known
+- [x] [`session_info_update`](https://agentclientprotocol.com/rfds/session-info-update): titles from the conversation DB
+- [x] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): interactive PTY bridge for `run_command` + file tools
+- [x] [`fs/read_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client read-through when advertised
+- [x] [`fs/write_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client write-through for editor review UI when advertised
+- [x] [`tool_call`](https://agentclientprotocol.com/protocol/v1/tool-calls): execute tools surface command + captured stdout/stderr (DB field 28)
+- [x] [`plan`](https://agentclientprotocol.com/protocol/v1/agent-plan): classic plan entries from brain markdown (checkbox status only)
+- [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands): curated `mode` / `plan` / `model` / `effort` (config intercept, not agy TUI panels)
 
 ### High priority
 
-These need more than conversation-DB polling (interactive agy control plane or
-client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
+Need interactive agy control plane or client terminal protocol beyond DB polling:
 
-- [ ] Expand interactive `session/request_permission` (multi-select /
-      multi-question `ask_question`, remaining status-9 tools;
-      unsupported status-9 interactions currently fail closed)
-- [ ] v1 client-executed `terminal/*` (`terminal/create` runs a command in the
-      editor). Blocked while agy owns the shell — re-running would double-execute.
-      v1 keeps content blocks; draft v2 uses agent-owned terminals (see below).
-- [ ] ACP elicitation for free-text / multi-select `ask_question` (single-select
-      MCQ already uses `session/request_permission`)
-- [ ] MCP: honor `session/new` `mcpServers` and advertise real `mcpCapabilities`
-      (today: all MCP caps are `false` and servers are ignored)
+- [ ] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): expand for multi-select / multi-question `ask_question` and remaining status-9 tools (unsupported paths fail closed)
+- [ ] [`terminal/create`](https://agentclientprotocol.com/protocol/v1/terminals): client-executed terminal suite (`output` / `release` / `wait_for_exit` / `kill` too) — blocked while agy owns the shell
+- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ already uses `session/request_permission`
+- [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor on `session/new`, real `mcpCapabilities`, route `mcp/message` · `mcp/connect` · `mcp/disconnect` when agy can consume external servers
 
 ### Medium priority
 
-- [ ] Optional `session/delete` from the session store
-- [ ] `session/fork` if/when useful for clients
-- [x] Native ACP session modes (`session/set_mode`, `modes`, `current_mode_update`)
-      in addition to the `mode` config option that already maps to `agy --mode`
-      (same three ids: `default` / `accept-edits` / `plan`). Draft v2 has no
-      `set_mode` surface — mode stays a config option there.
-- [ ] `available_commands_update` for slash-command discovery in the client UI
-- [x] Push `config_option_update` when options change outside `set_config_option`
-      (v1: after `session/set_mode`; `set_config_option` still returns the full
-      list in its response and pushes `current_mode_update` when mode changes)
-- [ ] `authenticate` / `logout` / `authMethods` (today: require a pre-logged-in `agy`)
-- [ ] `usage_update` and prompt-response `usage` when token data is available
-- [ ] Richer `stopReason` values (`max_tokens`, `refusal`, `max_turn_requests`) when
-      agy exposes them (today: `end_turn` or `cancelled`)
+- [ ] [`session/delete`](https://agentclientprotocol.com/protocol/v1/session-delete): optional delete from the session store
+- [ ] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): fork when useful for clients
+- [ ] [`usage_update`](https://agentclientprotocol.com/rfds/session-usage): when token/usage data is available from agy
+- [ ] [`usage`](https://agentclientprotocol.com/rfds/end-turn-token-usage): prompt-response field when available
+- [ ] [`stopReason`](https://agentclientprotocol.com/protocol/v1/prompt-turn#stop-reasons): richer values (`max_tokens`, `refusal`, `max_turn_requests`) when agy exposes them (today: `end_turn` or `cancelled`)
+- [ ] [`$/cancel_request`](https://agentclientprotocol.com/protocol/v1/cancellation): confirm SDK handling is enough; add explicit propagation only if clients need more
 
 ### Fidelity improvements
 
-- [x] Surface command stdout/stderr on execute tool calls when present in the DB
-- [x] Decode/show fetch and web-search result bodies (not just URL / title)
-- [x] Better diffs for full-file writes when prior content is knowable
-- [x] Map permission decisions into granted/denied labels (not interactive outcomes)
-- [ ] Agent-outbound images / richer content blocks when agy produces them
+- [ ] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind` (unstable)
+- [ ] [`ContentBlock`](https://agentclientprotocol.com/protocol/v1/content): agent-outbound images / richer blocks when agy produces them
+- [ ] [`plan_update`](https://agentclientprotocol.com/rfds/plan-operations): unstable id-based plan ops (+ `plan_removed`) if a client prefers that over classic `plan`
 
 ### Lower priority / unstable ACP
 
 Usually skip unless a client needs them for this wrapper:
 
-- [ ] `providers/*` (LLM provider routing UI)
-- [ ] `nes/*` (next-edit suggestions)
-- [ ] `document/*` (editor document sync)
-- [ ] Non-stdio transports (HTTP / WebSocket) — stdio NDJSON is intentional for Zed
+- [ ] [`providers/list`](https://agentclientprotocol.com/rfds/custom-llm-endpoint): LLM provider routing (`providers/set`, `providers/disable` too)
+- [ ] [`nes/start`](https://agentclientprotocol.com/rfds/next-edit-suggestions): next-edit suggestions (`suggest` / `accept` / `reject` / `close` too)
+- [ ] [`document/didOpen`](https://agentclientprotocol.com/rfds/next-edit-suggestions): editor document sync (`didChange` / `didClose` / `didSave` / `didFocus`)
+- [ ] [`positionEncoding`](https://agentclientprotocol.com/protocol/v1/schema): capability mainly for nes/document
+- [ ] [Transports](https://agentclientprotocol.com/protocol/v1/transports): non-stdio HTTP / WebSocket ([streamable transport RFD](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)); stdio NDJSON is intentional for Zed
 
 ---
 
@@ -116,82 +109,68 @@ differs or is incomplete.
 
 ### Done
 
-- [x] Dual-protocol router: negotiate v1 vs draft v2 from `initialize.protocolVersion`
-- [x] Role-agnostic `info` / `capabilities` on `initialize` (no `agentInfo` /
-      `agentCapabilities` split)
-- [x] Baseline session methods: `session/new`, `session/list`, `session/resume`,
-      `session/close`, `session/prompt`, `session/cancel`, `session/update`
-- [x] `session/set_config_option` with `configId` (v1 still uses `id`) for
-      `mode`, `model`, `reasoningEffort`
-- [x] Prompt lifecycle: accept with `{}` immediately; progress via
-      `state_update` (`running` / `idle` + `stopReason`)
-- [x] User-message ack: `user_message` update with agent-owned `messageId`
-- [x] Required `messageId` on `agent_message_chunk` / `agent_thought_chunk` /
-      `user_message_chunk`
-- [x] `session/resume` with optional `replayFrom: { "type": "start" }` (replaces
-      v1 `session/load`; omit `replayFrom` to reattach without replay)
-- [x] Collapse first-sight `tool_call` → v2 `tool_call_update` (upsert shape)
-- [x] Structured diff content: `changes[]` + optional `git_patch` patch block
-- [x] Tool status `cancelled` preserved for v2 (mapped to `failed` for v1)
-- [x] `session/request_permission` with v2 `subject: { type: "tool_call", … }`
-      + `title` (same interactive bridge as v1)
-- [x] Prompt caps advertised: `image`, `embeddedContext`;
-      `additionalDirectories` capability
-- [x] Agent-owned `terminal_update` for execute tools (command / cwd / output
-      snapshot / exitStatus) plus `type: "terminal"` tool content embed.
-      Output is DB field-28 snapshots (and progressive tool updates), not a
-      live client PTY byte stream.
-- [x] `plan_update` for brain plan artifacts (`type: "markdown"` preferred;
-      `type: "items"` fallback). No `plan_removed` (agy does not delete plans).
+- [x] [`initialize`](https://agentclientprotocol.com/protocol/v2/initialization): dual-protocol router from `protocolVersion`; role-agnostic `info` / `capabilities` ([migration](https://agentclientprotocol.com/protocol/v2/migration))
+- [x] [`authMethods`](https://agentclientprotocol.com/protocol/v2/authentication): non-empty list (terminal + agent status)
+- [x] [`auth/login`](https://agentclientprotocol.com/protocol/v2/authentication): same probe semantics as v1 `authenticate`
+- [x] [`auth/logout`](https://agentclientprotocol.com/protocol/v2/authentication): same PTY `/logout` as v1 `logout`
+- [x] [`session/new`](https://agentclientprotocol.com/protocol/v2/session-setup): create session
+- [x] [`session/list`](https://agentclientprotocol.com/protocol/v2/session-list): list sessions
+- [x] [`session/resume`](https://agentclientprotocol.com/protocol/v2/session-setup): optional `replayFrom: { "type": "start" }` ([replay RFD](https://agentclientprotocol.com/rfds/v2/session-resume-replay))
+- [x] [`session/close`](https://agentclientprotocol.com/protocol/v2/session-setup): close session
+- [x] [`session/prompt`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): accept with `{}` immediately
+- [x] [`session/cancel`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): interrupt turn
+- [x] [`session/update`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): progress notifications
+- [x] [`state_update`](https://agentclientprotocol.com/protocol/v2/schema#stateupdate): `running` / `idle` + `stopReason`
+- [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v2/session-config-options): `configId` for `mode`, `model`, `reasoningEffort`
+- [x] [`config_option_update`](https://agentclientprotocol.com/protocol/v2/session-config-options): when options change outside `set_config_option`
+- [x] [`user_message`](https://agentclientprotocol.com/rfds/v2/message-updates): ack with agent-owned `messageId`
+- [x] [`messageId`](https://agentclientprotocol.com/rfds/message-id): required on `agent_message_chunk` / `agent_thought_chunk` / `user_message_chunk`
+- [x] [`tool_call_update`](https://agentclientprotocol.com/rfds/v2/tool-call-updates): upsert shape (first-sight collapsed from v1 `tool_call`); `cancelled` preserved
+- [x] [`diff`](https://agentclientprotocol.com/rfds/v2/diff-file-states): `changes[]` + optional `git_patch` (`add` / `modify`, `fileType: "text"`)
+- [x] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): `subject: { type: "tool_call", … }` + `title`
+- [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): prompt caps `image`, `embeddedContext`
+- [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): capability advertised
+- [x] [`terminal_update`](https://agentclientprotocol.com/rfds/v2/terminal-output): agent-owned execute terminals + `type: "terminal"` embeds (DB snapshots)
+- [x] [`plan_update`](https://agentclientprotocol.com/protocol/v2/agent-plan): brain plans ([`markdown`](https://agentclientprotocol.com/rfds/v2/plan-variants) preferred, else `items`); no `plan_removed`
+- [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands): same curated list + config intercept as v1
 
 ### High priority
 
-Wire-shape and lifecycle work specific to draft v2 (or required for parity with
-v2-aware clients):
-
-- [ ] Richer `replayFrom` cursors beyond `{ "type": "start" }` when the draft
-      stabilizes incremental replay
-- [ ] Map multi-select / free-text `ask_question` to client `elicitation/create`
-      (today: fail closed; static tool_call text only)
-- [ ] Incremental `terminal_output_chunk` while a command is still running, if
-      agy ever persists partial stdout before completion (today: full
-      `terminal_update.output` snapshot when field 28 is present)
-- [ ] MCP: honor session `mcpServers`, advertise `capabilities.session.mcp`, and
-      route `mcp/*` if/when agy can consume external MCP servers
-- [ ] Expand interactive permission bridge to any remaining agy menus once their
-      TUI/response channels are verified
+- [ ] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): richer cursors beyond `{ "type": "start" }` when the draft stabilizes incremental replay
+- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text `ask_question` (+ `elicitation/complete`; today: fail closed)
+- [ ] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is still running (today: full snapshot when field 28 is present)
+- [ ] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool content while a call is running (today: only on `tool_call_update` snapshots)
+- [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor session servers, advertise `capabilities.session.mcp`, route `mcp/*` when agy can consume them
+- [ ] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): expand bridge to remaining agy menus once TUI channels are verified
 
 ### Medium priority
 
-- [ ] Advertise and implement `session/delete` / `session/fork` when useful
-- [x] Push `config_option_update` when options change outside
-      `set_config_option` (v1 `set_mode` path; draft v2 has no set_mode — response
-      still returns full options on set_config_option)
-- [ ] `available_commands_update` for slash-command discovery
-- [ ] `auth/login` / `auth/logout` + non-empty `authMethods` (today: empty list;
-      require pre-logged-in `agy`)
-- [ ] `usage_update` when token/usage data is available from agy
-- [ ] Richer `stopReason` on idle `state_update` (`max_tokens`, `refusal`,
-      `max_turn_requests`) when agy exposes them
-- [ ] Optional full-message updates (`agent_message` / `agent_thought`) in
-      addition to chunk streaming, if clients prefer them
+- [ ] [`session/delete`](https://agentclientprotocol.com/protocol/v2/session-delete): advertise and implement when useful
+- [ ] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): when useful
+- [ ] [`usage_update`](https://agentclientprotocol.com/rfds/session-usage): when token data is available from agy
+- [ ] [`stopReason`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): richer values on idle `state_update` when agy exposes them
+- [ ] [`agent_message`](https://agentclientprotocol.com/rfds/v2/message-updates): optional full-message updates (+ `agent_thought`) in addition to chunks
+- [ ] [`$/cancel_request`](https://agentclientprotocol.com/protocol/v2/cancellation): confirm SDK handling (default vs explicit)
+
+### Fidelity improvements
+
+- [ ] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind`
+- [ ] [`diff`](https://agentclientprotocol.com/rfds/diff-delete): `delete` / rename ops and richer [fileType](https://agentclientprotocol.com/rfds/v2/diff-file-states) when agy exposes them
+- [ ] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): agent-outbound images / richer blocks when agy produces them
 
 ### Draft tracking
 
-- [ ] Keep pace with `@agentclientprotocol/sdk` experimental/v2 breaking changes
-      until ACP v2 stabilizes; pin and re-test on each SDK bump
-- [ ] Promote dual-protocol support off the `alpha` track when the draft freezes
-- [ ] Drop or narrow v1-shaped internal builders if a stable v2-native update
-      model becomes the default path
+- [ ] [`@agentclientprotocol/sdk`](https://agentclientprotocol.com/announcements/acp-v2-draft): keep pace with experimental/v2 breaking changes until the draft freezes
+- [ ] [`alpha`](https://agentclientprotocol.com/protocol/v2/migration): promote dual-protocol support off the alpha track when the draft freezes
+- [ ] [`tool_call_update`](https://agentclientprotocol.com/rfds/v2/tool-call-updates): drop or narrow v1-shaped internal builders if stable v2-native updates become the default
 
 ### Out of scope (unless a client requires them)
 
-Same as v1 lower-priority surface; not advertised in `initialize` capabilities:
+Not advertised in `initialize` capabilities:
 
-- [ ] `providers/*`, `nes/*`, `document/*`
-- [ ] Agent-driven client filesystem methods (agy owns FS)
-- [ ] Non-stdio transports (HTTP / WebSocket / SSE)
-
-
-
-
+- [ ] [`providers/*`](https://agentclientprotocol.com/rfds/custom-llm-endpoint): provider routing UI
+- [ ] [`nes/*`](https://agentclientprotocol.com/rfds/next-edit-suggestions): next-edit suggestions
+- [ ] [`document/*`](https://agentclientprotocol.com/rfds/next-edit-suggestions): document sync (+ `positionEncoding`)
+- [ ] [`fs/*`](https://agentclientprotocol.com/rfds/v2/client-filesystem-terminal-capabilities): agent-driven client filesystem (draft v2 has no client `fs/*`; agy owns FS)
+- [ ] [Transports](https://agentclientprotocol.com/protocol/v2/transports): non-stdio [HTTP / WebSocket / SSE](https://agentclientprotocol.com/rfds/streamable-http-websocket-transport)
+- [ ] [JSON-RPC batch](https://agentclientprotocol.com/protocol/v2/transports): batch framing beyond what the SDK implements for the chosen transport

@@ -20,8 +20,8 @@
     "antigravity",
     "google"
   ],
-  "main": "dist/acp-server.js",
-  "types": "dist/acp-server.d.ts",
+  "main": "dist/agent.js",
+  "types": "dist/agent.d.ts",
   "license": "Apache-2.0",
   "bin": {
     "agy-acp": "dist/main.js"
@@ -41,21 +41,22 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",
-    "@bufbuild/protobuf": "^2.12.1",
-    "better-sqlite3": "^12.11.1",
+    "@bufbuild/protobuf": "^2.13.0",
+    "better-sqlite3": "^13.0.1",
     "node-pty": "^1.1.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
-    "@types/node": "^24.0.0",
-    "typescript": "^5.9.0",
-    "vitest": "^4.1.9"
+    "@types/node": "^26.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "allowScripts": {
-    "node-pty@1.1.0": true
+    "node-pty@1.1.0": true,
+    "better-sqlite3@13.0.1": true
   }
 }
