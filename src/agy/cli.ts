@@ -19,7 +19,7 @@ import {
   canBridgeInteraction,
   interactionKeys,
   isEditToolCall,
-  normalizePermissionChoice,
+  normalizeAgyPermissionChoice,
   parseAskQuestion,
   type AgyPermissionChoice
 } from "../tool-calls/permissions.js";
@@ -72,7 +72,8 @@ export function isAgyExecutionMode(value: string): value is AgyExecutionMode {
 
 export interface AgyCliConfig {
   cwd: string;
-  workspaces: string[];
+  /** ACP `additionalDirectories` (extra roots for `agy --add-dir`; excludes cwd). */
+  additionalDirectories: string[];
   agyPath: string;
   /** Value for `--model` (base model slug or display name). */
   model?: string;
@@ -107,7 +108,7 @@ export interface AgyPromptOutcome {
 
 export interface AgyCliConfigInput {
   cwd: string;
-  workspaces?: string[];
+  additionalDirectories?: string[];
   env?: NodeJS.ProcessEnv;
   argv?: string[];
 }
@@ -228,9 +229,11 @@ export class AgyCliSession {
       command.push("--conversation", this.#conversationId);
     }
 
+    // Pass cwd + additionalDirectories as --add-dir roots (cwd included so agy
+    // treats the workspace the same way the previous workspaces[] list did).
     const seen = new Set<string>();
-    for (const workspace of this.config.workspaces) {
-      const resolved = path.resolve(workspace);
+    for (const root of [this.config.cwd, ...this.config.additionalDirectories]) {
+      const resolved = path.resolve(root);
       if (seen.has(resolved)) {
         continue;
       }
@@ -436,7 +439,7 @@ export class AgyCliSession {
             deadline
           );
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+          if (normalizeAgyPermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
         if (this.#cancelled) break;
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
@@ -814,7 +817,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
 
   return {
     cwd: input.cwd,
-    workspaces: input.workspaces ?? [input.cwd],
+    additionalDirectories: input.additionalDirectories ?? [],
     agyPath: "agy",
     model: undefined,
     effort: undefined,

@@ -1,3 +1,6 @@
+// ACP Tool Calls: session/request_permission option menus for agy status-9 tools.
+// Docs: https://agentclientprotocol.com/protocol/v1/tool-calls
+
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
 /**
@@ -58,7 +61,7 @@ export function isBridgeableAskQuestion(ask: AskQuestionPayload): boolean {
 }
 
 /** Normalize client-selected option ids (standard ACP or legacy agy-*). */
-export function normalizePermissionChoice(choice: string): AgyPermissionChoice {
+export function normalizeAgyPermissionChoice(choice: string): AgyPermissionChoice {
   switch (choice) {
     case "allow-once":
     case "allow_once":
@@ -78,7 +81,7 @@ export function normalizePermissionChoice(choice: string): AgyPermissionChoice {
 }
 
 export function permissionKeys(choice: AgyPermissionChoice): string | null {
-  const id = normalizePermissionChoice(choice);
+  const id = normalizeAgyPermissionChoice(choice);
   switch (id) {
     case "agy-allow-once": return "\r";
     case "agy-allow-conversation": return "\x1b[B\r";
@@ -111,7 +114,7 @@ export function interactionKeys(
   // Edit tools: map standard ACP allow/reject onto agy's 4-row menu.
   // Accept/allow-once → first row; always-allow → settings row; reject → last row.
   if (isEditToolName(toolName)) {
-    const id = normalizePermissionChoice(choice);
+    const id = normalizeAgyPermissionChoice(choice);
     if (id === "agy-allow-once") return "\r";
     if (id === "agy-allow-settings") return "\x1b[B\x1b[B\r";
     if (id === "agy-allow-conversation") return "\x1b[B\r";

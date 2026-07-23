@@ -1,6 +1,7 @@
-// Protocol-boundary conversion for session/update payloads.
+// ACP session/update wire mapping (v1-shaped builders → v1 wire / draft v2).
+// Docs: https://agentclientprotocol.com/protocol/v1/prompt-turn
 //
-// The db layer emits v1-shaped updates (with required messageIds on message
+// The agy db layer emits v1-shaped updates (with required messageIds on message
 // chunks). v1 clients receive them as-is; v2 clients get the draft-v2 mapping
 // (tool_call → tool_call_update, structured diffs, cancelled status, agent-owned
 // terminals for execute tools, etc.).
@@ -353,10 +354,3 @@ export function expandSessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdat
   return [terminalUpdateForExecute(meta), tool as V2SessionUpdate];
 }
 
-export function mapUpdatesToV1(updates: readonly V1SessionUpdate[]): V1SessionUpdate[] {
-  return updates.map(sessionUpdateToV1);
-}
-
-export function mapUpdatesToV2(updates: readonly V1SessionUpdate[]): V2SessionUpdate[] {
-  return updates.flatMap(expandSessionUpdateToV2);
-}

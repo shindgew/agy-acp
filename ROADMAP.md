@@ -35,7 +35,7 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
       and [`session/resume`](https://agentclientprotocol.com/rfds/session-resume)
       with persisted bindings
 - [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v1/session-config-options)
-      (`mode`, `model`, `reasoningEffort`) — select options only (no
+      (`mode`, `model`, `reasoningEffect`) — select options only (no
       [boolean config options](https://agentclientprotocol.com/rfds/boolean-config-option) yet)
 - [x] Native [session modes](https://agentclientprotocol.com/protocol/v1/session-modes):
       `modes` on new/load/resume,
@@ -94,6 +94,10 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
       (`markdown` when body is known, else `items`). Status only reflects
       checkbox markers in the file — no live task progress from agy. Neither
       protocol emits `plan_removed` (agy does not delete plans).
+- [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands):
+      curated ACP slash commands for agy (`mode`, `plan`, `model`, `effort`)
+      on new/load/resume; `/mode` · `/plan` · `/model` · `/effort` map to
+      session config (not agy TUI panels)
 
 ### High priority
 
@@ -136,8 +140,10 @@ client terminal protocol) and are **out of scope for 0.2.x fidelity patches**:
       `mode` config option that already maps to `agy --mode` (same three ids:
       `default` / `accept-edits` / `plan`). Draft v2 has no `set_mode` surface —
       mode stays a config option there.
-- [ ] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands)
-      for slash-command discovery in the client UI
+- [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands)
+      for slash-command discovery: curated ACP commands adapted for agy
+      (`mode`, `plan`, `model`, `effort`) on new/load/resume; prompts like
+      `/mode plan` are handled as config changes (no agy TUI panels)
 - [x] Push [`config_option_update`](https://agentclientprotocol.com/protocol/v1/session-config-options)
       when options change outside `set_config_option` (v1: after `session/set_mode`;
       `set_config_option` still returns the full list in its response and pushes
@@ -216,7 +222,7 @@ differs or is incomplete.
       [`session/cancel`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle),
       [`session/update`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle)
 - [x] [`session/set_config_option`](https://agentclientprotocol.com/protocol/v2/session-config-options)
-      with `configId` (v1 still uses `id`) for `mode`, `model`, `reasoningEffort`
+      with `configId` (v1 still uses `id`) for `mode`, `model`, `reasoningEffect`
 - [x] [Prompt lifecycle](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle):
       accept with `{}` immediately; progress via
       [`state_update`](https://agentclientprotocol.com/protocol/v2/schema#stateupdate)
@@ -294,8 +300,8 @@ v2-aware clients):
       when options change outside `set_config_option` (v1 `set_mode` path; draft
       v2 has no set_mode — response still returns full options on
       set_config_option)
-- [ ] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands)
-      for slash-command discovery
+- [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands)
+      for slash-command discovery (same curated list + config intercept as v1)
 - [ ] [`auth/login`](https://agentclientprotocol.com/protocol/v2/authentication) /
       [`auth/logout`](https://agentclientprotocol.com/protocol/v2/authentication) +
       non-empty `authMethods` (today: empty list; require pre-logged-in `agy`)

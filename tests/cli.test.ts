@@ -45,7 +45,7 @@ describe("commandForPrompt", () => {
   it("uses agy print mode and safe defaults", () => {
     const session = new AgyCliSession({
       ...defaultConfig(),
-      workspaces: ["/repo", "/extra"],
+      additionalDirectories: ["/extra"],
       agyPath: "/opt/homebrew/bin/agy",
       model: "gemini-test",
       project: "project-1",
@@ -62,6 +62,7 @@ describe("commandForPrompt", () => {
     expect(flagValue(command, "--model")).toBe("gemini-test");
     expect(command).not.toContain("--effort");
     expect(flagValue(command, "--project")).toBe("project-1");
+    // cwd + additionalDirectories as --add-dir roots
     expect(command.filter((_, i) => command[i - 1] === "--add-dir")).toEqual(["/repo", "/extra"]);
   });
 
@@ -564,7 +565,7 @@ describe("configFromEnv", () => {
   it("always invokes agy by name and relies on PATH resolution", () => {
     const config = configFromEnv({
       cwd: "/repo",
-      workspaces: ["/repo"],
+      additionalDirectories: ["/repo"],
       env: {
         PATH: "/bin"
       }
@@ -805,7 +806,7 @@ interface SpawnCall {
 function defaultConfig(): AgyCliConfig {
   return {
     cwd: "/repo",
-    workspaces: ["/repo"],
+    additionalDirectories: [],
     agyPath: "agy",
     printTimeout: "5m0s",
     effort: undefined,

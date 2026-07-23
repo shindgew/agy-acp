@@ -63,7 +63,7 @@ describe("initialize", () => {
 });
 
 describe("editFsBridgeV1", () => {
-  type FsBridgeAgent = {
+  type FsAgent = {
     editFsBridgeV1(
       client: { request: (...args: unknown[]) => Promise<unknown> },
       sessionId: string
@@ -74,7 +74,7 @@ describe("editFsBridgeV1", () => {
     vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
     const agent = new AgyAcpAgent();
     await agent.initializeV1({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: { fs: { readTextFile: true } } });
-    const bridge = (agent as unknown as FsBridgeAgent).editFsBridgeV1({ request: vi.fn() }, "s1");
+    const bridge = (agent as unknown as FsAgent).editFsBridgeV1({ request: vi.fn() }, "s1");
     expect(bridge).toBeUndefined();
     vi.restoreAllMocks();
   });
@@ -87,7 +87,7 @@ describe("editFsBridgeV1", () => {
       clientCapabilities: { fs: { readTextFile: true, writeTextFile: true } }
     });
     const request = vi.fn().mockResolvedValue({});
-    const bridge = (agent as unknown as FsBridgeAgent).editFsBridgeV1({ request }, "s1")!;
+    const bridge = (agent as unknown as FsAgent).editFsBridgeV1({ request }, "s1")!;
     expect(bridge).toBeDefined();
 
     await bridge.readTextFile("/repo/a.txt");
@@ -224,6 +224,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text: "hi" }]
@@ -268,6 +269,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
           prompt: [{ type: "text", text: "hi" }]
@@ -345,6 +347,9 @@ describe("session/load and session/resume", () => {
               content: { type: "text", text: "hello from before" }
             })
           );
+          expect(updates).toContainEqual(
+            expect.objectContaining({ sessionUpdate: "available_commands_update" })
+          );
           expect(response.configOptions?.length).toBeGreaterThan(0);
         } finally {
           connection.close();
@@ -364,7 +369,10 @@ describe("session/load and session/resume", () => {
             sessionId,
             cwd: "/repo"
           });
-          expect(updates).toEqual([]);
+          // Resume does not replay history; it still advertises slash commands.
+          expect(updates).toEqual([
+            expect.objectContaining({ sessionUpdate: "available_commands_update" })
+          ]);
           expect(response.configOptions?.length).toBeGreaterThan(0);
         } finally {
           connection.close();
@@ -517,7 +525,7 @@ describe("buildModelCatalog", () => {
     expect(catalog.resolve("gemini-3.5-flash", "medium")).toBe("Gemini 3.5 Flash (Medium)");
   });
 
-  it("exposes mode, model, and reasoningEffort config options", () => {
+  it("exposes mode, model, and reasoningEffect config options", () => {
     const catalog = buildModelCatalog(["gemini-3.5-flash-medium", "gemini-3.5-flash-high"]);
     const modelConfig = modelConfigOption("gemini-3.5-flash", catalog) as SelectConfigOption;
     const reasoningConfig = reasoningEffectConfigOption(
@@ -657,6 +665,147 @@ describe("session modes and config option sync", () => {
           modeId: "architect"
         })
       ).rejects.toThrow();
+    } finally {
+      connection.close();
+    }
+  });
+});
+
+describe("available_commands_update and slash commands", () => {
+  it("advertises curated commands on session/new", async () => {
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["ok"]);
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const client = acpClient({ name: "test-client" }).onNotification(
+      methods.client.session.update,
+      (ctx) => {
+        updates.push(ctx.params.update as Record<string, unknown>);
+      }
+    );
+    const connection = client.connect(
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+
+      const commandUpdate = updates.find((u) => u.sessionUpdate === "available_commands_update");
+      expect(commandUpdate).toMatchObject({
+        sessionUpdate: "available_commands_update",
+        availableCommands: expect.arrayContaining([
+          expect.objectContaining({ name: "mode" }),
+          expect.objectContaining({ name: "plan" }),
+          expect.objectContaining({ name: "model" }),
+          expect.objectContaining({ name: "effort" })
+        ])
+      });
+    } finally {
+      connection.close();
+    }
+  });
+
+  it("handles /mode and /plan via prompt without spawning agy", async () => {
+    const spawnCalls: string[][] = [];
+    const spawnProcess = (_command: string, args: string[]) => {
+      spawnCalls.push(args);
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["should-not-run"]);
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const client = acpClient({ name: "test-client" }).onNotification(
+      methods.client.session.update,
+      (ctx) => {
+        updates.push(ctx.params.update as Record<string, unknown>);
+      }
+    );
+    const connection = client.connect(
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+      spawnCalls.length = 0;
+      updates.length = 0;
+
+      const response = await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "/plan" }]
+      });
+      expect(response.stopReason).toBe("end_turn");
+      expect(spawnCalls).toEqual([]);
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { sessionUpdate: "current_mode_update", currentModeId: "plan" },
+          expect.objectContaining({
+            sessionUpdate: "config_option_update",
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: "mode", currentValue: "plan" })
+            ])
+          })
+        ])
+      );
+
+      updates.length = 0;
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "/mode accept-edits" }]
+      });
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" }
+        ])
+      );
+    } finally {
+      connection.close();
+    }
+  });
+
+  it("handles /effort via prompt", async () => {
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["should-not-run"]);
+    };
+    const updates: Array<Record<string, unknown>> = [];
+    const client = acpClient({ name: "test-client" }).onNotification(
+      methods.client.session.update,
+      (ctx) => {
+        updates.push(ctx.params.update as Record<string, unknown>);
+      }
+    );
+    const connection = client.connect(
+      createAgyAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/repo",
+        additionalDirectories: [],
+        mcpServers: []
+      });
+      updates.length = 0;
+
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "/effort high" }]
+      });
+
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionUpdate: "config_option_update",
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: "reasoningEffort", currentValue: "high" })
+            ])
+          })
+        ])
+      );
     } finally {
       connection.close();
     }

@@ -1,5 +1,8 @@
-// Route an already-applied edit (no live agy gate) through the ACP client's
-// own fs/read_text_file + fs/write_text_file so its native diff/review UI
+// ACP File System: route completed edits through client fs/read_text_file +
+// fs/write_text_file so the editor's native review UI owns the change.
+// Docs: https://agentclientprotocol.com/protocol/v1/file-system
+//
+// Used when there is no live agy gate (or after one), so Zed's review panel
 // (e.g. Zed's Review Changes panel, populated via its own buffer/action-log
 // tracking) owns the change instead of agy-acp's local permission-bridge
 // modal. See acp_thread.rs::write_text_file: Zed diffs the write's content
