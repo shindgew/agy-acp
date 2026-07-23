@@ -30,6 +30,16 @@ import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sd
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
 
+/**
+ * `available_commands_update` on session/new is deferred past the response
+ * (via setImmediate) so real clients register the session before seeing a
+ * notification for it. Await this once after session/new to drain that
+ * notification before asserting on / resetting the `updates` array.
+ */
+function flushDeferredNotifications(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
 describe("contentBlocksToText", () => {
   it("joins text content blocks", () => {
     expect(contentBlocksToText([
@@ -340,6 +350,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        await flushDeferredNotifications();
         updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
@@ -385,6 +396,7 @@ describe("session prompt", () => {
           additionalDirectories: [],
           mcpServers: []
         });
+        await flushDeferredNotifications();
         updates.length = 0;
         const response = await connection.agent.request(methods.agent.session.prompt, {
           sessionId: session.sessionId,
@@ -809,6 +821,7 @@ describe("available_commands_update and slash commands", () => {
         additionalDirectories: [],
         mcpServers: []
       });
+      await flushDeferredNotifications();
 
       const commandUpdate = updates.find((u) => u.sessionUpdate === "available_commands_update");
       expect(commandUpdate).toMatchObject({

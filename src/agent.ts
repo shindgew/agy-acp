@@ -146,6 +146,21 @@ interface SessionState {
   promptAbort?: AbortController;
 }
 
+/**
+ * Runs `fn` after the current request handler's response has gone out on the
+ * wire. The ACP connection queues outbound messages in call order, so a
+ * `setImmediate` — which only fires once the microtask queue (including the
+ * response's own send) has drained — is enough to guarantee it lands second.
+ */
+function deferAfterResponse(fn: () => Promise<void>): void {
+  setImmediate(() => {
+    fn().catch(() => {
+      // Connection may already be closed by the time this fires (client
+      // disconnected right after session/new) — nothing left to notify.
+    });
+  });
+}
+
 export class AcpAgent {
   readonly #env: NodeJS.ProcessEnv;
   readonly #argv: string[];
@@ -324,7 +339,11 @@ export class AcpAgent {
     await this.requireAuthenticated(params.cwd);
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     if (client) {
-      await this.notifyAvailableCommandsV1(client, session.sessionId);
+      // Clients (e.g. Zed) only learn this sessionId from the `session/new`
+      // response and register it then; a notification sent earlier targets a
+      // session the client doesn't recognize yet and gets silently dropped.
+      // Defer past the response so it's on the wire second, not first.
+      deferAfterResponse(() => this.notifyAvailableCommandsV1(client, session.sessionId));
     }
     return {
       sessionId: session.sessionId,
@@ -341,7 +360,9 @@ export class AcpAgent {
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     // Draft v2 has no native session/set_mode surface; mode is the config option only.
     if (client) {
-      await this.notifyAvailableCommandsV2(client, session.sessionId);
+      // See newSessionV1: must not resolve before the response is sent, or
+      // the client drops it as a notification for an unknown session.
+      deferAfterResponse(() => this.notifyAvailableCommandsV2(client, session.sessionId));
     }
     return {
       sessionId: session.sessionId,
