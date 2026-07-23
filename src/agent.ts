@@ -8,15 +8,20 @@ import { createRequire } from "node:module";
 import { Readable, Writable } from "node:stream";
 import * as v1 from "@agentclientprotocol/sdk";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
+import { RequestError } from "@agentclientprotocol/sdk";
 import type {
   AgentContext as V1AgentContext,
   AgentApp as V1AgentApp,
+  AuthenticateRequest,
+  AuthenticateResponse,
   CloseSessionRequest,
   CloseSessionResponse,
   InitializeRequest as V1InitializeRequest,
   InitializeResponse as V1InitializeResponse,
   LoadSessionRequest,
   LoadSessionResponse,
+  LogoutRequest,
+  LogoutResponse,
   NewSessionRequest as V1NewSessionRequest,
   NewSessionResponse as V1NewSessionResponse,
   PromptRequest as V1PromptRequest,
@@ -37,6 +42,10 @@ import type {
   InitializeResponse as V2InitializeResponse,
   ListSessionsRequest,
   ListSessionsResponse,
+  LoginAuthRequest,
+  LoginAuthResponse,
+  LogoutAuthRequest,
+  LogoutAuthResponse,
   NewSessionRequest as V2NewSessionRequest,
   NewSessionResponse as V2NewSessionResponse,
   PromptRequest as V2PromptRequest,
@@ -50,6 +59,14 @@ import type {
 import { ReplayCache } from "./agy/db/replay.js";
 import type { ClientFileSystem } from "./file-system/bridge.js";
 import { ensureAgyInstalled } from "./agy/installer.js";
+import {
+  AUTH_METHOD_TERMINAL_LOGIN,
+  isAgyAuthenticated,
+  isKnownAuthMethodId,
+  logoutAgyViaSlashCommand,
+  v1AuthMethods,
+  v2AuthMethods
+} from "./agy/auth.js";
 import {
   AgyCliBackend,
   SESSION_MODE_IDS,
@@ -173,8 +190,12 @@ export class AcpAgent {
           additionalDirectories: {},
           resume: {},
           close: {}
+        },
+        auth: {
+          logout: {}
         }
       },
+      authMethods: v1AuthMethods(),
       agentInfo: {
         name: "agy-acp",
         title: "Google Antigravity CLI",
@@ -201,9 +222,11 @@ export class AcpAgent {
             embeddedContext: {}
           },
           additionalDirectories: {}
-        }
+        },
+        auth: {}
       },
-      authMethods: []
+      // Non-empty authMethods commits the agent to auth/login + auth/logout.
+      authMethods: v2AuthMethods()
     };
   }
 
@@ -213,6 +236,67 @@ export class AcpAgent {
       warn: (message) => console.error(message)
     });
     return this.#ensureAgyPromise;
+  }
+
+  /** Probe config for auth checks (cwd only; no workspace roots required). */
+  private authProbeConfig(cwd = process.cwd()): AgyCliConfig {
+    return configFromEnv({ cwd, env: this.#env, argv: this.#argv });
+  }
+
+  /**
+   * Ensure agy is signed in. Throws ACP `auth_required` when not authenticated.
+   */
+  private async requireAuthenticated(cwd?: string): Promise<void> {
+    await this.ensureAgyReady();
+    const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig(cwd));
+    if (status.ok) return;
+    throw RequestError.authRequired(
+      { authMethods: v1AuthMethods() },
+      status.reason
+    );
+  }
+
+  /**
+   * v1 `authenticate` / v2 `auth/login`: confirm keyring login after terminal auth,
+   * or succeed immediately when already signed in.
+   */
+  async authenticate(params: AuthenticateRequest): Promise<AuthenticateResponse> {
+    await this.ensureAgyReady();
+    if (!isKnownAuthMethodId(params.methodId)) {
+      throw RequestError.invalidParams({ methodId: params.methodId }, `Unknown auth method: ${params.methodId}`);
+    }
+    const status = await isAgyAuthenticated(this.#backend, this.authProbeConfig());
+    if (status.ok) return {};
+    throw RequestError.authRequired(
+      { authMethods: v1AuthMethods() },
+      `${status.reason} Complete terminal login (method "${AUTH_METHOD_TERMINAL_LOGIN}"), then call authenticate again.`
+    );
+  }
+
+  async loginAuth(params: LoginAuthRequest): Promise<LoginAuthResponse> {
+    // v2 uses methodId; same probe semantics as v1 authenticate.
+    return this.authenticate({ methodId: params.methodId });
+  }
+
+  /** v1 `logout` / v2 `auth/logout`: best-effort agy TUI `/logout`. */
+  async logout(_params: LogoutRequest = {}): Promise<LogoutResponse> {
+    await this.ensureAgyReady();
+    const config = this.authProbeConfig();
+    try {
+      await logoutAgyViaSlashCommand({
+        backend: this.#backend,
+        config,
+        ptyFactory: this.#backend.ptyFactory
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw RequestError.internalError(undefined, `agy logout failed: ${message}`);
+    }
+    return {};
+  }
+
+  async logoutAuth(params: LogoutAuthRequest = {}): Promise<LogoutAuthResponse> {
+    return this.logout(params);
   }
 
   /**
@@ -237,6 +321,7 @@ export class AcpAgent {
     params: V1NewSessionRequest,
     client?: V1AgentContext
   ): Promise<V1NewSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     if (client) {
       await this.notifyAvailableCommandsV1(client, session.sessionId);
@@ -252,6 +337,7 @@ export class AcpAgent {
     params: V2NewSessionRequest,
     client?: V2AgentContext
   ): Promise<V2NewSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const session = await this.createSession(params.cwd, params.additionalDirectories);
     // Draft v2 has no native session/set_mode surface; mode is the config option only.
     if (client) {
@@ -280,6 +366,7 @@ export class AcpAgent {
    * agy conversation history (if bound to one) before returning.
    */
   async loadSession(params: LoadSessionRequest, client: V1AgentContext): Promise<LoadSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session, cwd, stored } = await this.reloadSession(
       params.sessionId,
       params.cwd,
@@ -308,6 +395,7 @@ export class AcpAgent {
     params: V1ResumeSessionRequest,
     client?: V1AgentContext
   ): Promise<V1ResumeSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session } = await this.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
     if (client) {
       await this.notifyAvailableCommandsV1(client, params.sessionId);
@@ -326,6 +414,7 @@ export class AcpAgent {
     params: V2ResumeSessionRequest,
     client: V2AgentContext
   ): Promise<V2ResumeSessionResponse> {
+    await this.requireAuthenticated(params.cwd);
     const { session, cwd, stored } = await this.reloadSession(
       params.sessionId,
       params.cwd,
@@ -912,6 +1001,8 @@ export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
   return v1
     .agent({ name: "agy-acp" })
     .onRequest(v1.methods.agent.initialize, (ctx) => agent.initializeV1(ctx.params))
+    .onRequest(v1.methods.agent.authenticate, (ctx) => agent.authenticate(ctx.params))
+    .onRequest(v1.methods.agent.logout, (ctx) => agent.logout(ctx.params))
     .onRequest(v1.methods.agent.session.new, (ctx) => agent.newSessionV1(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
     .onRequest(v1.methods.agent.session.load, (ctx) => agent.loadSession(ctx.params, ctx.client))
@@ -934,6 +1025,8 @@ export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
   return v2
     .agent({ name: "agy-acp" })
     .onRequest(v2.methods.agent.initialize, (ctx) => agent.initializeV2(ctx.params))
+    .onRequest(v2.methods.agent.auth.login, (ctx) => agent.loginAuth(ctx.params))
+    .onRequest(v2.methods.agent.auth.logout, (ctx) => agent.logoutAuth(ctx.params))
     .onRequest(v2.methods.agent.session.new, (ctx) => agent.newSessionV2(ctx.params, ctx.client))
     .onRequest(v2.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
     .onRequest(v2.methods.agent.session.resume, (ctx) => agent.resumeSessionV2(ctx.params, ctx.client))

@@ -54,10 +54,126 @@ describe("initialize", () => {
       expect(response.agentCapabilities?.promptCapabilities?.embeddedContext).toBe(true);
       expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
+      expect(response.agentCapabilities?.auth?.logout).toEqual({});
+      expect(response.authMethods).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] }),
+          expect.objectContaining({ id: "agy-status" })
+        ])
+      );
       expect(installSpy).toHaveBeenCalledOnce();
     } finally {
       installSpy.mockRestore();
       connection.close();
+    }
+  });
+});
+
+describe("authentication", () => {
+  it("gates session/new with auth_required when agy is not logged in", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([], {
+          exitCode: 1,
+          stderr: "error getting token source: You are not logged into Antigravity.\n"
+        });
+      }
+      return new FakeProcess(["ok"]);
+    };
+    const connection = acpClient({ name: "test-client" }).connect(
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+      await expect(
+        connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          additionalDirectories: [],
+          mcpServers: []
+        })
+      ).rejects.toMatchObject({
+        code: -32000,
+        message: expect.stringMatching(/Authentication required|not logged/i)
+      });
+    } finally {
+      connection.close();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("authenticate succeeds when agy models lists models", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["ok"]);
+    };
+    const connection = acpClient({ name: "test-client" }).connect(
+      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+    );
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+      await expect(
+        connection.agent.request(methods.agent.authenticate, { methodId: "agy-status" })
+      ).resolves.toEqual({});
+    } finally {
+      connection.close();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("logout sends /logout to an interactive agy PTY", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const writes: string[] = [];
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["ok"]);
+    };
+    class LogoutPty {
+      private dataListeners: Array<(data: string) => void> = [];
+      private exitListeners: Array<(event: { exitCode: number }) => void> = [];
+      write(data: string) {
+        writes.push(data);
+        queueMicrotask(() => {
+          for (const listener of this.exitListeners) listener({ exitCode: 0 });
+        });
+      }
+      kill() {
+        for (const listener of this.exitListeners) listener({ exitCode: 0 });
+      }
+      onData(listener: (data: string) => void) {
+        this.dataListeners.push(listener);
+        queueMicrotask(() => listener("? for shortcuts"));
+        return { dispose() {} };
+      }
+      onExit(listener: (event: { exitCode: number }) => void) {
+        this.exitListeners.push(listener);
+        return { dispose() {} };
+      }
+    }
+    const connection = acpClient({ name: "test-client" }).connect(
+      createAcpApp({
+        env: printModeEnv(),
+        spawnProcess: spawnProcess as unknown as SpawnFactory,
+        ptyFactory: { spawn: () => new LogoutPty() } as unknown as PtyFactory
+      })
+    );
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+      await expect(connection.agent.request(methods.agent.logout, {})).resolves.toEqual({});
+      expect(writes.some((w) => w.includes("/logout"))).toBe(true);
+    } finally {
+      connection.close();
+      vi.restoreAllMocks();
     }
   });
 });
@@ -1293,14 +1409,19 @@ function spawnAgyWritingConversation(
 class FakeProcess extends EventEmitter {
   stdin = new Writable({ write: (_chunk, _encoding, callback) => callback() });
   stdout: Readable;
-  stderr = Readable.from([]);
+  stderr: Readable;
   exitCode = 0;
   pid = 1;
 
-  constructor(chunks: string[]) {
+  constructor(
+    chunks: string[],
+    options: { exitCode?: number; stderr?: string } = {}
+  ) {
     super();
+    this.exitCode = options.exitCode ?? 0;
     this.stdout = Readable.from(chunks);
-    queueMicrotask(() => this.emit("exit", 0, null));
+    this.stderr = Readable.from(options.stderr ? [options.stderr] : []);
+    queueMicrotask(() => this.emit("exit", this.exitCode, null));
   }
 
   kill() {
