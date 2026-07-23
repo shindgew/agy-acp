@@ -9,7 +9,7 @@ negotiation. Draft v2 continues on the `alpha` dist-tag (`1.0.0-alpha.*`). See t
 [ACP v2 draft](https://agentclientprotocol.com/announcements/acp-v2-draft) and
 [migration guide](https://agentclientprotocol.com/protocol/v2/migration).
 
-## Run
+## Usage
 
 If `agy` is missing from `PATH`, `agy-acp` installs it during `initialize` from
 [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli/releases/latest)
@@ -65,15 +65,6 @@ Alpha (draft ACP v2):
 | `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS` | Auto-approve tools; switches to non-interactive print mode |
 | `AGY_ACP_INTERACTIVE_PERMISSIONS=0` | Disable permission bridge (print mode, no auto-approve). Flag: `--no-interactive-permissions` |
 
-### File writes denied in Zed?
-
-Under `agy --print` (agy ≥ 1.1.3), tools that need confirmation are soft-denied — messages
-like `User denied permission for write_file(...)` come from **agy**, not the editor.
-
-1. Set session **Mode** to **Accept Edits**, or `AGY_ACP_MODE=accept-edits` / `--mode accept-edits`
-2. Allowlist tools in `~/.gemini/antigravity-cli/settings.json` under `permissions.allow`
-3. Last resort: `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS=1` / `--dangerously-skip-permissions`
-
 ## Architecture
 
 ```text
@@ -98,21 +89,6 @@ Zed / ACP client
 Wire format decoding was cross-referenced with
 [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp) (MIT);
 decoding code is our own.
-
-## Model picker
-
-Session config options (stable wire ids):
-
-| id | name | Category |
-|---|---|---|
-| `mode` | Mode | `mode` |
-| `model` | Model | `model` |
-| `reasoningEffort` | Reasoning Effort | `thought_level` |
-
-Modes: `default` (request-review), `accept-edits`, `plan`.
-
-Models come from `agy models`. Effort suffixes (e.g. `gemini-3.5-flash-medium`) split into
-base model + `reasoningEffort`. Thinking models keep `-thinking` in the model id.
 
 ## Development
 
