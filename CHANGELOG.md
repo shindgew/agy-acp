@@ -9,6 +9,38 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-23
+
+### Fixed
+
+- `available_commands_update` on `session/new` never reached clients that
+  register a session only after receiving the `session/new` response (Zed
+  included): the notification was sent before the response, referencing a
+  `sessionId` the client didn't recognize yet, so it was silently dropped and
+  slash commands never appeared. It's now deferred until just after the
+  response goes out.
+- `agy-acp --login` (terminal auth method) left the user sitting inside agy's own
+  interactive chat TUI after a successful web/API-key sign-in, with no automatic
+  way back to the ACP client. A background poll now watches `agy models` during
+  login and closes the terminal automatically as soon as sign-in succeeds.
+- Auth methods collapsed from two entries ("Google Antigravity (CLI)" +
+  "Use existing Antigravity login") down to a single "Login" terminal method,
+  matching the single-button pattern other ACP agents use. Session creation
+  already skips auth entirely when `agy` is already signed in, so the second
+  "check existing login" method was redundant.
+- Clicking "Login" never opened a terminal in some ACP clients (e.g. Zed): the
+  native `type: "terminal"` auth mechanism is still experimental/beta-gated on
+  the client side, and clients without it enabled expect a legacy
+  `_meta["terminal-auth"]` payload (`{ label, command, args }`) describing
+  exactly what to spawn instead. The terminal auth method now includes that
+  payload alongside the native fields, so `authenticate` no longer gets called
+  with nothing having launched `agy` at all.
+- The `auth_required` message shown next to the Login button surfaced agy's
+  raw probe error (e.g. `agy models exited with status 1: <no stderr>`),
+  which is meaningless to an end user. It now shows a fixed disclaimer
+  ("By continuing, you agree to https://antigravity.google/terms") instead;
+  the real probe error is still logged server-side (stderr) for debugging.
+
 ## [0.3.0] - 2026-07-23
 
 Authentication, curated slash commands, native session modes, structured plans,
