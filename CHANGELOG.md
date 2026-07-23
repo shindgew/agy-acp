@@ -27,6 +27,37 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Dual-sync mode surfaces: `session/set_mode` pushes `current_mode_update` and
   `config_option_update`; changing `mode` via `session/set_config_option` pushes
   `current_mode_update` so native mode UIs stay aligned.
+- Curated ACP slash commands via `available_commands_update` on
+  `session/new` / `session/load` / `session/resume`: `mode`, `plan`, `model`,
+  and `effort`. Matching `session/prompt` text (for example `/mode plan`) is
+  applied as session config without spawning agy. Full agy TUI slash menus are
+  not advertised.
+- ACP authentication MVP: `authMethods` (terminal `agy-login` with
+  `agy-acp --login` for Google AI Pro web/API-key TUI, plus agent status probe),
+  v1 `authenticate` / `logout` and v2 `auth/login` / `auth/logout`,
+  `agentCapabilities.auth.logout`, and `auth_required` when `session/new` (and
+  load/resume) runs without a signed-in agy. Logout sends TUI `/logout` over a
+  short-lived PTY.
+
+### Changed
+
+- Source layout follows ACP protocol sections: `content/`, `session/`,
+  `slash-commands/`, `tool-calls/`, `file-system/`, `agent-plan/`, with the
+  Antigravity backend under `agy/` and the dual-protocol agent in `agent.ts`.
+- Internal names aligned with ACP: `AcpAgent` / `AcpAgentOptions`,
+  `reasoningEffort` (was internal `reasoningEffect`),
+  `additionalDirectories` (was `workspaces`), `SessionModeId`,
+  `ClientFileSystem`, `contentBlocksToPrompt`, and related helpers. Session
+  store still loads legacy keys (`workspaces`, `reasoningEffect`, `modelId`).
+- Package `main` / `types` entry is `dist/agent.js` (was `dist/acp-server.js`).
+- ROADMAP expanded against the full ACP schema (not only overviews), with doc
+  links on protocol items.
+
+### Removed
+
+- Thin re-export barrels (`acp-server.ts` shim and unused section `index.ts`
+  files) and deprecated `AcpAgent` aliases (`initialize`, `newSession`,
+  `resumeSession`, `setConfigOption`, `prompt` without a v1/v2 suffix).
 
 ## [0.2.8] - 2026-07-22
 
