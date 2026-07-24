@@ -17,7 +17,7 @@ import {
   reasoningEffortConfigOption,
   toModelSlug
 } from "../src/agent.js";
-import type { PtyFactory, SpawnFactory } from "../src/agy/cli.js";
+import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import {
@@ -25,7 +25,7 @@ import {
   sessionUpdateToV1,
   sessionUpdateToV2,
   terminalIdForToolCall
-} from "../src/session/updates.js";
+} from "../src/acp/session/updates.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -556,6 +556,71 @@ describe("session/load and session/resume", () => {
     });
   });
 
+  it("deletes a persisted session via session/delete (ACP v1 & v2)", async () => {
+    await withConversationsDir(async (dir) => {
+      const appOptions = {
+        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-delete-1", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "world" }) }
+        ])
+      };
+
+      let sessionId: string;
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
+        try {
+          const session = await connection.agent.request(methods.agent.session.new, {
+            cwd: "/repo",
+            additionalDirectories: [],
+            mcpServers: []
+          });
+          sessionId = session.sessionId;
+          await connection.agent.request(methods.agent.session.prompt, {
+            sessionId,
+            prompt: [{ type: "text", text: "hi" }]
+          });
+        } finally {
+          connection.close();
+        }
+      }
+
+      // Verify it appears in list
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
+        try {
+          const listed = await connection.agent.request(methods.agent.session.list, { cwd: "/repo" });
+          expect(listed.sessions.some((s) => s.sessionId === sessionId)).toBe(true);
+
+          // Delete session via ACP v1
+          const response = await connection.agent.request(methods.agent.session.delete, { sessionId });
+          expect(response).toEqual({});
+
+          // Verify list no longer contains the session
+          const listedAfter = await connection.agent.request(methods.agent.session.list, { cwd: "/repo" });
+          expect(listedAfter.sessions.some((s) => s.sessionId === sessionId)).toBe(false);
+        } finally {
+          connection.close();
+        }
+      }
+
+      // Verify loading the deleted session rejects
+      {
+        const connection = acpClient({ name: "test-client" }).connect(createAcpApp(appOptions));
+        try {
+          await expect(
+            connection.agent.request(methods.agent.session.load, {
+              sessionId,
+              cwd: "/repo",
+              mcpServers: []
+            })
+          ).rejects.toThrow();
+        } finally {
+          connection.close();
+        }
+      }
+    });
+  });
+
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
       const connection = acpClient({ name: "test-client" }).connect(createAcpApp({
@@ -670,6 +735,77 @@ describe("buildModelCatalog", () => {
       { value: "medium", name: "Medium" },
       { value: "high", name: "High" }
     ]);
+  });
+});
+
+describe("model discovery cache", () => {
+  it("reuses discovered models in memory and across agent instances", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-"));
+    const env = printModeEnv({
+      NODE_ENV: "test",
+      AGY_ACP_MODEL_CACHE: "1",
+      AGY_ACP_STATE_DIR: stateDir
+    });
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([TEST_MODELS_OUTPUT]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+    const config = configFromEnv({ cwd: "/repo", env });
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    try {
+      const first = new AcpAgent({ env, spawnProcess: spawnProcess as unknown as SpawnFactory });
+      const firstModels = await (first as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      const secondModels = await (first as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      expect(firstModels).toEqual(secondModels);
+      expect(modelCalls).toBe(1);
+
+      await waitFor(() => fs.existsSync(path.join(stateDir, "models.json")));
+      const restored = new AcpAgent({ env, spawnProcess: spawnProcess as unknown as SpawnFactory });
+      await expect(
+        (restored as unknown as ModelCacheAgent).modelOptionsForConfig(config)
+      ).resolves.toEqual(firstModels);
+      expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("active session retention", () => {
+  it("evicts and closes the least recently used inactive session", async () => {
+    const agent = new AcpAgent({
+      env: printModeEnv({ AGY_ACP_MAX_ACTIVE_SESSIONS: "2" })
+    });
+    const close1 = vi.fn(async () => {});
+    const close2 = vi.fn(async () => {});
+    const close3 = vi.fn(async () => {});
+    const session = (id: string, close: () => Promise<void>) => ({
+      sessionId: id,
+      activePrompt: false,
+      agy: { close }
+    });
+    type SessionRetentionAgent = {
+      registerSession(id: string, session: unknown): Promise<void>;
+      requireSession(id: string): unknown;
+    };
+    const retention = agent as unknown as SessionRetentionAgent;
+
+    await retention.registerSession("s1", session("s1", close1));
+    await retention.registerSession("s2", session("s2", close2));
+    retention.requireSession("s1");
+    await retention.registerSession("s3", session("s3", close3));
+
+    expect(close1).not.toHaveBeenCalled();
+    expect(close2).toHaveBeenCalledOnce();
+    expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s2")).toThrow("Unknown session");
   });
 });
 
