@@ -8,13 +8,13 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
-import { revertEditToolCall } from "../acp/file-system/revert.js";
+import { revertEditToolCall } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
   type ClientFileSystem
-} from "../acp/file-system/bridge.js";
+} from "./edit/bridge.js";
 import {
   canBridgeInteraction,
   interactionKeys,
