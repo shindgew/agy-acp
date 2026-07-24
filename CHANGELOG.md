@@ -9,6 +9,31 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-07-24
+
+### Added
+
+- `session/delete` support for ACP v1 and draft ACP v2: clients can now delete
+  persisted session bindings from disk via RPC, removing them from `session/list`
+  and purging stored session metadata. Added `SessionStore.delete` method and
+  `delete` capability flag on `initialize`.
+- Support for `AGY_ACP_AGY_BIN` environment variable and `AGY_ACP_SKIP_DOWNLOAD` flag in installer (`ensureAgyInstalled`).
+- Strict SHA256 checksum verification when downloading `agy` binaries in installer.
+
+### Changed
+
+- Reorganized `src/acp/` so each file/folder matches the ACP RPC method (or client
+  method) it implements — `initialize.ts`, `authenticate.ts`, `logout.ts` at the
+  root; `auth/`, `session/`, `fs/` folders for namespaced methods (e.g.
+  `session/new.ts`, `session/set-mode.ts`, `fs/read-text-file.ts`) — with
+  `content/`, `slash-commands/`, `tool-calls/`, `agent-plan/`, `terminal/` kept as
+  doc-topic folders for concerns spanning multiple methods. `agent.ts` shrinks
+  from a ~1300-line monolith to a thin orchestrator. Non-ACP domain logic (model
+  catalog/selection resolution, local edit apply/revert) moved out of `acp/` to
+  `agy/model/` and `agy/edit/`, fixing a reverse dependency where the agy CLI
+  backend was importing from the protocol layer.
+- Optimized `StreamPoller` to track revision counters and handle auxiliary-column step updates without redundant database reads.
+
 ## [0.3.1] - 2026-07-23
 
 ### Fixed
