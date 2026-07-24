@@ -8,7 +8,7 @@ import {
   routeEditThroughClient,
   writeEditThroughClient,
   type ClientFileSystem
-} from "../src/file-system/bridge.js";
+} from "../src/acp/file-system/bridge.js";
 
 function diffToolCall(blocks: Array<{ path: string; oldText: string | null; newText: string }>): SessionUpdate {
   return {

@@ -25,7 +25,7 @@ import {
   isBridgeablePermissionTool,
   permissionKeys,
   permissionOptions
-} from "../src/tool-calls/permissions.js";
+} from "../src/acp/tool-calls/permissions.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 

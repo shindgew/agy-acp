@@ -76,6 +76,19 @@ export class SessionStore {
     return this.#writeChain;
   }
 
+  /** Delete a persisted session binding. Resolves once written (writes are serialized). Returns true if deleted. */
+  delete(sessionId: string): Promise<boolean> {
+    let deleted = false;
+    this.#writeChain = this.#writeChain
+      .then(async () => {
+        deleted = await this.deleteOne(sessionId);
+      })
+      .catch((error) => {
+        console.error(`[agy-acp] WARN: failed to delete session: ${(error as Error).message}`);
+      });
+    return this.#writeChain.then(() => deleted);
+  }
+
   private async load(): Promise<DiskStore> {
     try {
       const parsed = JSON.parse(await fs.promises.readFile(this.file, "utf-8")) as {
@@ -98,6 +111,19 @@ export class SessionStore {
     const tmp = `${this.file}.tmp`;
     await fs.promises.writeFile(tmp, JSON.stringify(store, null, 2));
     await fs.promises.rename(tmp, this.file);
+  }
+
+  private async deleteOne(sessionId: string): Promise<boolean> {
+    const store = await this.load();
+    if (!(sessionId in store.sessions)) {
+      return false;
+    }
+    delete store.sessions[sessionId];
+    await fs.promises.mkdir(this.dir, { recursive: true });
+    const tmp = `${this.file}.tmp`;
+    await fs.promises.writeFile(tmp, JSON.stringify(store, null, 2));
+    await fs.promises.rename(tmp, this.file);
+    return true;
   }
 }
 
