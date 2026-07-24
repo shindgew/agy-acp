@@ -20,12 +20,8 @@ import {
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import {
-  expandSessionUpdateToV2,
-  sessionUpdateToV1,
-  sessionUpdateToV2,
-  terminalIdForToolCall
-} from "../src/acp/session/updates.js";
+import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
