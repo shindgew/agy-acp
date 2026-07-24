@@ -49,6 +49,68 @@ describe("ensureAgyInstalled", () => {
     expect(resolved).toBe("agy");
   });
 
+  it("uses an explicit agy binary without downloading", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-installer-explicit-"));
+    dirs.push(dir);
+    const agyPath = path.join(dir, "custom-agy");
+    fs.writeFileSync(agyPath, "#!/bin/sh\nexit 0\n", "utf-8");
+    fs.chmodSync(agyPath, 0o755);
+
+    const resolved = await ensureAgyInstalled({
+      env: { HOME: dir, AGY_ACP_AGY_BIN: agyPath },
+      fetchImpl: async () => {
+        throw new Error("fetch should not be called");
+      }
+    });
+
+    expect(resolved).toBe(agyPath);
+  });
+
+  it("does not download when automatic installation is disabled", async () => {
+    const warnings: string[] = [];
+    const resolved = await ensureAgyInstalled({
+      env: { HOME: os.tmpdir(), PATH: "", AGY_ACP_SKIP_DOWNLOAD: "1" },
+      installBinDir: path.join(os.tmpdir(), `agy-missing-${Date.now()}`),
+      warn: (message) => warnings.push(message),
+      fetchImpl: async () => {
+        throw new Error("fetch should not be called");
+      }
+    });
+
+    expect(resolved).toBeNull();
+    expect(warnings).toContain("[agy-acp] WARN: agy not found and automatic download is disabled.");
+  });
+
+  it("refuses to install an asset without a SHA256 digest", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-installer-no-digest-"));
+    dirs.push(dir);
+    const warnings: string[] = [];
+    const archiveBytes = buildTarGz({ agy: "#!/bin/sh\nexit 0\n" });
+    const assetName = releaseAssetName(process.platform, process.arch);
+    const fetchImpl: typeof fetch = async (input) => {
+      if (String(input) === DEFAULT_AGY_RELEASES_API) {
+        return new Response(JSON.stringify({
+          tag_name: "1.0.14",
+          assets: [{
+            name: assetName,
+            browser_download_url: "https://example.test/agy.tar.gz"
+          }]
+        }), { status: 200 });
+      }
+      return new Response(new Uint8Array(archiveBytes), { status: 200 });
+    };
+
+    const resolved = await ensureAgyInstalled({
+      env: { HOME: dir, PATH: "" },
+      installBinDir: path.join(dir, "bin"),
+      fetchImpl,
+      warn: (message) => warnings.push(message)
+    });
+
+    expect(resolved).toBeNull();
+    expect(warnings.some((message) => message.includes("has no valid SHA256 digest"))).toBe(true);
+  });
+
   it("downloads the latest GitHub release asset when agy is missing", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-installer-download-"));
     dirs.push(dir);

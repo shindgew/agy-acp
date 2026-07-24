@@ -5,7 +5,7 @@
 import path from "node:path";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
-import { isPlanFile, planUpdateFromMarkdown } from "../../agent-plan/index.js";
+import { isPlanFile, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 

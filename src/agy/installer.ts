@@ -22,6 +22,15 @@ export interface EnsureAgyOptions {
   fetchImpl?: typeof fetch;
 }
 
+function configuredAgyPath(env: NodeJS.ProcessEnv): string | undefined {
+  return optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN);
+}
+
+function skipDownload(env: NodeJS.ProcessEnv): boolean {
+  const value = optional(env.AGY_ACP_SKIP_DOWNLOAD) ?? optional(env.AGY_SKIP_DOWNLOAD);
+  return value === "1" || value?.toLowerCase() === "true";
+}
+
 export function defaultInstallBinDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const home = optional(env.HOME) ?? optional(env.USERPROFILE);
   return home ? path.join(home, ".local", "bin") : undefined;
@@ -60,6 +69,10 @@ export function prependPathDir(env: NodeJS.ProcessEnv, dir: string): void {
 /** Resolve the first usable agy executable from the install dir or PATH. */
 export async function resolveAgyExecutable(options: EnsureAgyOptions = {}): Promise<string | null> {
   const env = options.env ?? process.env;
+  const configured = configuredAgyPath(env);
+  if (configured) {
+    return isExecutableFile(configured) ? configured : null;
+  }
   const installBinDir = options.installBinDir ?? defaultInstallBinDir(env);
   const command = process.platform === "win32" ? "agy.exe" : "agy";
 
@@ -91,6 +104,16 @@ export async function ensureAgyInstalled(options: EnsureAgyOptions = {}): Promis
     return existing;
   }
 
+  const configured = configuredAgyPath(env);
+  if (configured) {
+    warn(`[agy-acp] WARN: configured agy binary is not executable: ${configured}`);
+    return null;
+  }
+  if (skipDownload(env)) {
+    warn("[agy-acp] WARN: agy not found and automatic download is disabled.");
+    return null;
+  }
+
   const installBinDir = options.installBinDir ?? defaultInstallBinDir(env);
   if (!installBinDir) {
     warn("[agy-acp] WARN: cannot determine install directory (HOME is unset).");
@@ -118,6 +141,12 @@ export async function ensureAgyInstalled(options: EnsureAgyOptions = {}): Promis
     return null;
   }
 
+  const expectedDigest = parseSha256Digest(asset.digest);
+  if (!expectedDigest) {
+    warn(`[agy-acp] WARN: release asset ${asset.name} has no valid SHA256 digest; refusing to install.`);
+    return null;
+  }
+
   let archiveBytes: Buffer;
   try {
     archiveBytes = await downloadAsset(asset.browser_download_url, fetchImpl);
@@ -126,17 +155,14 @@ export async function ensureAgyInstalled(options: EnsureAgyOptions = {}): Promis
     return null;
   }
 
-  const expectedDigest = parseSha256Digest(asset.digest);
-  if (expectedDigest) {
-    const actual = sha256Hex(archiveBytes);
-    if (actual !== expectedDigest) {
-      warn(
-        `[agy-acp] WARN: SHA256 mismatch for ${asset.name}\n` +
-          `  expected: ${expectedDigest}\n` +
-          `  got:      ${actual}`
-      );
-      return null;
-    }
+  const actual = sha256Hex(archiveBytes);
+  if (actual !== expectedDigest) {
+    warn(
+      `[agy-acp] WARN: SHA256 mismatch for ${asset.name}\n` +
+        `  expected: ${expectedDigest}\n` +
+        `  got:      ${actual}`
+    );
+    return null;
   }
 
   const dest = installedAgyPath(installBinDir);

@@ -44,6 +44,7 @@ export class StreamPoller {
   private _busy = false;
   private _latestAgentComplete = false;
   private _revision = 0;
+  private dataVersion: number | null = null;
   private rowSnapshot = "";
 
   constructor(private readonly opts: StreamOptions) {
@@ -93,14 +94,27 @@ export class StreamPoller {
       if (this.db === null) return [];
     }
 
+    const dataVersion = this.db.dataVersion();
+    if (this.dataVersion === dataVersion) return [];
+    this.dataVersion = dataVersion;
+
     const rows = this.db.readAfter(this.opts.baseStepIdx);
-    const snapshot = rows.map((row) => `${row.idx}:${row.stepType}:${row.status}:${JSON.stringify(row.stepPayload)}`).join("|");
+    const snapshot = JSON.stringify(rows.map((row) => [
+      row.idx,
+      row.stepType,
+      row.status,
+      row.stepPayload,
+      row.error,
+      row.permission,
+      row.task
+    ]));
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
     this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
     const latest = rows.at(-1);
     this._latestAgentComplete = latest?.stepType === 15 && latest.status === 3;
     const updates = this.translator.translate(rows);
+    const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
     for (const update of updates) {
       const raw = update as unknown as { status?: string; kind?: string; toolCallId?: string };
       const blocked = raw.status === "pending";
@@ -109,7 +123,7 @@ export class StreamPoller {
       const completedEdit = raw.kind === "edit" && raw.status === "completed";
       if (!blocked && !completedEdit) continue;
       const id = String(raw.toolCallId);
-      const row = rows.find((item) => toolCallId(item) === id);
+      const row = rowsByToolCallId.get(id);
       if (row) {
         this._pending.push({
           update,

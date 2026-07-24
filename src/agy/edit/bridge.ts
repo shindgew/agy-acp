@@ -1,5 +1,7 @@
-// ACP File System: route completed edits through client fs/read_text_file +
-// fs/write_text_file so the editor's native review UI owns the change.
+// Route completed edits through the client's ACP fs/read_text_file +
+// fs/write_text_file capability (see acp/fs/read-text-file.ts and
+// acp/fs/write-text-file.ts for the raw RPC calls) so the editor's native
+// review UI owns the change, instead of agy-acp's own permission-bridge modal.
 // Docs: https://agentclientprotocol.com/protocol/v1/file-system
 //
 // Used when there is no live agy gate (or after one), so Zed's review panel

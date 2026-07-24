@@ -8,13 +8,13 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
-import { revertEditToolCall } from "../file-system/revert.js";
+import { revertEditToolCall } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
   type ClientFileSystem
-} from "../file-system/bridge.js";
+} from "./edit/bridge.js";
 import {
   canBridgeInteraction,
   interactionKeys,
@@ -22,7 +22,7 @@ import {
   normalizePermissionChoice,
   parseAskQuestion,
   type PermissionChoice
-} from "../tool-calls/permissions.js";
+} from "../acp/tool-calls/permissions.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
@@ -818,7 +818,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   return {
     cwd: input.cwd,
     additionalDirectories: input.additionalDirectories ?? [],
-    agyPath: "agy",
+    agyPath: optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN) ?? "agy",
     model: undefined,
     effort: undefined,
     mode,

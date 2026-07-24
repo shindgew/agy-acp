@@ -5,7 +5,7 @@ import {
   interpretSlashCommand,
   parseSlashCommand,
   resolveModelValue
-} from "../src/slash-commands/index.js";
+} from "../src/acp/slash-commands/index.js";
 
 describe("parseSlashCommand", () => {
   it("parses name and optional input", () => {

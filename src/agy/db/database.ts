@@ -74,7 +74,8 @@ export function statConversation(dir: string, id: string): DbStat | null {
 export class ConversationDb {
   private constructor(
     private readonly db: Database.Database,
-    private readonly stmt: Database.Statement
+    private readonly stmt: Database.Statement,
+    private readonly dataVersionStmt: Database.Statement
   ) {}
 
   /** Open a conversation DB, or null if missing/unreadable or lacking a steps table. */
@@ -94,7 +95,11 @@ export class ConversationDb {
         console.error(`[agy-acp] WARN: steps table not found in ${id}.db — schema changed?`);
         return null;
       }
-      return new ConversationDb(db, db.prepare(SELECT_ROWS));
+      return new ConversationDb(
+        db,
+        db.prepare(SELECT_ROWS),
+        db.prepare("PRAGMA data_version")
+      );
     } catch {
       return null;
     }
@@ -120,6 +125,12 @@ export class ConversationDb {
       }
     }
     return out;
+  }
+
+  /** SQLite generation counter, incremented when another connection commits. */
+  dataVersion(): number {
+    const row = this.dataVersionStmt.get() as { data_version?: number } | undefined;
+    return row?.data_version ?? 0;
   }
 
   close(): void {

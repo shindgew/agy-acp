@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ConversationDb } from "../src/agy/db/database.js";
 import { ReplayCache } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
+import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
@@ -627,6 +628,91 @@ describe("Translator", () => {
         content: { type: "text", text: "Hello\n world" }
       }
     ]);
+  });
+});
+
+describe("StreamPoller", () => {
+  it("skips decoding unchanged databases and still detects in-place payload growth", () => {
+    const db = createConversationDb(dir, "conv-poll");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: "Hello" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-poll",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      }
+    ]);
+    const revision = poller.revision;
+    const readSpy = vi.spyOn(ConversationDb.prototype, "readAfter");
+    expect(poller.poll()).toEqual([]);
+    expect(readSpy).not.toHaveBeenCalled();
+    expect(poller.revision).toBe(revision);
+
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "Hello world" }));
+    expect(poller.poll()).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: " world" }
+      }
+    ]);
+    expect(readSpy).toHaveBeenCalledOnce();
+    expect(poller.revision).toBe(revision + 1);
+
+    readSpy.mockRestore();
+    poller.close();
+    db.close();
+  });
+
+  it("increments revision for auxiliary-column-only mutations", () => {
+    const db = createConversationDb(dir, "conv-poll-permission");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-1",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls"}'
+          })
+        })
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-poll-permission",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toHaveLength(1);
+    const revision = poller.revision;
+    db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
+      Buffer.from(encodePermissions({ kind: "command", value: "ls", decision: 1 }))
+    );
+    const updated = poller.poll();
+    expect(updated).toHaveLength(1);
+    expect((updated[0] as { sessionUpdate: string }).sessionUpdate).toBe("tool_call_update");
+    expect(poller.revision).toBe(revision + 1);
+    expect(poller.poll()).toEqual([]);
+
+    poller.close();
+    db.close();
   });
 });
 
