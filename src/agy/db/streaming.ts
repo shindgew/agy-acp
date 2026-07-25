@@ -96,9 +96,11 @@ export class StreamPoller {
 
     const dataVersion = this.db.dataVersion();
     if (this.dataVersion === dataVersion) return [];
-    this.dataVersion = dataVersion;
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
+    if (!rows.hasDecodeError) {
+      this.dataVersion = dataVersion;
+    }
     const snapshot = JSON.stringify(rows.map((row) => [
       row.idx,
       row.stepType,
