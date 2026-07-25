@@ -162,6 +162,35 @@ describe("permission bridge", () => {
     expect(interactionKeys("agy-q-skip", "ask_question", askCall)).toBe("\x1b");
   });
 
+  it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
+    // agy 1.1.7 gates sandbox bypass (run a command / read a file outside the
+    // sandbox) through a status-9 `ask_permission` step whose TUI menu is the
+    // same 4-row layout as run_command. It must be bridged, not thrown on.
+    const askPermission = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "ap1",
+      title: "Permission request for git directory",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        Action: "read_file",
+        Reason: "To allow git inside the sandbox to read the parent repository",
+        Target: "/repo/.git",
+        toolAction: "Requesting read access to the git parent repository"
+      }
+    };
+    expect(isBridgeablePermissionTool("ask_permission")).toBe(true);
+    expect(canBridgeInteraction("ask_permission", askPermission)).toBe(true);
+    expect(permissionOptions(askPermission, "ask_permission")).toEqual([
+      { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+      { optionId: "agy-allow-conversation", kind: "allow_always", name: "Yes, and always allow '/repo/.git' in this conversation" },
+      { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow '/repo/.git' (Persist to settings.json)" },
+      { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
+    ]);
+    expect(interactionKeys("agy-allow-once", "ask_permission", askPermission)).toBe("\r");
+    expect(interactionKeys("agy-reject-once", "ask_permission", askPermission)).toBe("\x1b[B\x1b[B\x1b[B\r");
+  });
+
   for (const [choice, keys] of [
     ["agy-allow-once", "\r"],
     ["agy-allow-conversation", "\x1b[B\r"],
