@@ -17,14 +17,25 @@ export function planIdForPath(targetFile: string): string {
   return `file:${targetFile}`;
 }
 
-/** True when a write target looks like an agy brain plan artifact. */
+/**
+ * Plan artifact filenames agy writes under `brain/**`. Only these are the
+ * checklist-style plan; the brain directory also holds many prose artifacts
+ * (`task.md`, `walkthrough.md`, `content.md`, `code_review_*.md`,
+ * `*_analysis.md`, ...) that must NOT be shredded into bogus plan entries.
+ */
+const PLAN_FILENAMES = new Set(["implementation_plan.md", "plan.md"]);
+
+/** True when a write target is an agy brain *plan* artifact (not any brain md). */
 export function isPlanFile(targetFile: string): boolean {
-  return (
-    targetFile.includes(".gemini") &&
-    targetFile.includes("antigravity-cli") &&
-    targetFile.includes("brain") &&
-    targetFile.endsWith("md")
-  );
+  if (
+    !targetFile.includes(".gemini") ||
+    !targetFile.includes("antigravity-cli") ||
+    !targetFile.includes("brain")
+  ) {
+    return false;
+  }
+  const base = (targetFile.split(/[\\/]/).pop() ?? "").toLowerCase();
+  return PLAN_FILENAMES.has(base);
 }
 
 /**
