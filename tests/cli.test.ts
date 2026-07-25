@@ -27,7 +27,7 @@ import {
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -162,6 +162,35 @@ describe("permission bridge", () => {
     expect(interactionKeys("agy-q-skip", "ask_question", askCall)).toBe("\x1b");
   });
 
+  it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
+    // agy 1.1.7 gates sandbox bypass (run a command / read a file outside the
+    // sandbox) through a status-9 `ask_permission` step whose TUI menu is the
+    // same 4-row layout as run_command. It must be bridged, not thrown on.
+    const askPermission = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "ap1",
+      title: "Permission request for git directory",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        Action: "read_file",
+        Reason: "To allow git inside the sandbox to read the parent repository",
+        Target: "/repo/.git",
+        toolAction: "Requesting read access to the git parent repository"
+      }
+    };
+    expect(isBridgeablePermissionTool("ask_permission")).toBe(true);
+    expect(canBridgeInteraction("ask_permission", askPermission)).toBe(true);
+    expect(permissionOptions(askPermission, "ask_permission")).toEqual([
+      { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+      { optionId: "agy-allow-conversation", kind: "allow_always", name: "Yes, and always allow '/repo/.git' in this conversation" },
+      { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow '/repo/.git' (Persist to settings.json)" },
+      { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
+    ]);
+    expect(interactionKeys("agy-allow-once", "ask_permission", askPermission)).toBe("\r");
+    expect(interactionKeys("agy-reject-once", "ask_permission", askPermission)).toBe("\x1b[B\x1b[B\x1b[B\r");
+  });
+
   for (const [choice, keys] of [
     ["agy-allow-once", "\r"],
     ["agy-allow-conversation", "\x1b[B\r"],
@@ -197,6 +226,29 @@ describe("permission bridge", () => {
       fs.rmSync(dir, { recursive: true, force: true });
     });
   }
+
+  it("completes a turn that ends on a denied command (failed tool step, no trailing message)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "denied");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"git reset"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("go", async () => {}, async () => {
+      // agy records the denial and fails the command; the turn ends here with
+      // NO trailing agent-text step (matches real denied-command turns).
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "denied.db"));
+      updateStep(db, 1, { status: 7 });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-reject-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\x1b[B\x1b[B\x1b[B\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
 
   it("accepts an idle marker emitted after the DB write but before the next poll", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
@@ -242,17 +294,64 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("times out while the ACP client leaves a permission request unanswered", async () => {
+  it("pauses turn deadline while waiting for ACP client permission response and extends turn timeout", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "permission-timeout");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
     });
-    const session = interactiveSession(dir, pty, "30ms");
+    const session = interactiveSession(dir, pty, "2s");
 
-    await expect(session.prompt("go", async () => {}, () => new Promise(() => {}))).rejects.toThrow(/timed out after 30ms/);
-    expect(pty.killed).toBe(true);
+    const result = session.prompt("go", async () => {}, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-timeout.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 450);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("re-forwards a re-armed status-9 prompt on the same run_command step (compound `a && b`)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "compound");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"git status && git log"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      const { default: Database } = await import("better-sqlite3");
+      const db = new Database(path.join(dir, "compound.db"));
+      if (calls === 1) {
+        // agy granted segment 1 (`git status`) but stays at status 9 awaiting
+        // the next segment's decision — a re-armed prompt on the same step.
+        db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "command", value: "git status", decision: 1 }))
+        );
+      } else {
+        db.prepare("UPDATE steps SET permissions = ?, status = 3 WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "unsandboxed", value: "git log", decision: 1 }))
+        );
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      }
+      db.close();
+      return "agy-allow-conversation";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    // Both segments gated — the second must not be swallowed by toolCallId dedup.
+    expect(calls).toBe(2);
+    expect(pty.writes).toEqual(["\x1b[B\r", "\x1b[B\r"]);
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

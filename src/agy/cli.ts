@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
+import type { StepRow } from "./db/types.js";
 import { revertEditToolCall } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
@@ -29,6 +30,15 @@ const POLL_INTERVAL_MS = 200;
 /** Trailing polls after the process exits, to catch rows flushed right around exit. */
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
+
+/** Signature of the permission decision agy has recorded for a gated step.
+ *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
+ *  even though the toolCallId is unchanged, letting the turn loop tell a fresh
+ *  decision apart from a redundant re-emission of the same still-pending one. */
+function permissionSignature(row: StepRow): string {
+  const p = row.permission;
+  return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
+}
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
 
@@ -327,14 +337,14 @@ export class AgyCliSession {
     // edit once agy applies it, at which point it's still worth routing
     // through the client's fs write-through so its native review UI tracks
     // the edit — that's a second, independent decision for the same id.
-    const requestedGate = new Set<string>();
+    const requestedGate = new Map<string, string>();
     const requestedEditReview = new Set<string>();
     // ids that already went through the live gate above, so a later
     // completed-edit sighting shouldn't trigger a second (redundant) local
     // permission prompt if the client has no fs write-through.
     const gatedIds = new Set<string>();
     const activePtyExit = this.#ptyExit!;
-    const deadline = Date.now() + parsePrintTimeoutMs(this.config.printTimeout);
+    let deadline = Date.now() + parsePrintTimeoutMs(this.config.printTimeout);
     let candidateRevision = -1;
     let seenRevision = -1;
     // A newly spawned TUI first draws its initial idle prompt, then draws
@@ -356,9 +366,22 @@ export class AgyCliSession {
         for (const interaction of poller.takePending()) {
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
-          const seen = interaction.blocked ? requestedGate : requestedEditReview;
-          if (seen.has(id)) continue;
-          seen.add(id);
+          if (interaction.blocked) {
+            // A single agy run_command step can gate several sequential
+            // decisions (each segment of `a && b`, a sandbox escalation, ...):
+            // agy records the just-resolved decision in the row's permission
+            // column but keeps the step at status 9 until every decision is
+            // answered. Dedup on that permission signature (not the toolCallId
+            // alone) so a re-armed prompt on the same step is forwarded again
+            // instead of being swallowed — swallowing it hangs the turn until
+            // the deadline.
+            const signature = permissionSignature(interaction.row);
+            if (requestedGate.get(id) === signature) continue;
+            requestedGate.set(id, signature);
+          } else {
+            if (requestedEditReview.has(id)) continue;
+            requestedEditReview.add(id);
+          }
 
           if (interaction.blocked) {
             if (!canBridgeInteraction(interaction.toolName, toolCall)) {
@@ -386,10 +409,11 @@ export class AgyCliSession {
               }
             }
 
+            const startPermission = Date.now();
             const choice = await this.raceTurnCallback(
-              onPermission(toolCall, { toolName: interaction.toolName }),
-              deadline
+              onPermission(toolCall, { toolName: interaction.toolName })
             );
+            deadline += Date.now() - startPermission;
             if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
 
             const keys = interactionKeys(choice, interaction.toolName, toolCall);
@@ -434,10 +458,11 @@ export class AgyCliSession {
           // Genuinely ungated (no live agy gate ever asked) and no client
           // write-through available — offer local review: keep is a no-op,
           // reject restores prior text.
+          const startPermission = Date.now();
           const choice = await this.raceTurnCallback(
-            onPermission(toolCall, { toolName: interaction.toolName }),
-            deadline
+            onPermission(toolCall, { toolName: interaction.toolName })
           );
+          deadline += Date.now() - startPermission;
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
           if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
@@ -460,11 +485,14 @@ export class AgyCliSession {
     }
   }
 
-  private async raceTurnCallback<T>(callback: Promise<T>, deadline: number): Promise<T | "cancelled"> {
+  private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
     const guarded = callback.catch((error) => {
       if (this.#cancelled) return "cancelled" as const;
       throw error;
     });
+    if (deadline === undefined) {
+      return await Promise.race([guarded, this.#cancelWait.then(() => "cancelled" as const)]);
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput)), Math.max(0, deadline - Date.now()));

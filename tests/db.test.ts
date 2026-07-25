@@ -714,6 +714,45 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("retries readAfter on next poll if a torn read decode error occurs", () => {
+    const db = createConversationDb(dir, "conv-torn-read");
+    // Insert step with invalid/corrupt blob payload to simulate premature EOF
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      1, 21, 9, Buffer.from([0x08, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-torn-read",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // First poll encounters decode error, so dataVersion is NOT cached
+    expect(poller.poll()).toEqual([]);
+
+    // Now update row 1 to hold a valid payload (simulating completed write)
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 1").run(
+      Buffer.from(encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-1",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls"}'
+          })
+        })
+      }))
+    );
+
+    // Second poll retries reading and successfully decodes the step
+    const updates = poller.poll();
+    expect(updates).toHaveLength(1);
+    expect((updates[0] as { sessionUpdate: string }).sessionUpdate).toBe("tool_call");
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {

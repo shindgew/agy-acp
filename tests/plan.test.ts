@@ -14,6 +14,15 @@ describe("isPlanFile", () => {
     expect(isPlanFile("/repo/docs/plan.md")).toBe(false);
     expect(isPlanFile("/Users/me/.gemini/antigravity-cli/brain/x/note.txt")).toBe(false);
   });
+
+  it("rejects non-plan brain markdown artifacts", () => {
+    const base = "/Users/me/.gemini/antigravity-cli/brain/abc";
+    expect(isPlanFile(`${base}/code_review_v0.3.3.md`)).toBe(false);
+    expect(isPlanFile(`${base}/walkthrough.md`)).toBe(false);
+    expect(isPlanFile(`${base}/task.md`)).toBe(false);
+    expect(isPlanFile(`${base}/content.md`)).toBe(false);
+    expect(isPlanFile(`${base}/comparison_analysis.md`)).toBe(false);
+  });
 });
 
 describe("parsePlanEntries", () => {
