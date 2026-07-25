@@ -27,7 +27,7 @@ import {
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -265,17 +265,64 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("times out while the ACP client leaves a permission request unanswered", async () => {
+  it("pauses turn deadline while waiting for ACP client permission response and extends turn timeout", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "permission-timeout");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
     });
-    const session = interactiveSession(dir, pty, "30ms");
+    const session = interactiveSession(dir, pty, "2s");
 
-    await expect(session.prompt("go", async () => {}, () => new Promise(() => {}))).rejects.toThrow(/timed out after 30ms/);
-    expect(pty.killed).toBe(true);
+    const result = session.prompt("go", async () => {}, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-timeout.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 450);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("re-forwards a re-armed status-9 prompt on the same run_command step (compound `a && b`)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "compound");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"git status && git log"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      const { default: Database } = await import("better-sqlite3");
+      const db = new Database(path.join(dir, "compound.db"));
+      if (calls === 1) {
+        // agy granted segment 1 (`git status`) but stays at status 9 awaiting
+        // the next segment's decision — a re-armed prompt on the same step.
+        db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "command", value: "git status", decision: 1 }))
+        );
+      } else {
+        db.prepare("UPDATE steps SET permissions = ?, status = 3 WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "unsandboxed", value: "git log", decision: 1 }))
+        );
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      }
+      db.close();
+      return "agy-allow-conversation";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    // Both segments gated — the second must not be swallowed by toolCallId dedup.
+    expect(calls).toBe(2);
+    expect(pty.writes).toEqual(["\x1b[B\r", "\x1b[B\r"]);
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
