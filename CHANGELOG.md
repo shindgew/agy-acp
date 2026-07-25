@@ -25,6 +25,9 @@ for draft v2 may still change before ACP v2 stabilizes.
   artifacts aren't shredded into bogus plan entries.
 - Bridge agy 1.1.7's `ask_permission` sandbox-bypass interaction instead of
   throwing `Unsupported agy interaction 'ask_permission'`.
+- Decode `grep_search` hit field 2 as a varint line number instead of a string,
+  preventing protobuf parser misalignment, premature EOF errors, and dropped
+  search steps. (#12, #18)
 
 ## [0.3.2] - 2026-07-24
 
