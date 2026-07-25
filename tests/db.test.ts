@@ -11,7 +11,9 @@ import { createConversationDb, insertStep, updateStep, updateStepPayload } from 
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodeGrepSearchResult,
   encodePermissions,
+  encodeSearchHit,
   encodeStepPayload,
   encodeToolCall,
   encodeToolRun,
@@ -325,6 +327,59 @@ describe("Translator", () => {
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("Query: agy acp adapter");
     expect(body).toContain("https://www.google.com/search");
+  });
+
+  it("decodes grep_search hits whose field 2 is a varint line number (regression for issue #12)", () => {
+    const db = createConversationDb(dir, "conv-grep");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-1",
+            namePrimary: "grep_search",
+            rawInputJson: '{"Query":"Unreleased","SearchPath":"/repo"}'
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "Unreleased",
+          cwdUri: "file:///repo",
+          hits: [
+            encodeSearchHit({ field1: "CHANGELOG.md", field2: 9, field3: "## [Unreleased]", field4: "/repo/CHANGELOG.md" }),
+            encodeSearchHit({ field1: "CHANGELOG.md", field2: 42, field3: "## [Unreleased] - 2026-01-01", field4: "/repo/CHANGELOG.md" })
+          ]
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    // The whole point of the regression: this must not throw "premature EOF"
+    // / "cant skip wire type 6/7", and the hits must carry line numbers.
+    expect(rows).toHaveLength(1);
+    const hits = rows[0].stepPayload.grepSearch?.hits ?? [];
+    expect(hits).toHaveLength(2);
+    expect(hits[0].field1).toBe("CHANGELOG.md");
+    expect(hits[0].field2).toBe(9);
+    expect(hits[0].field3).toBe("## [Unreleased]");
+    expect(hits[0].field4).toBe("/repo/CHANGELOG.md");
+    expect(hits[1].field2).toBe(42);
+
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const conn2 = ConversationDb.open(dir, "conv-grep")!;
+    const updates = translator.translate(conn2.readAfter(-1));
+    conn2.close();
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { kind: string; content?: Array<{ content?: { text?: string } }> };
+    expect(update.kind).toBe("search");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("CHANGELOG.md | 9 | ## [Unreleased]");
+    expect(body).toContain("CHANGELOG.md | 42 | ## [Unreleased] - 2026-01-01");
   });
 
   it("surfaces fetched URL body from field 40", () => {

@@ -115,6 +115,40 @@ export function encodeViewFileResult(result: {
   return w.finish();
 }
 
+/** grep_search hit: 1 = relative path, 2 = line number (varint),
+ *  3 = matched text, 4 = absolute path. Mirrors `decodeSearchHit`. */
+export function encodeSearchHit(hit: {
+  field1?: string;
+  field2?: number;
+  field3?: string;
+  field4?: string;
+}): Uint8Array {
+  const w = new BinaryWriter();
+  if (hit.field1) w.tag(1, 2).string(hit.field1);
+  if (hit.field2 !== undefined) w.tag(2, 0).int64(hit.field2);
+  if (hit.field3) w.tag(3, 2).string(hit.field3);
+  if (hit.field4) w.tag(4, 2).string(hit.field4);
+  return w.finish();
+}
+
+export function encodeGrepSearchResult(result: {
+  query?: string;
+  includeGlob?: string;
+  textOutput?: string;
+  hits?: Uint8Array[];
+  shellCommand?: string;
+  cwdUri?: string;
+}): Uint8Array {
+  const w = new BinaryWriter();
+  if (result.query) w.tag(1, 2).string(result.query);
+  if (result.includeGlob) w.tag(2, 2).string(result.includeGlob);
+  if (result.textOutput) w.tag(3, 2).string(result.textOutput);
+  for (const hit of result.hits ?? []) submessage(w, 4, hit);
+  if (result.shellCommand) w.tag(10, 2).string(result.shellCommand);
+  if (result.cwdUri) w.tag(11, 2).string(result.cwdUri);
+  return w.finish();
+}
+
 /** permissions column: { 2: { 1: { 1: kind, 2: value }, 2: decision } }. */
 export function encodePermissions(info: { kind?: string; value?: string; decision?: number }): Uint8Array {
   const target = new BinaryWriter();
@@ -137,11 +171,13 @@ export function encodeStepPayload(opts: {
   userPrompt?: string;
   commandResult?: Uint8Array;
   viewFile?: Uint8Array;
+  grepSearch?: Uint8Array;
   webSearch?: Uint8Array;
   urlContent?: Uint8Array;
 }): Uint8Array {
   const w = new BinaryWriter();
   if (opts.toolRun) submessage(w, 5, opts.toolRun);
+  if (opts.grepSearch) submessage(w, 13, opts.grepSearch);
   if (opts.viewFile) submessage(w, 14, opts.viewFile);
   if (opts.userPrompt !== undefined) submessage(w, 19, encodeUserPrompt(opts.userPrompt));
   if (opts.agentText !== undefined) submessage(w, 20, encodeAgentText(opts.agentText));
