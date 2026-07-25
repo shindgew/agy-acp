@@ -9,6 +9,23 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pause the turn deadline while awaiting a `session/request_permission`
+  response and extend it by the wait duration, so slow or multi-prompt answers
+  no longer hit the 5m timeout. (#10)
+- Re-forward re-armed status-9 prompts on the same `run_command` step (each
+  segment of `a && b`), deduping on the permission signature instead of the
+  tool-call id, so compound commands no longer hang.
+- Complete turns that end on a terminal tool step with no trailing agent
+  message (denied/failed command, status 7).
+- Retry torn step-payload reads on the next poll instead of dropping them
+  until an unrelated data-version bump.
+- Restrict `isPlanFile` to `implementation_plan.md` / `plan.md` so prose brain
+  artifacts aren't shredded into bogus plan entries.
+- Bridge agy 1.1.7's `ask_permission` sandbox-bypass interaction instead of
+  throwing `Unsupported agy interaction 'ask_permission'`.
+
 ## [0.3.2] - 2026-07-24
 
 ### Added
