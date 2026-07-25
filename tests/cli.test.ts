@@ -198,6 +198,29 @@ describe("permission bridge", () => {
     });
   }
 
+  it("completes a turn that ends on a denied command (failed tool step, no trailing message)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "denied");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"git reset"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("go", async () => {}, async () => {
+      // agy records the denial and fails the command; the turn ends here with
+      // NO trailing agent-text step (matches real denied-command turns).
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "denied.db"));
+      updateStep(db, 1, { status: 7 });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-reject-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\x1b[B\x1b[B\x1b[B\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("accepts an idle marker emitted after the DB write but before the next poll", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {

@@ -42,7 +42,7 @@ export class StreamPoller {
   private _pending: PendingInteraction[] = [];
   private _hasRows = false;
   private _busy = false;
-  private _latestAgentComplete = false;
+  private _latestStepTerminal = false;
   private _revision = 0;
   private dataVersion: number | null = null;
   private rowSnapshot = "";
@@ -76,7 +76,7 @@ export class StreamPoller {
   }
 
   get turnCompleteCandidate(): boolean {
-    return this._hasRows && !this._busy && this._latestAgentComplete;
+    return this._hasRows && !this._busy && this._latestStepTerminal;
   }
 
   /** Increments whenever the observed rows (including growing in-place rows) change. */
@@ -114,7 +114,13 @@ export class StreamPoller {
     this._hasRows = rows.length > 0;
     this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
     const latest = rows.at(-1);
-    this._latestAgentComplete = latest?.stepType === 15 && latest.status === 3;
+    // A turn can end on a completed agent message, but also on a terminal tool
+    // step with no trailing message — most notably a denied/failed command
+    // (status 7), after which agy returns to idle without emitting more text.
+    // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
+    // agent message", so those turns don't hang until the deadline.
+    this._latestStepTerminal =
+      latest !== undefined && (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
     for (const update of updates) {
