@@ -28,6 +28,11 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Decode `grep_search` hit field 2 as a varint line number instead of a string,
   preventing protobuf parser misalignment, premature EOF errors, and dropped
   search steps. (#12, #18)
+- Send both `current_mode_update` and `config_option_update` notifications on
+  every mode-change path (`set_config_option`, `set_mode`, slash commands) so
+  clients watching either mechanism stay in sync during the ACP v1 transition
+  period. Previously some paths emitted only one, causing Zed to log
+  `Parse error: missing field configOptions`. (#15)
 
 ## [0.3.2] - 2026-07-24
 

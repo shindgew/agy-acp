@@ -882,11 +882,14 @@ describe("session modes and config option sync", () => {
         value: "accept-edits"
       });
       expect(modeViaConfig.configOptions[0].currentValue).toBe("accept-edits");
-      expect(updates).toEqual([
-        { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" }
-      ]);
-      // Config UI already received the full list in the set_config_option response.
-      expect(updates.some((u) => u.sessionUpdate === "config_option_update")).toBe(false);
+      // ACP transition: both legacy current_mode_update and out-of-band config_option_update are sent.
+      expect(updates).toEqual(
+        expect.arrayContaining([
+          { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" },
+          expect.objectContaining({ sessionUpdate: "config_option_update" })
+        ])
+      );
+      expect(updates.some((u) => u.sessionUpdate === "current_mode_update")).toBe(true);
 
       updates.length = 0;
       await connection.agent.request(methods.agent.session.setMode, {
@@ -1018,7 +1021,13 @@ describe("available_commands_update and slash commands", () => {
       });
       expect(updates).toEqual(
         expect.arrayContaining([
-          { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" }
+          { sessionUpdate: "current_mode_update", currentModeId: "accept-edits" },
+          expect.objectContaining({
+            sessionUpdate: "config_option_update",
+            configOptions: expect.arrayContaining([
+              expect.objectContaining({ id: "mode", currentValue: "accept-edits" })
+            ])
+          })
         ])
       );
     } finally {
