@@ -808,6 +808,34 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("bounds retries on a permanently undecodable row after 3 failed attempts on the same dataVersion", () => {
+    const db = createConversationDb(dir, "conv-perm-corrupt");
+    // Insert step with invalid/corrupt blob payload to simulate permanently corrupted data
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      1, 21, 9, Buffer.from([0x08, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-perm-corrupt",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // Poll 1: encounters decode error (attempt 1), returns []
+    expect(poller.poll()).toEqual([]);
+    // Poll 2: encounters decode error (attempt 2), returns []
+    expect(poller.poll()).toEqual([]);
+    // Poll 3: encounters decode error (attempt 3), caches dataVersion and returns []
+    expect(poller.poll()).toEqual([]);
+
+    // Poll 4: because dataVersion is now cached, poll() immediately returns [] without re-reading/re-logging
+    expect(poller.poll()).toEqual([]);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {

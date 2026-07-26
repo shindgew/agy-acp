@@ -45,6 +45,8 @@ export class StreamPoller {
   private _latestStepTerminal = false;
   private _revision = 0;
   private dataVersion: number | null = null;
+  private failedDataVersion: number | null = null;
+  private failedDataVersionAttempts = 0;
   private rowSnapshot = "";
 
   constructor(private readonly opts: StreamOptions) {
@@ -100,6 +102,18 @@ export class StreamPoller {
     const rows = this.db.readAfter(this.opts.baseStepIdx);
     if (!rows.hasDecodeError) {
       this.dataVersion = dataVersion;
+      this.failedDataVersion = null;
+      this.failedDataVersionAttempts = 0;
+    } else {
+      if (this.failedDataVersion === dataVersion) {
+        this.failedDataVersionAttempts++;
+      } else {
+        this.failedDataVersion = dataVersion;
+        this.failedDataVersionAttempts = 1;
+      }
+      if (this.failedDataVersionAttempts >= 3) {
+        this.dataVersion = dataVersion;
+      }
     }
     const snapshot = JSON.stringify(rows.map((row) => [
       row.idx,
