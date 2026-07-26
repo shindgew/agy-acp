@@ -1,6 +1,6 @@
 # agy-acp
 
-ACP adapter for Google Antigravity CLI.  
+ACP adapter for Google Antigravity CLI.
 
 ## Usage
 
@@ -13,7 +13,7 @@ curl -fsSL https://antigravity.google/cli/install.sh | bash
 ```
 
 ```sh
-npx agy-acp                 # stable (0.3.0)
+npx agy-acp                 # stable (0.3.3)
 npx agy-acp@alpha           # draft ACP v2 channel
 npx agy-acp@1.0.0-alpha.0   # pin a pre-release
 ```
