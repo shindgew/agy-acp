@@ -107,7 +107,16 @@ export async function handlePromptV1(
     params.sessionId,
     prompt,
     {
-      modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
+      // ACP transition: send both legacy current_mode_update (modes-API clients)
+      // and config_option_update (configOptions clients) on slash-command mode changes.
+      modeChanged: async (mode) => {
+        await deps.notifyCurrentModeUpdate(client, params.sessionId, mode);
+        await deps.notifyConfigOptionUpdateV1(
+          client,
+          params.sessionId,
+          deps.requireSession(params.sessionId)
+        );
+      },
       configChanged: async () => {
         await deps.notifyConfigOptionUpdateV1(
           client,
