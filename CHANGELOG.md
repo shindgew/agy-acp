@@ -14,6 +14,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Pause the turn deadline while awaiting a `session/request_permission`
   response and extend it by the wait duration, so slow or multi-prompt answers
   no longer hit the 5m timeout. (#10)
+- Re-arm turn deadline on prompt resolution and reset deadline on active DB progress, fixing 5m turn timeouts.
 - Re-forward re-armed status-9 prompts on the same `run_command` step (each
   segment of `a && b`), deduping on the permission signature instead of the
   tool-call id, so compound commands no longer hang.
