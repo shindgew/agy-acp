@@ -220,7 +220,7 @@ describe("permission bridge", () => {
       expect(resolved).toBe(false);
       expect((await result).stopReason).toBe("end_turn");
       expect(calls).toBe(1);
-      expect(pty.writes).toEqual([keys]);
+      expect(pty.writes).toEqual(permissionWriteChunks(keys));
       await session.close();
       expect(pty.killed).toBe(true);
       fs.rmSync(dir, { recursive: true, force: true });
@@ -241,11 +241,11 @@ describe("permission bridge", () => {
       const db = new (await import("better-sqlite3")).default(path.join(dir, "denied.db"));
       updateStep(db, 1, { status: 7 });
       db.close();
-      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      setTimeout(() => pty.emitData("? for shortcuts"), 150);
       return "agy-reject-once";
     });
     expect((await result).stopReason).toBe("end_turn");
-    expect(pty.writes).toEqual(["\x1b[B\x1b[B\x1b[B\r"]);
+    expect(pty.writes).toEqual(["\x1b[B", "\x1b[B", "\x1b[B", "\r"]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -380,7 +380,7 @@ describe("permission bridge", () => {
     expect((await result).stopReason).toBe("end_turn");
     // Both segments gated — the second must not be swallowed by toolCallId dedup.
     expect(calls).toBe(2);
-    expect(pty.writes).toEqual(["\x1b[B\r", "\x1b[B\r"]);
+    expect(pty.writes).toEqual(["\x1b[B", "\r", "\x1b[B", "\r"]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -403,10 +403,12 @@ describe("permission bridge", () => {
         db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
           Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
         );
-        setTimeout(() => pty.emitData("executing approved segment"), 5);
-        // Split the marker across settled PTY bursts to exercise tail matching.
-        setTimeout(() => pty.emitData("Yes, and "), 50);
-        setTimeout(() => pty.emitData("always allow"), 80);
+        // The next identical panel arrives immediately, with no marker-free
+        // render or debounce gap between permission generations.
+        setTimeout(() => {
+          pty.emitData("Yes, and ");
+          pty.emitData("always allow");
+        }, 5);
       } else {
         db.prepare("UPDATE steps SET permissions = ?, status = 3 WHERE idx = 1").run(
           Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
@@ -452,7 +454,7 @@ describe("permission bridge", () => {
 
     expect((await result).stopReason).toBe("end_turn");
     expect(calls).toBe(1);
-    expect(pty.writes).toEqual(["\x1b[B\r"]);
+    expect(pty.writes).toEqual(["\x1b[B", "\r"]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -749,6 +751,42 @@ describe("permission bridge", () => {
     await session.cancel();
     expect((await pending).stopReason).toBe("cancelled");
     expect(pty.writes).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("cancels cleanly while waiting for the permission panel to render", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "cancel-panel-wait");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
+    setTimeout(() => void session.cancel(), 50);
+
+    expect((await pending).stopReason).toBe("cancelled");
+    expect(pty.writes).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("cancels cleanly while waiting for an arrow-key panel redraw", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "cancel-panel-redraw");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitArrowRedraw = false;
+    const session = interactiveSession(dir, pty);
+    const pending = session.prompt("go", async () => {}, async () => {
+      setTimeout(() => void session.cancel(), 50);
+      return "agy-allow-conversation";
+    });
+
+    expect((await pending).stopReason).toBe("cancelled");
+    expect(pty.writes).toEqual(["\x1b[B"]);
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1097,17 +1135,38 @@ function interactiveSession(dir: string, pty: FakePty, printTimeout = "3s") {
   } as PtyFactory);
 }
 
+function permissionWriteChunks(keys: string): string[] {
+  const chunks: string[] = [];
+  const down = "\x1b[B";
+  let offset = 0;
+  while (keys.startsWith(down, offset)) {
+    chunks.push(down);
+    offset += down.length;
+  }
+  if (offset < keys.length) chunks.push(keys.slice(offset));
+  return chunks;
+}
+
 class FakePty implements PtyProcess {
   writes: string[] = [];
   killed = false;
+  emitPermissionPanelOnStart = true;
+  emitArrowRedraw = true;
   private dataListeners: Array<(data: string) => void> = [];
   private exitListeners: Array<(event: { exitCode: number }) => void> = [];
   constructor(private readonly onSpawn?: () => void) {}
   start() {
     this.onSpawn?.();
-    queueMicrotask(() => this.emitData("? for shortcuts"));
+    queueMicrotask(() => this.emitData(
+      this.emitPermissionPanelOnStart ? "? for shortcuts\nYes, and always allow" : "? for shortcuts"
+    ));
   }
-  write(data: string) { this.writes.push(data); }
+  write(data: string) {
+    this.writes.push(data);
+    if (data === "\x1b[B" && this.emitArrowRedraw) {
+      setTimeout(() => this.emitData("Yes, and always allow"), 0);
+    }
+  }
   kill() { this.killed = true; for (const listener of this.exitListeners) listener({ exitCode: 0 }); }
   onData(listener: (data: string) => void) { this.dataListeners.push(listener); return { dispose() {} }; }
   onExit(listener: (event: { exitCode: number }) => void) { this.exitListeners.push(listener); return { dispose() {} }; }

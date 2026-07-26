@@ -31,6 +31,7 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
+const PERMISSION_REDRAW_TIMEOUT_MS = 500;
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -443,6 +444,16 @@ export class AgyCliSession {
               }
             }
 
+            if (interaction.toolName !== "ask_question" && !await this.waitForPermissionPanel(deadline)) {
+              if (this.#cancelled) break;
+              throw new AgyCliError(
+                "agy permission panel was not observed before requesting permission",
+                [this.config.agyPath],
+                null,
+                this.#ptyOutput
+              );
+            }
+
             const choice = await this.raceTurnCallback(
               onPermission(toolCall, { toolName: interaction.toolName })
             );
@@ -458,8 +469,11 @@ export class AgyCliSession {
                 this.#ptyOutput
               );
             }
-            if (interaction.toolName !== "ask_question") this.markCurrentPermissionPanel();
-            this.#pty?.write(keys);
+            if (interaction.toolName === "ask_question") {
+              this.#pty?.write(keys);
+            } else {
+              if (!await this.writePermissionKeys(keys, deadline)) break;
+            }
             gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
             // An idle marker printed before the decision cannot mean that the
             // approved/rejected command has finished.
@@ -771,7 +785,7 @@ export class AgyCliSession {
     const visible = output.includes(marker);
     this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
     if (visible) {
-      if (!this.#ptyPermissionPanelVisible) this.#ptyPermissionMarkerCount++;
+      this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
     } else if (this.#ptyPermissionMarkerTail.length === 0) {
       this.#ptyPermissionPanelVisible = false;
@@ -780,12 +794,55 @@ export class AgyCliSession {
     this.#ptyPermissionRenderTimer = undefined;
   }
 
-  private markCurrentPermissionPanel(): void {
-    if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
-    this.#ptyPermissionRenderTimer = undefined;
-    this.#ptyPermissionRender = "";
-    this.#ptyPermissionMarkerTail = "";
-    this.#ptyPermissionPanelVisible = true;
+  private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
+    if (!await this.waitForPermissionPanel(deadline)) {
+      if (this.#cancelled) return false;
+      throw new AgyCliError(
+        "agy permission panel did not settle before applying the permission response",
+        [this.config.agyPath],
+        null,
+        this.#ptyOutput
+      );
+    }
+
+    const down = "\x1b[B";
+    let offset = 0;
+    while (keys.startsWith(down, offset)) {
+      const renderCount = this.#ptyPermissionMarkerCount;
+      this.#pty?.write(down);
+      if (!await this.waitForPermissionRenderAfter(renderCount, deadline)) {
+        if (this.#cancelled) return false;
+        throw new AgyCliError(
+          "agy permission panel did not redraw after menu navigation",
+          [this.config.agyPath],
+          null,
+          this.#ptyOutput
+        );
+      }
+      offset += down.length;
+    }
+    this.#pty?.write(keys.slice(offset));
+    return true;
+  }
+
+  private async waitForPermissionPanel(deadline: number): Promise<boolean> {
+    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
+    while (
+      (!this.#ptyPermissionPanelVisible || this.#ptyPermissionRenderTimer !== undefined) &&
+      !this.#cancelled &&
+      Date.now() < expires
+    ) {
+      await sleep(5);
+    }
+    return this.#ptyPermissionPanelVisible && this.#ptyPermissionRenderTimer === undefined;
+  }
+
+  private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
+    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
+    while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
+      await sleep(5);
+    }
+    return this.#ptyPermissionMarkerCount > renderCount;
   }
 
   async close(): Promise<void> {
