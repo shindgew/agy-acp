@@ -144,7 +144,9 @@ export class StreamPoller {
     // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
     // agent message", so those turns don't hang until the deadline.
     this._latestStepTerminal =
-      latest !== undefined && (latest.status === 3 || latest.status === 6 || latest.status === 7);
+      !rows.hasDecodeError &&
+      latest !== undefined &&
+      (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
     const blockedIds = new Set(rows.filter((row) => row.status === 9).map(toolCallId));

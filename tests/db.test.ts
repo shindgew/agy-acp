@@ -884,6 +884,56 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("does not complete from a terminal row when a trailing row failed to decode", () => {
+    const db = createConversationDb(dir, "conv-terminal-before-corrupt");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "cmd-1", namePrimary: "run_command", rawInputJson: "{}" })
+        })
+      })
+    });
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      2, 15, 3, Buffer.from([0x0a, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-terminal-before-corrupt",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // The surviving terminal tool must not hide the undecodable final row,
+    // including after retries for this data version have been bounded.
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 2").run(
+      Buffer.from(encodeStepPayload({ agentText: "done" }))
+    );
+    expect(poller.poll()).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "2",
+        content: { type: "text", text: "done" }
+      }
+    ]);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
