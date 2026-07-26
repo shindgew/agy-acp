@@ -30,6 +30,7 @@ const POLL_INTERVAL_MS = 200;
 /** Trailing polls after the process exits, to catch rows flushed right around exit. */
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
+const PERMISSION_RENDER_SETTLE_MS = 20;
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -150,7 +151,10 @@ export class AgyCliSession {
   #ptyIdleMarkerCount = 0;
   #ptyIdleMatchTail = "";
   #ptyPermissionMarkerCount = 0;
-  #ptyPermissionMatchTail = "";
+  #ptyPermissionRender = "";
+  #ptyPermissionMarkerTail = "";
+  #ptyPermissionPanelVisible = false;
+  #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #ptyConfig = "";
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
@@ -318,8 +322,12 @@ export class AgyCliSession {
       this.#ptyIdleMarkerCount = 0;
       this.#ptyIdleMatchTail = "";
       this.#ptyPermissionMarkerCount = 0;
-      this.#ptyPermissionMatchTail = "";
-      this.#pty.onData((data) => {
+      this.#ptyPermissionRender = "";
+      this.#ptyPermissionMarkerTail = "";
+      this.#ptyPermissionPanelVisible = false;
+      const activePty = this.#pty;
+      activePty.onData((data) => {
+        if (this.#pty !== activePty) return;
         const idleMarker = "for shortcuts";
         const searchable = this.#ptyIdleMatchTail + data;
         let offset = 0;
@@ -329,17 +337,16 @@ export class AgyCliSession {
         }
         this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
 
-        // Unlike the generic footer above, this text is specific to agy's
-        // standard permission panel. Its redraw is the only observable new
-        // occurrence when two consecutive gates write identical DB bytes.
-        const permissionMarker = "Yes, and always allow";
-        const permissionSearchable = this.#ptyPermissionMatchTail + data;
-        offset = 0;
-        while ((offset = permissionSearchable.indexOf(permissionMarker, offset)) >= 0) {
-          this.#ptyPermissionMarkerCount++;
-          offset += permissionMarker.length;
-        }
-        this.#ptyPermissionMatchTail = permissionSearchable.slice(-(permissionMarker.length - 1));
+        // Treat a transition into agy's permission panel as one occurrence.
+        // Arrow-key navigation redraws the same panel and must not re-arm the
+        // gate; consecutive identical gates transition through a non-panel
+        // render while the approved command segment runs.
+        this.#ptyPermissionRender = (this.#ptyPermissionRender + data).slice(-16_384);
+        if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+        this.#ptyPermissionRenderTimer = setTimeout(
+          () => this.flushPermissionRender(),
+          PERMISSION_RENDER_SETTLE_MS
+        );
         this.#ptyOutput = (this.#ptyOutput + data).slice(-16_384);
       });
       this.#ptyExit = new Promise((resolve) => this.#pty!.onExit(resolve));
@@ -451,6 +458,7 @@ export class AgyCliSession {
                 this.#ptyOutput
               );
             }
+            if (interaction.toolName !== "ask_question") this.markCurrentPermissionPanel();
             this.#pty?.write(keys);
             gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
             // An idle marker printed before the decision cannot mean that the
@@ -738,6 +746,11 @@ export class AgyCliSession {
   private async stopPty(): Promise<void> {
     const pty = this.#pty;
     const exit = this.#ptyExit;
+    if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+    this.#ptyPermissionRenderTimer = undefined;
+    this.#ptyPermissionRender = "";
+    this.#ptyPermissionMarkerTail = "";
+    this.#ptyPermissionPanelVisible = false;
     this.#pty = undefined;
     this.#ptyExit = undefined;
     if (pty) {
@@ -752,9 +765,41 @@ export class AgyCliSession {
     }
   }
 
+  private flushPermissionRender(): void {
+    const marker = "Yes, and always allow";
+    const output = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+    const visible = output.includes(marker);
+    this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
+    if (visible) {
+      if (!this.#ptyPermissionPanelVisible) this.#ptyPermissionMarkerCount++;
+      this.#ptyPermissionPanelVisible = true;
+    } else if (this.#ptyPermissionMarkerTail.length === 0) {
+      this.#ptyPermissionPanelVisible = false;
+    }
+    this.#ptyPermissionRender = "";
+    this.#ptyPermissionRenderTimer = undefined;
+  }
+
+  private markCurrentPermissionPanel(): void {
+    if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+    this.#ptyPermissionRenderTimer = undefined;
+    this.#ptyPermissionRender = "";
+    this.#ptyPermissionMarkerTail = "";
+    this.#ptyPermissionPanelVisible = true;
+  }
+
   async close(): Promise<void> {
     await this.cancel();
   }
+}
+
+function markerPrefixTail(output: string, marker: string): string {
+  const max = Math.min(output.length, marker.length - 1);
+  for (let length = max; length > 0; length--) {
+    const suffix = output.slice(-length);
+    if (marker.startsWith(suffix)) return suffix;
+  }
+  return "";
 }
 
 export class AgyCliBackend {

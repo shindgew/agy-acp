@@ -403,7 +403,10 @@ describe("permission bridge", () => {
         db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
           Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
         );
-        setTimeout(() => pty.emitData("Yes, and always allow"), 10);
+        setTimeout(() => pty.emitData("executing approved segment"), 5);
+        // Split the marker across settled PTY bursts to exercise tail matching.
+        setTimeout(() => pty.emitData("Yes, and "), 50);
+        setTimeout(() => pty.emitData("always allow"), 80);
       } else {
         db.prepare("UPDATE steps SET permissions = ?, status = 3 WHERE idx = 1").run(
           Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
@@ -421,7 +424,7 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not treat a normal TUI footer redraw as another permission gate", async () => {
+  it("does not treat arrow-key redraws of the same permission panel as another gate", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "gate-footer-redraw");
@@ -432,9 +435,10 @@ describe("permission bridge", () => {
     let calls = 0;
     const result = session.prompt("go", async () => {}, async () => {
       calls++;
-      // A generic repaint may arrive while the DB still shows the answered
-      // status-9 row. It must not replay the cached permission interaction.
-      setTimeout(() => pty.emitData("? for shortcuts"), 10);
+      // The initial panel render can still be inside the debounce window when
+      // the ACP response resolves. The Down key then redraws that same panel.
+      pty.emitData("Yes, and always allow");
+      setTimeout(() => pty.emitData("Yes, and always allow"), 10);
       setTimeout(async () => {
         const { default: Database } = await import("better-sqlite3");
         const db = new Database(path.join(dir, "gate-footer-redraw.db"));
@@ -443,12 +447,12 @@ describe("permission bridge", () => {
         db.close();
         pty.emitData("? for shortcuts");
       }, 300);
-      return "agy-allow-once";
+      return "agy-allow-conversation";
     });
 
     expect((await result).stopReason).toBe("end_turn");
     expect(calls).toBe(1);
-    expect(pty.writes).toEqual(["\r"]);
+    expect(pty.writes).toEqual(["\x1b[B\r"]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
