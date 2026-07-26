@@ -149,6 +149,8 @@ export class AgyCliSession {
   #ptyOutput = "";
   #ptyIdleMarkerCount = 0;
   #ptyIdleMatchTail = "";
+  #ptyPermissionMarkerCount = 0;
+  #ptyPermissionMatchTail = "";
   #ptyConfig = "";
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
@@ -315,15 +317,29 @@ export class AgyCliSession {
       this.#ptyOutput = "";
       this.#ptyIdleMarkerCount = 0;
       this.#ptyIdleMatchTail = "";
+      this.#ptyPermissionMarkerCount = 0;
+      this.#ptyPermissionMatchTail = "";
       this.#pty.onData((data) => {
-        const marker = "for shortcuts";
+        const idleMarker = "for shortcuts";
         const searchable = this.#ptyIdleMatchTail + data;
         let offset = 0;
-        while ((offset = searchable.indexOf(marker, offset)) >= 0) {
+        while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
           this.#ptyIdleMarkerCount++;
-          offset += marker.length;
+          offset += idleMarker.length;
         }
-        this.#ptyIdleMatchTail = searchable.slice(-(marker.length - 1));
+        this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
+
+        // Unlike the generic footer above, this text is specific to agy's
+        // standard permission panel. Its redraw is the only observable new
+        // occurrence when two consecutive gates write identical DB bytes.
+        const permissionMarker = "Yes, and always allow";
+        const permissionSearchable = this.#ptyPermissionMatchTail + data;
+        offset = 0;
+        while ((offset = permissionSearchable.indexOf(permissionMarker, offset)) >= 0) {
+          this.#ptyPermissionMarkerCount++;
+          offset += permissionMarker.length;
+        }
+        this.#ptyPermissionMatchTail = permissionSearchable.slice(-(permissionMarker.length - 1));
         this.#ptyOutput = (this.#ptyOutput + data).slice(-16_384);
       });
       this.#ptyExit = new Promise((resolve) => this.#pty!.onExit(resolve));
@@ -338,6 +354,8 @@ export class AgyCliSession {
     // through the client's fs write-through so its native review UI tracks
     // the edit — that's a second, independent decision for the same id.
     const requestedGate = new Map<string, string>();
+    const gateMarkerCounts = new Map<string, number>();
+    const rearmedGateIds = new Set<string>();
     const requestedEditReview = new Set<string>();
     // ids that already went through the live gate above, so a later
     // completed-edit sighting shouldn't trigger a second (redundant) local
@@ -365,6 +383,14 @@ export class AgyCliSession {
         if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
+        for (const [id, markerCount] of gateMarkerCounts) {
+          if (this.#ptyPermissionMarkerCount <= markerCount) continue;
+          // An identical permission gate can redraw without changing the DB at
+          // all. Use the permission-panel-specific redraw as its occurrence
+          // signal; a normal progress or completion redraw must not requeue it.
+          if (poller.requeuePending(id)) rearmedGateIds.add(id);
+          gateMarkerCounts.delete(id);
+        }
         for (const interaction of poller.takePending()) {
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
@@ -373,12 +399,11 @@ export class AgyCliSession {
             // decisions (each segment of `a && b`, a sandbox escalation, ...):
             // agy records the just-resolved decision in the row's permission
             // column but keeps the step at status 9 until every decision is
-            // answered. Dedup on that permission signature (not the toolCallId
-            // alone) so a re-armed prompt on the same step is forwarded again
-            // instead of being swallowed — swallowing it hangs the turn until
-            // the deadline.
+            // answered. Content dedup handles ordinary DB updates; a
+            // permission-panel redraw explicitly re-arms an identical gate.
             const signature = permissionSignature(interaction.row);
-            if (requestedGate.get(id) === signature) continue;
+            const rearmed = rearmedGateIds.delete(id);
+            if (!rearmed && requestedGate.get(id) === signature) continue;
             requestedGate.set(id, signature);
           } else {
             if (requestedEditReview.has(id)) continue;
@@ -427,6 +452,7 @@ export class AgyCliSession {
               );
             }
             this.#pty?.write(keys);
+            gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
             // An idle marker printed before the decision cannot mean that the
             // approved/rejected command has finished.
             requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;

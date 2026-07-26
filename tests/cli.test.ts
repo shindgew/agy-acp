@@ -385,6 +385,74 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("re-forwards identical sequential permission prompts on the same step without swallowing", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "identical-gates");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"echo x && echo x && echo x"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      const { default: Database } = await import("better-sqlite3");
+      const db = new Database(path.join(dir, "identical-gates.db"));
+      if (calls < 3) {
+        // Same permission details (kind, value, decision) on consecutive gates
+        db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
+        );
+        setTimeout(() => pty.emitData("Yes, and always allow"), 10);
+      } else {
+        db.prepare("UPDATE steps SET permissions = ?, status = 3 WHERE idx = 1").run(
+          Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }))
+        );
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      }
+      db.close();
+      return "agy-allow-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(3);
+    expect(pty.writes).toEqual(["\r", "\r", "\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not treat a normal TUI footer redraw as another permission gate", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "gate-footer-redraw");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      // A generic repaint may arrive while the DB still shows the answered
+      // status-9 row. It must not replay the cached permission interaction.
+      setTimeout(() => pty.emitData("? for shortcuts"), 10);
+      setTimeout(async () => {
+        const { default: Database } = await import("better-sqlite3");
+        const db = new Database(path.join(dir, "gate-footer-redraw.db"));
+        updateStep(db, 1, { status: 3 });
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        db.close();
+        pty.emitData("? for shortcuts");
+      }, 300);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
+    expect(pty.writes).toEqual(["\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("bridges single-select ask_question via PTY option keys", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const askInput = JSON.stringify({
