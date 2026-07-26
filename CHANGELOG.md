@@ -9,6 +9,8 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-07-26
+
 ### Fixed
 
 - Pause the turn deadline while awaiting a `session/request_permission`
