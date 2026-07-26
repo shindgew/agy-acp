@@ -321,11 +321,14 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   return toolCallUpdate({ stepRow, title, kind: "read", content, locations });
 }
 
-/** Render grep hits (generic field1..field5) into readable, pipe-joined lines. */
+/** Render grep hits into readable, pipe-joined lines. `field2` is the line
+ *  number (a varint in the wire format); coerce it to a string for display. */
 function renderHits(hits: SearchHit[] | undefined): string {
   if (!hits || hits.length === 0) return "";
   return hits
-    .map((h) => [h.field1, h.field2, h.field3, h.field4, h.field5].filter((v) => v.trim().length > 0).join(" | "))
+    .map((h) => [h.field1, h.field2 ? String(h.field2) : "", h.field3, h.field4, h.field5]
+      .filter((v) => v.trim().length > 0)
+      .join(" | "))
     .filter((line) => line.length > 0)
     .join("\n");
 }

@@ -26,10 +26,14 @@ export interface ToolRun {
   titleSecondary: string;
 }
 
-/** Fields 1-5 of a grep/web-search hit; likely file path, line, matched text, etc. */
+/** One grep_search hit. Field numbers are reverse-engineered from real agy
+ *  conversation DBs: 1 = relative file path, 2 = line number (varint),
+ *  3 = matched line text, 4 = absolute file path. Field 5 has not been
+ *  observed populated in real DBs but is retained for forward-compat. */
 export interface SearchHit {
   field1: string;
-  field2: string;
+  /** 1-based line number of the match, or 0 when agy omits it. */
+  field2: number;
   field3: string;
   field4: string;
   field5: string;
@@ -164,9 +168,9 @@ function decodeToolRun(bytes: Uint8Array): ToolRun {
 }
 
 function decodeSearchHit(bytes: Uint8Array): SearchHit {
-  return readMessage(bytes, { field1: "", field2: "", field3: "", field4: "", field5: "" }, {
+  return readMessage(bytes, { field1: "", field2: 0, field3: "", field4: "", field5: "" }, {
     1: (m, r) => (m.field1 = r.string()),
-    2: (m, r) => (m.field2 = r.string()),
+    2: (m, r) => (m.field2 = readInt(r)),
     3: (m, r) => (m.field3 = r.string()),
     4: (m, r) => (m.field4 = r.string()),
     5: (m, r) => (m.field5 = r.string())
