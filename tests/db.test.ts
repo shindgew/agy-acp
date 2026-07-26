@@ -770,6 +770,54 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("queues a new pending interaction when an identical status-9 gate is re-armed", () => {
+    const db = createConversationDb(dir, "conv-identical-gate");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 9,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-identical",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"echo x && echo x"}'
+          })
+        })
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-identical-gate",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.takePending()).toHaveLength(1);
+
+    const permission = Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }));
+    db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(permission);
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.takePending()).toHaveLength(1);
+
+    // SQLite does not advance data_version when the exact same bytes are
+    // written, so the poll itself has no occurrence to report.
+    db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(permission);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.takePending()).toEqual([]);
+
+    // The TUI redraw supplies the generation in this case. Requeueing remains
+    // deduplicated until the queued occurrence is consumed.
+    poller.requeuePending("cmd-identical");
+    poller.requeuePending("cmd-identical");
+    expect(poller.takePending()).toHaveLength(1);
+
+    poller.close();
+    db.close();
+  });
+
   it("retries readAfter on next poll if a torn read decode error occurs", () => {
     const db = createConversationDb(dir, "conv-torn-read");
     // Insert step with invalid/corrupt blob payload to simulate premature EOF

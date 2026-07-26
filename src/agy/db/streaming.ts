@@ -48,6 +48,7 @@ export class StreamPoller {
   private failedDataVersion: number | null = null;
   private failedDataVersionAttempts = 0;
   private rowSnapshot = "";
+  private readonly activePending = new Map<string, PendingInteraction>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -75,6 +76,15 @@ export class StreamPoller {
     const pending = this._pending;
     this._pending = [];
     return pending;
+  }
+
+  /** Requeue a still-blocked interaction when the TUI redraws an identical gate. */
+  requeuePending(id: string): boolean {
+    if (this._pending.some((interaction) => toolCallId(interaction.row) === id)) return false;
+    const interaction = this.activePending.get(id);
+    if (!interaction) return false;
+    this._pending.push(interaction);
+    return true;
   }
 
   get turnCompleteCandidate(): boolean {
@@ -137,22 +147,28 @@ export class StreamPoller {
       latest !== undefined && (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
+    const blockedIds = new Set(rows.filter((row) => row.status === 9).map(toolCallId));
+    for (const id of this.activePending.keys()) {
+      if (!blockedIds.has(id)) this.activePending.delete(id);
+    }
     for (const update of updates) {
       const raw = update as unknown as { status?: string; kind?: string; toolCallId?: string };
       const blocked = raw.status === "pending";
+      const id = String(raw.toolCallId);
       // Edits that complete without ever pausing (accept-edits / skip-permissions)
       // still get offered for review — see PendingInteraction.blocked.
       const completedEdit = raw.kind === "edit" && raw.status === "completed";
       if (!blocked && !completedEdit) continue;
-      const id = String(raw.toolCallId);
       const row = rowsByToolCallId.get(id);
       if (row) {
-        this._pending.push({
+        const interaction = {
           update,
           row,
           toolName: row.stepPayload.toolRun?.call?.namePrimary || row.stepPayload.toolRun?.call?.nameSecondary || "unknown",
           blocked
-        });
+        };
+        if (blocked) this.activePending.set(id, interaction);
+        this._pending.push(interaction);
       }
     }
     return updates;
