@@ -318,6 +318,36 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("re-arms turn deadline to full printTimeout after permission prompt resolves", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-rearm");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    // Set a short printTimeout of 300ms
+    const session = interactiveSession(dir, pty, "300ms");
+
+    const result = session.prompt("go", async () => {}, async () => {
+      // User takes 150ms to answer permission prompt
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      // After permission resolves, agy executes command which completes 250ms later (total 400ms wall clock)
+      setTimeout(async () => {
+        const { default: Database } = await import("better-sqlite3");
+        const db = new Database(path.join(dir, "permission-rearm.db"));
+        updateStep(db, 1, { status: 3 });
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        db.close();
+        pty.emitData("? for shortcuts");
+      }, 250);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("re-forwards a re-armed status-9 prompt on the same run_command step (compound `a && b`)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {

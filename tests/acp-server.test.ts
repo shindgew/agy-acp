@@ -1512,7 +1512,7 @@ const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
 
 function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
+  return { AGY_ACP_MODEL_CACHE: "0", ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {

@@ -344,7 +344,8 @@ export class AgyCliSession {
     // permission prompt if the client has no fs write-through.
     const gatedIds = new Set<string>();
     const activePtyExit = this.#ptyExit!;
-    let deadline = Date.now() + parsePrintTimeoutMs(this.config.printTimeout);
+    const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
+    let deadline = Date.now() + timeoutMs;
     let candidateRevision = -1;
     let seenRevision = -1;
     // A newly spawned TUI first draws its initial idle prompt, then draws
@@ -355,12 +356,13 @@ export class AgyCliSession {
     try {
       while (true) {
         if (this.#cancelled) break;
-        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         const updates = poller.poll();
         if (poller.revision !== seenRevision) {
           seenRevision = poller.revision;
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
+          deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
+        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
         for (const interaction of poller.takePending()) {
@@ -409,11 +411,10 @@ export class AgyCliSession {
               }
             }
 
-            const startPermission = Date.now();
             const choice = await this.raceTurnCallback(
               onPermission(toolCall, { toolName: interaction.toolName })
             );
-            deadline += Date.now() - startPermission;
+            deadline = Date.now() + timeoutMs;
             if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
 
             const keys = interactionKeys(choice, interaction.toolName, toolCall);
@@ -458,11 +459,10 @@ export class AgyCliSession {
           // Genuinely ungated (no live agy gate ever asked) and no client
           // write-through available — offer local review: keep is a no-op,
           // reject restores prior text.
-          const startPermission = Date.now();
           const choice = await this.raceTurnCallback(
             onPermission(toolCall, { toolName: interaction.toolName })
           );
-          deadline += Date.now() - startPermission;
+          deadline = Date.now() + timeoutMs;
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
           if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
