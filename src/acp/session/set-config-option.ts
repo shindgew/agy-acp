@@ -26,6 +26,7 @@ export async function handleSetConfigOptionV1(
   client: V1AgentContext | undefined,
   deps: SetConfigOptionDeps & {
     notifyCurrentModeUpdate(client: V1AgentContext, sessionId: string, mode: SessionModeId): Promise<void>;
+    notifyConfigOptionUpdateV1(client: V1AgentContext, sessionId: string, session: SessionState): Promise<void>;
   }
 ): Promise<V1SetSessionConfigOptionResponse> {
   const configId = params.configId;
@@ -33,9 +34,13 @@ export async function handleSetConfigOptionV1(
   await deps.applyConfigOption(params.sessionId, configId, readConfigValue(params));
   const session = deps.requireSession(params.sessionId);
 
-  // Keep native modes UI in sync when mode changes via config option.
+  // ACP transition: when mode changes via config option, send both the legacy
+  // current_mode_update (modes-API clients) and an out-of-band config_option_update
+  // (configOptions clients). The response already carries the full option list, but
+  // clients that only watch notifications need the out-of-band push too.
   if (client && configId === MODE_CONFIG_ID && session.agy.config.mode !== previousMode) {
     await deps.notifyCurrentModeUpdate(client, params.sessionId, session.agy.config.mode);
+    await deps.notifyConfigOptionUpdateV1(client, params.sessionId, session);
   }
 
   return { configOptions: sessionConfigOptionsV1(session) };

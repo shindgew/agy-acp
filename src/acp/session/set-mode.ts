@@ -1,6 +1,7 @@
 // ACP session/set_mode: mirrors the `mode` config option onto agy `--mode`.
-// Pushes `config_option_update` so clients that only watch config options stay
-// aligned (set_mode is outside set_config_option).
+// Pushes both `current_mode_update` (legacy modes clients) and
+// `config_option_update` (configOptions clients) so both stay aligned during
+// the ACP transition period. See: https://agentclientprotocol.com/protocol/v1/session-config-options#relationship-to-session-modes
 // Docs: https://agentclientprotocol.com/protocol/v1/session-modes#setting-the-current-mode
 
 import type {
@@ -21,7 +22,7 @@ export interface SetSessionModeDeps {
 
 export async function handleSetSessionMode(
   params: SetSessionModeRequest,
-  client: V1AgentContext,
+  client: V1AgentContext | undefined,
   deps: SetSessionModeDeps
 ): Promise<SetSessionModeResponse> {
   const previousMode = deps.requireSession(params.sessionId).agy.config.mode;
@@ -29,7 +30,9 @@ export async function handleSetSessionMode(
   const session = deps.requireSession(params.sessionId);
   const mode = session.agy.config.mode;
 
-  if (mode !== previousMode) {
+  if (client && mode !== previousMode) {
+    // ACP transition: send both legacy current_mode_update (modes-API clients)
+    // and config_option_update (configOptions clients) to stay in sync.
     await deps.notifyCurrentModeUpdate(client, params.sessionId, mode);
     await deps.notifyConfigOptionUpdateV1(client, params.sessionId, session);
   }

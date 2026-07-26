@@ -310,7 +310,8 @@ export class AcpAgent {
     return handleSetConfigOptionV1(params, client, {
       requireSession: (id) => this.requireSession(id),
       applyConfigOption: (sessionId, configId, value) => this.applyConfigOption(sessionId, configId, value),
-      notifyCurrentModeUpdate
+      notifyCurrentModeUpdate,
+      notifyConfigOptionUpdateV1
     });
   }
 

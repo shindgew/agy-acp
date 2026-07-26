@@ -11,7 +11,9 @@ import { createConversationDb, insertStep, updateStep, updateStepPayload } from 
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodeGrepSearchResult,
   encodePermissions,
+  encodeSearchHit,
   encodeStepPayload,
   encodeToolCall,
   encodeToolRun,
@@ -325,6 +327,59 @@ describe("Translator", () => {
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("Query: agy acp adapter");
     expect(body).toContain("https://www.google.com/search");
+  });
+
+  it("decodes grep_search hits whose field 2 is a varint line number (regression for issue #12)", () => {
+    const db = createConversationDb(dir, "conv-grep");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-1",
+            namePrimary: "grep_search",
+            rawInputJson: '{"Query":"Unreleased","SearchPath":"/repo"}'
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "Unreleased",
+          cwdUri: "file:///repo",
+          hits: [
+            encodeSearchHit({ field1: "CHANGELOG.md", field2: 9, field3: "## [Unreleased]", field4: "/repo/CHANGELOG.md" }),
+            encodeSearchHit({ field1: "CHANGELOG.md", field2: 42, field3: "## [Unreleased] - 2026-01-01", field4: "/repo/CHANGELOG.md" })
+          ]
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    // The whole point of the regression: this must not throw "premature EOF"
+    // / "cant skip wire type 6/7", and the hits must carry line numbers.
+    expect(rows).toHaveLength(1);
+    const hits = rows[0].stepPayload.grepSearch?.hits ?? [];
+    expect(hits).toHaveLength(2);
+    expect(hits[0].field1).toBe("CHANGELOG.md");
+    expect(hits[0].field2).toBe(9);
+    expect(hits[0].field3).toBe("## [Unreleased]");
+    expect(hits[0].field4).toBe("/repo/CHANGELOG.md");
+    expect(hits[1].field2).toBe(42);
+
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const conn2 = ConversationDb.open(dir, "conv-grep")!;
+    const updates = translator.translate(conn2.readAfter(-1));
+    conn2.close();
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { kind: string; content?: Array<{ content?: { text?: string } }> };
+    expect(update.kind).toBe("search");
+    const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("CHANGELOG.md | 9 | ## [Unreleased]");
+    expect(body).toContain("CHANGELOG.md | 42 | ## [Unreleased] - 2026-01-01");
   });
 
   it("surfaces fetched URL body from field 40", () => {
@@ -710,6 +765,171 @@ describe("StreamPoller", () => {
     expect((updated[0] as { sessionUpdate: string }).sessionUpdate).toBe("tool_call_update");
     expect(poller.revision).toBe(revision + 1);
     expect(poller.poll()).toEqual([]);
+
+    poller.close();
+    db.close();
+  });
+
+  it("queues a new pending interaction when an identical status-9 gate is re-armed", () => {
+    const db = createConversationDb(dir, "conv-identical-gate");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 9,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-identical",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"echo x && echo x"}'
+          })
+        })
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-identical-gate",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.takePending()).toHaveLength(1);
+
+    const permission = Buffer.from(encodePermissions({ kind: "command", value: "echo x", decision: 1 }));
+    db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(permission);
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.takePending()).toHaveLength(1);
+
+    // SQLite does not advance data_version when the exact same bytes are
+    // written, so the poll itself has no occurrence to report.
+    db.prepare("UPDATE steps SET permissions = ? WHERE idx = 1").run(permission);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.takePending()).toEqual([]);
+
+    // The TUI redraw supplies the generation in this case. Requeueing remains
+    // deduplicated until the queued occurrence is consumed.
+    poller.requeuePending("cmd-identical");
+    poller.requeuePending("cmd-identical");
+    expect(poller.takePending()).toHaveLength(1);
+
+    poller.close();
+    db.close();
+  });
+
+  it("retries readAfter on next poll if a torn read decode error occurs", () => {
+    const db = createConversationDb(dir, "conv-torn-read");
+    // Insert step with invalid/corrupt blob payload to simulate premature EOF
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      1, 21, 9, Buffer.from([0x08, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-torn-read",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // First poll encounters decode error, so dataVersion is NOT cached
+    expect(poller.poll()).toEqual([]);
+
+    // Now update row 1 to hold a valid payload (simulating completed write)
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 1").run(
+      Buffer.from(encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cmd-1",
+            namePrimary: "run_command",
+            rawInputJson: '{"CommandLine":"ls"}'
+          })
+        })
+      }))
+    );
+
+    // Second poll retries reading and successfully decodes the step
+    const updates = poller.poll();
+    expect(updates).toHaveLength(1);
+    expect((updates[0] as { sessionUpdate: string }).sessionUpdate).toBe("tool_call");
+
+    poller.close();
+    db.close();
+  });
+
+  it("bounds retries on a permanently undecodable row after 3 failed attempts on the same dataVersion", () => {
+    const db = createConversationDb(dir, "conv-perm-corrupt");
+    // Insert step with invalid/corrupt blob payload to simulate permanently corrupted data
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      1, 21, 9, Buffer.from([0x08, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-perm-corrupt",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // Poll 1: encounters decode error (attempt 1), returns []
+    expect(poller.poll()).toEqual([]);
+    // Poll 2: encounters decode error (attempt 2), returns []
+    expect(poller.poll()).toEqual([]);
+    // Poll 3: encounters decode error (attempt 3), caches dataVersion and returns []
+    expect(poller.poll()).toEqual([]);
+
+    // Poll 4: because dataVersion is now cached, poll() immediately returns [] without re-reading/re-logging
+    expect(poller.poll()).toEqual([]);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not complete from a terminal row when a trailing row failed to decode", () => {
+    const db = createConversationDb(dir, "conv-terminal-before-corrupt");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "cmd-1", namePrimary: "run_command", rawInputJson: "{}" })
+        })
+      })
+    });
+    db.prepare("INSERT INTO steps (idx, step_type, status, step_payload) VALUES (?, ?, ?, ?)").run(
+      2, 15, 3, Buffer.from([0x0a, 0xff])
+    );
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-terminal-before-corrupt",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // The surviving terminal tool must not hide the undecodable final row,
+    // including after retries for this data version have been bounded.
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    db.prepare("UPDATE steps SET step_payload = ? WHERE idx = 2").run(
+      Buffer.from(encodeStepPayload({ agentText: "done" }))
+    );
+    expect(poller.poll()).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "2",
+        content: { type: "text", text: "done" }
+      }
+    ]);
+    expect(poller.turnCompleteCandidate).toBe(true);
 
     poller.close();
     db.close();

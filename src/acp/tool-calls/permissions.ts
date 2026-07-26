@@ -31,6 +31,7 @@ export interface AskQuestionPayload {
 export function isBridgeablePermissionTool(toolName: string): boolean {
   if (!toolName || toolName === "ask_question") return false;
   if (toolName === "run_command") return true;
+  if (toolName === "ask_permission") return true;
   if (toolName === "view_file" || toolName === "list_dir") return true;
   if (isEditToolName(toolName)) return true;
   return false;
@@ -181,6 +182,14 @@ export function permissionOptions(toolCall: SessionUpdate, toolName?: string): P
     return askQuestionOptions(toolCall);
   }
 
+  // agy's sandbox-bypass request (run a command / read a file outside the
+  // sandbox). Its TUI menu is the same 4-row layout as run_command
+  // (Yes / always-in-conversation / persist / No), so the standard
+  // permissionKeys navigation applies.
+  if (toolName === "ask_permission") {
+    return askPermissionOptions(toolCall);
+  }
+
   // File edits: standard ACP option ids/kinds so clients can render native
   // Keep / Reject (or equivalent) review UI against the tool_call diff.
   if (isEditToolName(toolName ?? "") || (toolName == null && isEditToolCall(toolCall))) {
@@ -251,6 +260,34 @@ function standardEditPermissionOptions(): PermissionMenuOption[] {
     { optionId: "allow-once", kind: "allow_once", name: "Allow" },
     { optionId: "allow-always", kind: "allow_always", name: "Always allow" },
     { optionId: "reject-once", kind: "reject_once", name: "Reject" }
+  ];
+}
+
+/**
+ * Options for agy's `ask_permission` sandbox-bypass request. rawInput carries
+ * `Action` (e.g. `run_command` / `read_file`), `Target`, and `Reason`; the TUI
+ * renders the standard 4-row permission menu, so we mirror run_command's ids.
+ */
+function askPermissionOptions(toolCall: SessionUpdate): PermissionMenuOption[] {
+  const input = toolRawInput(toolCall);
+  const raw = toolCall as unknown as Record<string, unknown>;
+  const target =
+    pickString(input, "Target", "target", "CommandLine", "commandLine", "command") ??
+    pickString(input, "toolAction", "ToolAction") ??
+    (typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : "this action");
+  return [
+    { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+    {
+      optionId: "agy-allow-conversation",
+      kind: "allow_always",
+      name: `Yes, and always allow '${target}' in this conversation`
+    },
+    {
+      optionId: "agy-allow-settings",
+      kind: "allow_always",
+      name: `Yes, and always allow '${target}' (Persist to settings.json)`
+    },
+    { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
   ];
 }
 

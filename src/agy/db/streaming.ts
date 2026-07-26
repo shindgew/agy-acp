@@ -42,10 +42,13 @@ export class StreamPoller {
   private _pending: PendingInteraction[] = [];
   private _hasRows = false;
   private _busy = false;
-  private _latestAgentComplete = false;
+  private _latestStepTerminal = false;
   private _revision = 0;
   private dataVersion: number | null = null;
+  private failedDataVersion: number | null = null;
+  private failedDataVersionAttempts = 0;
   private rowSnapshot = "";
+  private readonly activePending = new Map<string, PendingInteraction>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -75,8 +78,17 @@ export class StreamPoller {
     return pending;
   }
 
+  /** Requeue a still-blocked interaction when the TUI redraws an identical gate. */
+  requeuePending(id: string): boolean {
+    if (this._pending.some((interaction) => toolCallId(interaction.row) === id)) return false;
+    const interaction = this.activePending.get(id);
+    if (!interaction) return false;
+    this._pending.push(interaction);
+    return true;
+  }
+
   get turnCompleteCandidate(): boolean {
-    return this._hasRows && !this._busy && this._latestAgentComplete;
+    return this._hasRows && !this._busy && this._latestStepTerminal;
   }
 
   /** Increments whenever the observed rows (including growing in-place rows) change. */
@@ -96,9 +108,23 @@ export class StreamPoller {
 
     const dataVersion = this.db.dataVersion();
     if (this.dataVersion === dataVersion) return [];
-    this.dataVersion = dataVersion;
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
+    if (!rows.hasDecodeError) {
+      this.dataVersion = dataVersion;
+      this.failedDataVersion = null;
+      this.failedDataVersionAttempts = 0;
+    } else {
+      if (this.failedDataVersion === dataVersion) {
+        this.failedDataVersionAttempts++;
+      } else {
+        this.failedDataVersion = dataVersion;
+        this.failedDataVersionAttempts = 1;
+      }
+      if (this.failedDataVersionAttempts >= 3) {
+        this.dataVersion = dataVersion;
+      }
+    }
     const snapshot = JSON.stringify(rows.map((row) => [
       row.idx,
       row.stepType,
@@ -112,25 +138,39 @@ export class StreamPoller {
     this._hasRows = rows.length > 0;
     this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
     const latest = rows.at(-1);
-    this._latestAgentComplete = latest?.stepType === 15 && latest.status === 3;
+    // A turn can end on a completed agent message, but also on a terminal tool
+    // step with no trailing message — most notably a denied/failed command
+    // (status 7), after which agy returns to idle without emitting more text.
+    // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
+    // agent message", so those turns don't hang until the deadline.
+    this._latestStepTerminal =
+      !rows.hasDecodeError &&
+      latest !== undefined &&
+      (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
+    const blockedIds = new Set(rows.filter((row) => row.status === 9).map(toolCallId));
+    for (const id of this.activePending.keys()) {
+      if (!blockedIds.has(id)) this.activePending.delete(id);
+    }
     for (const update of updates) {
       const raw = update as unknown as { status?: string; kind?: string; toolCallId?: string };
       const blocked = raw.status === "pending";
+      const id = String(raw.toolCallId);
       // Edits that complete without ever pausing (accept-edits / skip-permissions)
       // still get offered for review — see PendingInteraction.blocked.
       const completedEdit = raw.kind === "edit" && raw.status === "completed";
       if (!blocked && !completedEdit) continue;
-      const id = String(raw.toolCallId);
       const row = rowsByToolCallId.get(id);
       if (row) {
-        this._pending.push({
+        const interaction = {
           update,
           row,
           toolName: row.stepPayload.toolRun?.call?.namePrimary || row.stepPayload.toolRun?.call?.nameSecondary || "unknown",
           blocked
-        });
+        };
+        if (blocked) this.activePending.set(id, interaction);
+        this._pending.push(interaction);
       }
     }
     return updates;

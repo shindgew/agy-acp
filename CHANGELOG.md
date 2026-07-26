@@ -9,6 +9,32 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+### Fixed
+
+- Pause the turn deadline while awaiting a `session/request_permission`
+  response and extend it by the wait duration, so slow or multi-prompt answers
+  no longer hit the 5m timeout. (#10)
+- Re-arm turn deadline on prompt resolution and reset deadline on active DB progress, fixing 5m turn timeouts.
+- Re-forward re-armed status-9 prompts on the same `run_command` step (each
+  segment of `a && b`), deduping on the permission signature instead of the
+  tool-call id, so compound commands no longer hang.
+- Complete turns that end on a terminal tool step with no trailing agent
+  message (denied/failed command, status 7).
+- Retry torn step-payload reads on the next poll instead of dropping them
+  until an unrelated data-version bump.
+- Restrict `isPlanFile` to `implementation_plan.md` / `plan.md` so prose brain
+  artifacts aren't shredded into bogus plan entries.
+- Bridge agy 1.1.7's `ask_permission` sandbox-bypass interaction instead of
+  throwing `Unsupported agy interaction 'ask_permission'`.
+- Decode `grep_search` hit field 2 as a varint line number instead of a string,
+  preventing protobuf parser misalignment, premature EOF errors, and dropped
+  search steps. (#12, #18)
+- Send both `current_mode_update` and `config_option_update` notifications on
+  every mode-change path (`set_config_option`, `set_mode`, slash commands) so
+  clients watching either mechanism stay in sync during the ACP v1 transition
+  period. Previously some paths emitted only one, causing Zed to log
+  `Parse error: missing field configOptions`. (#15)
+
 ## [0.3.2] - 2026-07-24
 
 ### Added

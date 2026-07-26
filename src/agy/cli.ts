@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
+import type { StepRow } from "./db/types.js";
 import { revertEditToolCall } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
@@ -29,6 +30,17 @@ const POLL_INTERVAL_MS = 200;
 /** Trailing polls after the process exits, to catch rows flushed right around exit. */
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
+const PERMISSION_RENDER_SETTLE_MS = 20;
+const PERMISSION_REDRAW_TIMEOUT_MS = 500;
+
+/** Signature of the permission decision agy has recorded for a gated step.
+ *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
+ *  even though the toolCallId is unchanged, letting the turn loop tell a fresh
+ *  decision apart from a redundant re-emission of the same still-pending one. */
+function permissionSignature(row: StepRow): string {
+  const p = row.permission;
+  return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
+}
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
 
@@ -139,6 +151,11 @@ export class AgyCliSession {
   #ptyOutput = "";
   #ptyIdleMarkerCount = 0;
   #ptyIdleMatchTail = "";
+  #ptyPermissionMarkerCount = 0;
+  #ptyPermissionRender = "";
+  #ptyPermissionMarkerTail = "";
+  #ptyPermissionPanelVisible = false;
+  #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #ptyConfig = "";
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
@@ -305,15 +322,32 @@ export class AgyCliSession {
       this.#ptyOutput = "";
       this.#ptyIdleMarkerCount = 0;
       this.#ptyIdleMatchTail = "";
-      this.#pty.onData((data) => {
-        const marker = "for shortcuts";
+      this.#ptyPermissionMarkerCount = 0;
+      this.#ptyPermissionRender = "";
+      this.#ptyPermissionMarkerTail = "";
+      this.#ptyPermissionPanelVisible = false;
+      const activePty = this.#pty;
+      activePty.onData((data) => {
+        if (this.#pty !== activePty) return;
+        const idleMarker = "for shortcuts";
         const searchable = this.#ptyIdleMatchTail + data;
         let offset = 0;
-        while ((offset = searchable.indexOf(marker, offset)) >= 0) {
+        while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
           this.#ptyIdleMarkerCount++;
-          offset += marker.length;
+          offset += idleMarker.length;
         }
-        this.#ptyIdleMatchTail = searchable.slice(-(marker.length - 1));
+        this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
+
+        // Treat a transition into agy's permission panel as one occurrence.
+        // Arrow-key navigation redraws the same panel and must not re-arm the
+        // gate; consecutive identical gates transition through a non-panel
+        // render while the approved command segment runs.
+        this.#ptyPermissionRender = (this.#ptyPermissionRender + data).slice(-16_384);
+        if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+        this.#ptyPermissionRenderTimer = setTimeout(
+          () => this.flushPermissionRender(),
+          PERMISSION_RENDER_SETTLE_MS
+        );
         this.#ptyOutput = (this.#ptyOutput + data).slice(-16_384);
       });
       this.#ptyExit = new Promise((resolve) => this.#pty!.onExit(resolve));
@@ -327,14 +361,17 @@ export class AgyCliSession {
     // edit once agy applies it, at which point it's still worth routing
     // through the client's fs write-through so its native review UI tracks
     // the edit — that's a second, independent decision for the same id.
-    const requestedGate = new Set<string>();
+    const requestedGate = new Map<string, string>();
+    const gateMarkerCounts = new Map<string, number>();
+    const rearmedGateIds = new Set<string>();
     const requestedEditReview = new Set<string>();
     // ids that already went through the live gate above, so a later
     // completed-edit sighting shouldn't trigger a second (redundant) local
     // permission prompt if the client has no fs write-through.
     const gatedIds = new Set<string>();
     const activePtyExit = this.#ptyExit!;
-    const deadline = Date.now() + parsePrintTimeoutMs(this.config.printTimeout);
+    const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
+    let deadline = Date.now() + timeoutMs;
     let candidateRevision = -1;
     let seenRevision = -1;
     // A newly spawned TUI first draws its initial idle prompt, then draws
@@ -345,20 +382,41 @@ export class AgyCliSession {
     try {
       while (true) {
         if (this.#cancelled) break;
-        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         const updates = poller.poll();
         if (poller.revision !== seenRevision) {
           seenRevision = poller.revision;
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
+          deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
+        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
+        for (const [id, markerCount] of gateMarkerCounts) {
+          if (this.#ptyPermissionMarkerCount <= markerCount) continue;
+          // An identical permission gate can redraw without changing the DB at
+          // all. Use the permission-panel-specific redraw as its occurrence
+          // signal; a normal progress or completion redraw must not requeue it.
+          if (poller.requeuePending(id)) rearmedGateIds.add(id);
+          gateMarkerCounts.delete(id);
+        }
         for (const interaction of poller.takePending()) {
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
-          const seen = interaction.blocked ? requestedGate : requestedEditReview;
-          if (seen.has(id)) continue;
-          seen.add(id);
+          if (interaction.blocked) {
+            // A single agy run_command step can gate several sequential
+            // decisions (each segment of `a && b`, a sandbox escalation, ...):
+            // agy records the just-resolved decision in the row's permission
+            // column but keeps the step at status 9 until every decision is
+            // answered. Content dedup handles ordinary DB updates; a
+            // permission-panel redraw explicitly re-arms an identical gate.
+            const signature = permissionSignature(interaction.row);
+            const rearmed = rearmedGateIds.delete(id);
+            if (!rearmed && requestedGate.get(id) === signature) continue;
+            requestedGate.set(id, signature);
+          } else {
+            if (requestedEditReview.has(id)) continue;
+            requestedEditReview.add(id);
+          }
 
           if (interaction.blocked) {
             if (!canBridgeInteraction(interaction.toolName, toolCall)) {
@@ -386,10 +444,20 @@ export class AgyCliSession {
               }
             }
 
+            if (interaction.toolName !== "ask_question" && !await this.waitForPermissionPanel(deadline)) {
+              if (this.#cancelled) break;
+              throw new AgyCliError(
+                "agy permission panel was not observed before requesting permission",
+                [this.config.agyPath],
+                null,
+                this.#ptyOutput
+              );
+            }
+
             const choice = await this.raceTurnCallback(
-              onPermission(toolCall, { toolName: interaction.toolName }),
-              deadline
+              onPermission(toolCall, { toolName: interaction.toolName })
             );
+            deadline = Date.now() + timeoutMs;
             if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
 
             const keys = interactionKeys(choice, interaction.toolName, toolCall);
@@ -401,7 +469,12 @@ export class AgyCliSession {
                 this.#ptyOutput
               );
             }
-            this.#pty?.write(keys);
+            if (interaction.toolName === "ask_question") {
+              this.#pty?.write(keys);
+            } else {
+              if (!await this.writePermissionKeys(keys, deadline)) break;
+            }
+            gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
             // An idle marker printed before the decision cannot mean that the
             // approved/rejected command has finished.
             requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
@@ -435,9 +508,9 @@ export class AgyCliSession {
           // write-through available — offer local review: keep is a no-op,
           // reject restores prior text.
           const choice = await this.raceTurnCallback(
-            onPermission(toolCall, { toolName: interaction.toolName }),
-            deadline
+            onPermission(toolCall, { toolName: interaction.toolName })
           );
+          deadline = Date.now() + timeoutMs;
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
           if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
@@ -460,11 +533,14 @@ export class AgyCliSession {
     }
   }
 
-  private async raceTurnCallback<T>(callback: Promise<T>, deadline: number): Promise<T | "cancelled"> {
+  private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
     const guarded = callback.catch((error) => {
       if (this.#cancelled) return "cancelled" as const;
       throw error;
     });
+    if (deadline === undefined) {
+      return await Promise.race([guarded, this.#cancelWait.then(() => "cancelled" as const)]);
+    }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<never>((_, reject) => {
       timer = setTimeout(() => reject(new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput)), Math.max(0, deadline - Date.now()));
@@ -684,6 +760,11 @@ export class AgyCliSession {
   private async stopPty(): Promise<void> {
     const pty = this.#pty;
     const exit = this.#ptyExit;
+    if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+    this.#ptyPermissionRenderTimer = undefined;
+    this.#ptyPermissionRender = "";
+    this.#ptyPermissionMarkerTail = "";
+    this.#ptyPermissionPanelVisible = false;
     this.#pty = undefined;
     this.#ptyExit = undefined;
     if (pty) {
@@ -698,9 +779,84 @@ export class AgyCliSession {
     }
   }
 
+  private flushPermissionRender(): void {
+    const marker = "Yes, and always allow";
+    const output = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+    const visible = output.includes(marker);
+    this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
+    if (visible) {
+      this.#ptyPermissionMarkerCount++;
+      this.#ptyPermissionPanelVisible = true;
+    } else if (this.#ptyPermissionMarkerTail.length === 0) {
+      this.#ptyPermissionPanelVisible = false;
+    }
+    this.#ptyPermissionRender = "";
+    this.#ptyPermissionRenderTimer = undefined;
+  }
+
+  private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
+    if (!await this.waitForPermissionPanel(deadline)) {
+      if (this.#cancelled) return false;
+      throw new AgyCliError(
+        "agy permission panel did not settle before applying the permission response",
+        [this.config.agyPath],
+        null,
+        this.#ptyOutput
+      );
+    }
+
+    const down = "\x1b[B";
+    let offset = 0;
+    while (keys.startsWith(down, offset)) {
+      const renderCount = this.#ptyPermissionMarkerCount;
+      this.#pty?.write(down);
+      if (!await this.waitForPermissionRenderAfter(renderCount, deadline)) {
+        if (this.#cancelled) return false;
+        throw new AgyCliError(
+          "agy permission panel did not redraw after menu navigation",
+          [this.config.agyPath],
+          null,
+          this.#ptyOutput
+        );
+      }
+      offset += down.length;
+    }
+    this.#pty?.write(keys.slice(offset));
+    return true;
+  }
+
+  private async waitForPermissionPanel(deadline: number): Promise<boolean> {
+    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
+    while (
+      (!this.#ptyPermissionPanelVisible || this.#ptyPermissionRenderTimer !== undefined) &&
+      !this.#cancelled &&
+      Date.now() < expires
+    ) {
+      await sleep(5);
+    }
+    return this.#ptyPermissionPanelVisible && this.#ptyPermissionRenderTimer === undefined;
+  }
+
+  private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
+    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
+    while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
+      await sleep(5);
+    }
+    return this.#ptyPermissionMarkerCount > renderCount;
+  }
+
   async close(): Promise<void> {
     await this.cancel();
   }
+}
+
+function markerPrefixTail(output: string, marker: string): string {
+  const max = Math.min(output.length, marker.length - 1);
+  for (let length = max; length > 0; length--) {
+    const suffix = output.slice(-length);
+    if (marker.startsWith(suffix)) return suffix;
+  }
+  return "";
 }
 
 export class AgyCliBackend {
@@ -913,7 +1069,7 @@ function unsupportedInteractionDetail(toolName: string, toolCall: SessionUpdate)
     if (ask.options.length === 0) return "ask_question has no selectable options";
     return "ask_question could not be bridged";
   }
-  return "only standard permission menus (run_command, file read/write) and single-select ask_question can be bridged safely";
+  return "only standard permission menus (run_command, ask_permission, file read/write) and single-select ask_question can be bridged safely";
 }
 
 function isAgyStatusLine(line: string): boolean {
