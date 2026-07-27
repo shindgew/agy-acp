@@ -284,7 +284,7 @@ describe("Translator", () => {
     };
     expect(update.sessionUpdate).toBe("tool_call");
     expect(update.kind).toBe("execute");
-    expect(update.rawOutput).toMatchObject({ exitCode: 0, output: "README.md\n" });
+    expect(update.rawOutput).toMatchObject({ exitCode: 0 });
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
     expect(body).toContain("README.md");
   });

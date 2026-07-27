@@ -388,7 +388,6 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     firstLine || asStr(toolRun?.titlePrimary)?.trim() || asStr(toolRun?.titleSecondary)?.trim() || "Command Execution";
 
   const content: Record<string, unknown>[] = [];
-  if (command?.trim()) content.push(codeBlock(command));
   // Prefer decoded field-28 output over empty; surface when non-empty.
   const output = commandResult?.output ?? "";
   if (output.trim()) content.push(codeBlock(output));
@@ -407,11 +406,10 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     locations
   }) as SessionUpdate & { rawOutput?: unknown };
 
-  // Attach structured exit/output when present (without dropping error rawOutput).
+  // Attach structured exit when present (without dropping error rawOutput).
   if (commandResult && !stepRow.error) {
     update.rawOutput = {
-      exitCode: commandResult.exitCode,
-      ...(output.trim() ? { output } : {})
+      exitCode: commandResult.exitCode
     };
   }
   return update;

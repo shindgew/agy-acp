@@ -87,11 +87,9 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 2) {
-    // executeUpdate: content[0] = command, content[1] = output when both present.
-    output = texts[1];
-  } else if (output == null && texts.length === 1 && command && texts[0] !== command) {
-    output = texts[0];
+  if (output == null && texts.length >= 1) {
+    // executeUpdate: content[0] is output when present (or content[1] in legacy updates).
+    output = texts[texts.length - 1];
   }
 
   const exitCode = typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;
