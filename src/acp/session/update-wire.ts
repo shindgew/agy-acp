@@ -109,10 +109,29 @@ function withTerminalContent(
 export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
   const raw = update as unknown as Record<string, unknown>;
   if (raw.sessionUpdate === "tool_call" || raw.sessionUpdate === "tool_call_update") {
-    return {
+    const v1Update: Record<string, unknown> = {
       ...raw,
       status: mapToolStatusForV1(raw.status)
-    } as V1SessionUpdate;
+    };
+
+    if (raw.kind === "execute") {
+      const meta = executeTerminalMeta(update);
+      if (meta) {
+        const metaObj: Record<string, unknown> = {
+          ...(raw._meta as Record<string, unknown> ?? {})
+        };
+        metaObj.terminal_info = { terminal_id: meta.terminalId };
+        if (meta.output != null && meta.output.length > 0) {
+          metaObj.terminal_output = { data: Buffer.from(meta.output, "utf8").toString("base64") };
+        }
+        if (typeof meta.exitCode === "number") {
+          metaObj.terminal_exit = { exit_code: meta.exitCode };
+        }
+        v1Update._meta = metaObj;
+      }
+    }
+
+    return v1Update as V1SessionUpdate;
   }
   // Drop agent-private plan _meta keys from the v1 wire (entries stay).
   if (raw.sessionUpdate === "plan" && raw._meta && typeof raw._meta === "object") {

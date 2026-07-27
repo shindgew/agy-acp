@@ -1506,6 +1506,29 @@ describe("ACP v2 (experimental draft)", () => {
       content: [{ type: "terminal", terminalId: terminalIdForToolCall("cmd-2") }]
     });
   });
+
+  it("embeds _meta.terminal_* on v1 execute tool calls", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-v1",
+      title: "npm run test",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "npm run test" },
+      rawOutput: { exitCode: 0 },
+      content: [
+        { type: "content", content: { type: "text", text: "```\nPASS test/a.test.ts\n```" } }
+      ]
+    } as SessionUpdate;
+
+    const v1 = sessionUpdateToV1(update) as Record<string, unknown>;
+    const terminalId = terminalIdForToolCall("cmd-v1");
+    expect(v1._meta).toEqual({
+      terminal_info: { terminal_id: terminalId },
+      terminal_output: { data: Buffer.from("PASS test/a.test.ts", "utf8").toString("base64") },
+      terminal_exit: { exit_code: 0 }
+    });
+  });
 });
 
 const TEST_MODELS_OUTPUT =
