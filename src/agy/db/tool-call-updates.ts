@@ -428,10 +428,13 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   }
 
   // Attach structured exit when present (without dropping error rawOutput).
-  if (commandResult && !stepRow.error) {
-    update.rawOutput = {
-      exitCode: commandResult.exitCode
-    };
+  if (commandResult && typeof commandResult.exitCode === "number") {
+    const rawOut =
+      update.rawOutput && typeof update.rawOutput === "object" && !Array.isArray(update.rawOutput)
+        ? { ...(update.rawOutput as Record<string, unknown>) }
+        : {};
+    rawOut.exitCode = commandResult.exitCode;
+    update.rawOutput = rawOut;
   }
   return update;
 }
