@@ -383,9 +383,13 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     asStr(pick(rawInput, "CommandLine", "commandLine", "command")) ??
     (commandResult?.command?.trim() ? commandResult.command : null);
   const firstLine = (command?.split("\n")[0] ?? "").trim();
-
+  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary", "toolAction", "ToolAction"))?.trim();
   const title =
-    firstLine || asStr(toolRun?.titlePrimary)?.trim() || asStr(toolRun?.titleSecondary)?.trim() || "Command Execution";
+    summary ||
+    firstLine ||
+    asStr(toolRun?.titlePrimary)?.trim() ||
+    asStr(toolRun?.titleSecondary)?.trim() ||
+    "Command Execution";
 
   const content: Record<string, unknown>[] = [];
   // Prefer decoded field-28 output over empty; surface when non-empty.
