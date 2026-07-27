@@ -408,7 +408,18 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     kind: "execute",
     content,
     locations
-  }) as SessionUpdate & { rawOutput?: unknown };
+  }) as SessionUpdate & { rawOutput?: unknown; rawInput?: unknown };
+
+  // When the command was recovered from commandResult.command (rawInputJson
+  // missing/malformed), inject it into rawInput so downstream consumers
+  // (e.g. executeTerminalMeta) can always find it via rawInput.CommandLine
+  // instead of falling back to title (which may now be toolSummary).
+  if (command && update.rawInput != null && typeof update.rawInput === "object" && !Array.isArray(update.rawInput)) {
+    const input = update.rawInput as Record<string, unknown>;
+    if (!input.CommandLine && !input.commandLine && !input.command) {
+      input.CommandLine = command;
+    }
+  }
 
   // Attach structured exit when present (without dropping error rawOutput).
   if (commandResult && !stepRow.error) {
