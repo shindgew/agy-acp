@@ -70,7 +70,7 @@ function isAuxiliaryTextBlock(text: string): boolean {
   const t = text.trim();
   if (/^Permission (requested|granted|denied):/.test(t)) return true;
   if (/^Error:/i.test(t)) return true;
-  if (/^Task:/i.test(t)) return true;
+  if (/(^|\n)(Task|Log):/i.test(t)) return true;
   return false;
 }
 
