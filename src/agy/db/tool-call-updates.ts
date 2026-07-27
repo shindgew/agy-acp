@@ -383,12 +383,15 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     asStr(pick(rawInput, "CommandLine", "commandLine", "command")) ??
     (commandResult?.command?.trim() ? commandResult.command : null);
   const firstLine = (command?.split("\n")[0] ?? "").trim();
-
+  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary", "toolAction", "ToolAction"))?.trim();
   const title =
-    firstLine || asStr(toolRun?.titlePrimary)?.trim() || asStr(toolRun?.titleSecondary)?.trim() || "Command Execution";
+    summary ||
+    firstLine ||
+    asStr(toolRun?.titlePrimary)?.trim() ||
+    asStr(toolRun?.titleSecondary)?.trim() ||
+    "Command Execution";
 
   const content: Record<string, unknown>[] = [];
-  if (command?.trim()) content.push(codeBlock(command));
   // Prefer decoded field-28 output over empty; surface when non-empty.
   const output = commandResult?.output ?? "";
   if (output.trim()) content.push(codeBlock(output));
@@ -405,13 +408,23 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     kind: "execute",
     content,
     locations
-  }) as SessionUpdate & { rawOutput?: unknown };
+  }) as SessionUpdate & { rawOutput?: unknown; rawInput?: unknown };
 
-  // Attach structured exit/output when present (without dropping error rawOutput).
+  // When the command was recovered from commandResult.command (rawInputJson
+  // missing/malformed), inject it into rawInput so downstream consumers
+  // (e.g. executeTerminalMeta) can always find it via rawInput.CommandLine
+  // instead of falling back to title (which may now be toolSummary).
+  if (command && update.rawInput != null && typeof update.rawInput === "object" && !Array.isArray(update.rawInput)) {
+    const input = update.rawInput as Record<string, unknown>;
+    if (!input.CommandLine && !input.commandLine && !input.command) {
+      input.CommandLine = command;
+    }
+  }
+
+  // Attach structured exit when present (without dropping error rawOutput).
   if (commandResult && !stepRow.error) {
     update.rawOutput = {
-      exitCode: commandResult.exitCode,
-      ...(output.trim() ? { output } : {})
+      exitCode: commandResult.exitCode
     };
   }
   return update;

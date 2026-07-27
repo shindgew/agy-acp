@@ -81,16 +81,15 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   const command =
     pickString(rawInput, "CommandLine", "commandLine", "command") ??
-    (texts[0]?.includes("\n") ? texts[0].split("\n")[0] : texts[0]) ??
     (typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : undefined);
 
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 2) {
-    // executeUpdate: content[0] = command, content[1] = output when both present.
-    output = texts[1];
-  } else if (output == null && texts.length === 1 && command && texts[0] !== command) {
+  if (output == null && texts.length >= 1) {
+    // executeUpdate puts stdout as content[0]; auxiliary blocks (permission,
+    // error, task) are appended after by toolCallUpdate, so always pick the
+    // first text block for the terminal output.
     output = texts[0];
   }
 
