@@ -127,7 +127,22 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
         if (meta.output != null && meta.output.length > 0) {
           metaObj.terminal_output = { data: Buffer.from(meta.output, "utf8").toString("base64") };
         }
-        if (typeof meta.exitCode === "number") {
+        const finished =
+          meta.status === "completed" ||
+          meta.status === "failed" ||
+          meta.status === "cancelled";
+        if (finished) {
+          const terminalExit: Record<string, unknown> = {};
+          if (typeof meta.exitCode === "number") {
+            terminalExit.exit_code = meta.exitCode;
+          } else if (meta.status === "cancelled") {
+            terminalExit.signal = "SIGINT";
+            terminalExit.exit_code = 130;
+          } else {
+            terminalExit.exit_code = meta.status === "failed" ? 1 : 0;
+          }
+          metaObj.terminal_exit = terminalExit;
+        } else if (typeof meta.exitCode === "number") {
           metaObj.terminal_exit = { exit_code: meta.exitCode };
         }
         v1Update._meta = metaObj;

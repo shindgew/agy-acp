@@ -77,6 +77,12 @@ function codeBlock(text: string): Record<string, unknown> {
   return textBlock(fencedCodeBlock(text));
 }
 
+function outputCodeBlock(text: string): Record<string, unknown> {
+  const block = textBlock(fencedCodeBlock(text));
+  block.kind = "output";
+  return block;
+}
+
 function errorBlock(e: ErrorDetails): Record<string, unknown> {
   const message = e.message.trim() || e.detail.trim() || "Tool call failed";
   const detail = e.detail.trim() && e.detail.trim() !== message ? `\n${e.detail.trim()}` : "";
@@ -394,7 +400,7 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const content: Record<string, unknown>[] = [];
   // Prefer decoded field-28 output over empty; surface when non-empty.
   const output = commandResult?.output ?? "";
-  if (output.trim()) content.push(codeBlock(output));
+  if (output.trim()) content.push(outputCodeBlock(output));
 
   // Prefer explicit Cwd from args; fall back to command-result cwd.
   const commandCwd =

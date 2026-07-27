@@ -66,14 +66,6 @@ export interface ExecuteTerminalMeta {
   status?: string;
 }
 
-function isAuxiliaryTextBlock(text: string): boolean {
-  const t = text.trim();
-  if (/^Permission (requested|granted|denied):/.test(t)) return true;
-  if (/^Error:/i.test(t)) return true;
-  if (/(^|\n)(Task|Log):/i.test(t)) return true;
-  return false;
-}
-
 /** Extract execute-tool terminal fields from a v1-shaped tool call update. */
 export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMeta | null {
   const raw = update as unknown as Record<string, unknown>;
@@ -85,7 +77,6 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   const rawInput = asRecord(raw.rawInput) ?? {};
   const rawOutput = asRecord(raw.rawOutput) ?? {};
-  const texts = contentTexts(raw);
 
   const command =
     pickString(rawInput, "CommandLine", "commandLine", "command") ??
@@ -94,8 +85,18 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 1 && !isAuxiliaryTextBlock(texts[0])) {
-    output = texts[0];
+  if (output == null && Array.isArray(raw.content)) {
+    for (const item of raw.content) {
+      const block = asRecord(item);
+      if (!block || block.type !== "content") continue;
+      if (block.kind === "output") {
+        const content = asRecord(block.content);
+        if (content && typeof content.text === "string") {
+          output = unfence(content.text);
+          break;
+        }
+      }
+    }
   }
 
   const exitCode = typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;

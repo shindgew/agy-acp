@@ -1517,9 +1517,9 @@ describe("ACP v2 (experimental draft)", () => {
       rawInput: { CommandLine: "npm run test" },
       rawOutput: { exitCode: 0 },
       content: [
-        { type: "content", content: { type: "text", text: "```\nPASS test/a.test.ts\n```" } }
+        { type: "content", kind: "output", content: { type: "text", text: "```\nPASS test/a.test.ts\n```" } }
       ]
-    } as SessionUpdate;
+    } as unknown as SessionUpdate;
 
     const v1 = sessionUpdateToV1(update) as Record<string, unknown>;
     const terminalId = terminalIdForToolCall("cmd-v1");
@@ -1527,6 +1527,23 @@ describe("ACP v2 (experimental draft)", () => {
       terminal_info: { terminal_id: terminalId },
       terminal_output: { data: Buffer.from("PASS test/a.test.ts", "utf8").toString("base64") },
       terminal_exit: { exit_code: 0 }
+    });
+  });
+
+  it("emits fallback terminal_exit on finished v1 execute steps without exitCode", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-failed",
+      title: "bad command",
+      kind: "execute",
+      status: "failed",
+      rawInput: { CommandLine: "bad command" }
+    } as SessionUpdate;
+
+    const v1 = sessionUpdateToV1(update) as Record<string, unknown>;
+    expect(v1._meta).toEqual({
+      terminal_info: { terminal_id: terminalIdForToolCall("cmd-failed") },
+      terminal_exit: { exit_code: 1 }
     });
   });
 });
