@@ -81,7 +81,6 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   const command =
     pickString(rawInput, "CommandLine", "commandLine", "command") ??
-    (texts[0]?.includes("\n") ? texts[0].split("\n")[0] : texts[0]) ??
     (typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : undefined);
 
   const cwd = pickString(rawInput, "Cwd", "cwd");
