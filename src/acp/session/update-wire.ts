@@ -114,6 +114,9 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
       status: mapToolStatusForV1(raw.status)
     };
 
+    // Attach v1 terminal metadata (_meta.terminal_info/output/exit) for execute tool calls
+    // so ACP v1 clients (like Zed) can render terminal output panels.
+    // Docs: https://agentclientprotocol.com/protocol/v1/terminals
     if (raw.kind === "execute") {
       const meta = executeTerminalMeta(update);
       if (meta) {
