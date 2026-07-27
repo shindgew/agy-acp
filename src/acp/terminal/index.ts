@@ -88,8 +88,10 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
   if (output == null && texts.length >= 1) {
-    // executeUpdate: content[0] is output when present (or content[1] in legacy updates).
-    output = texts[texts.length - 1];
+    // executeUpdate puts stdout as content[0]; auxiliary blocks (permission,
+    // error, task) are appended after by toolCallUpdate, so always pick the
+    // first text block for the terminal output.
+    output = texts[0];
   }
 
   const exitCode = typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;
