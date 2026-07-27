@@ -66,6 +66,14 @@ export interface ExecuteTerminalMeta {
   status?: string;
 }
 
+function isAuxiliaryTextBlock(text: string): boolean {
+  const t = text.trim();
+  if (/^Permission (requested|granted|denied):/.test(t)) return true;
+  if (/^Error:/i.test(t)) return true;
+  if (/^Task:/i.test(t)) return true;
+  return false;
+}
+
 /** Extract execute-tool terminal fields from a v1-shaped tool call update. */
 export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMeta | null {
   const raw = update as unknown as Record<string, unknown>;
@@ -86,10 +94,7 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 1) {
-    // executeUpdate puts stdout as content[0]; auxiliary blocks (permission,
-    // error, task) are appended after by toolCallUpdate, so always pick the
-    // first text block for the terminal output.
+  if (output == null && texts.length >= 1 && !isAuxiliaryTextBlock(texts[0])) {
     output = texts[0];
   }
 
