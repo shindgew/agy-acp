@@ -30,11 +30,32 @@ export type { UpdateContext } from "./tool-call-updates.js";
  */
 const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
 
-/** Step type 15 — a chunk of the agent's streamed text message. */
-function agentUpdate(stepRow: StepRow): SessionUpdate {
+/** Step type 15 — a chunk of the agent's streamed text message (+ optional thought). */
+function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] {
+  const text = stepRow.stepPayload.agentText?.text ?? "";
+  const thought = stepRow.stepPayload.agentText?.thought;
+
+  if (thought) {
+    const updates: SessionUpdate[] = [
+      {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: thought },
+        messageId: `agent-thought-${stepRow.idx}`
+      }
+    ];
+    if (text) {
+      updates.push({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text },
+        messageId: String(stepRow.idx)
+      });
+    }
+    return updates;
+  }
+
   return {
     sessionUpdate: "agent_message_chunk",
-    content: { type: "text", text: stepRow.stepPayload.agentText?.text ?? "" },
+    content: { type: "text", text },
     messageId: String(stepRow.idx)
   };
 }
