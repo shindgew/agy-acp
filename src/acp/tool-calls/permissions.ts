@@ -68,9 +68,18 @@ export function canBridgeInteraction(
   return ask != null && isBridgeableAskQuestion(ask);
 }
 
+export const MAX_BRIDGABLE_MULTI_SELECT_OPTIONS = 6;
+
 /** ask_question is safe to bridge when it has non-empty options for all questions. */
 export function isBridgeableAskQuestion(ask: AskQuestionPayload): boolean {
-  return ask.questionCount > 0 && ask.questions.every((q) => q.options.length > 0);
+  return (
+    ask.questionCount > 0 &&
+    ask.questions.every((q) => {
+      if (q.options.length === 0) return false;
+      if (q.multiSelect && q.options.length > MAX_BRIDGABLE_MULTI_SELECT_OPTIONS) return false;
+      return true;
+    })
+  );
 }
 
 /** Normalize client-selected option ids (standard ACP or legacy agy-*). */

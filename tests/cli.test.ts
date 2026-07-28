@@ -240,23 +240,21 @@ describe("permission bridge", () => {
     expect(fiveOpts).toContainEqual({ optionId: "agy-q-0,2,4", kind: "allow_once", name: "A + C + E" });
     expect(interactionKeys("agy-q-0,2,4", "ask_question", fiveOptionCall)).toBe(" \x1b[B\x1b[B \x1b[B\x1b[B \r");
 
-    const thirtyOneCall = {
+    const sevenOptionCall = {
       sessionUpdate: "tool_call" as const,
-      toolCallId: "q31",
-      title: "31 option question",
+      toolCallId: "q7",
+      title: "7 option question",
       kind: "other" as const,
       status: "pending" as const,
       rawInput: {
         questions: [{
           question: "Select items",
-          options: Array.from({ length: 31 }, (_, i) => `Opt${i}`),
+          options: Array.from({ length: 7 }, (_, i) => `Opt${i}`),
           is_multi_select: true
         }]
       }
     };
-    const thirtyOneOpts = permissionOptions(thirtyOneCall, "ask_question");
-    expect(thirtyOneOpts.length).toBeGreaterThan(30);
-    expect(thirtyOneOpts).toContainEqual({ optionId: "agy-q-0", kind: "allow_once", name: "Opt0" });
+    expect(canBridgeInteraction("ask_question", sevenOptionCall)).toBe(false);
   });
 
   it("labels each v1 requestPermission toolCall title with the active question", async () => {
