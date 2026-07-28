@@ -122,14 +122,17 @@ function utf8ToBase64(text: string): string {
  * command metadata. Output is a full replacement snapshot (not live PTY bytes);
  * mid-command streaming only appears if agy persists partial field-28 results.
  */
-export function terminalUpdateForExecute(meta: ExecuteTerminalMeta): V2SessionUpdate {
+export function terminalUpdateForExecute(
+  meta: ExecuteTerminalMeta,
+  options?: { includeOutput?: boolean }
+): V2SessionUpdate {
   const update: Record<string, unknown> = {
     sessionUpdate: "terminal_update",
     terminalId: meta.terminalId
   };
   if (meta.command) update.command = meta.command;
   if (meta.cwd) update.cwd = meta.cwd;
-  if (meta.output != null && meta.output.length > 0) {
+  if (options?.includeOutput !== false && meta.output != null && meta.output.length > 0) {
     update.output = { data: utf8ToBase64(meta.output) };
   }
 

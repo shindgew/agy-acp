@@ -370,7 +370,10 @@ export function expandSessionUpdateToV2(
   tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
   const toolV2Updates = processV2ToolContentChunks(tool as V2SessionUpdate, toolContentTracker);
 
-  const updates: V2SessionUpdate[] = [terminalUpdateForExecute(meta)];
+  // Omit output snapshot from terminal_update when terminal_output_chunk is emitted
+  // so output bytes are not sent twice to the client.
+  const terminalUpdate = terminalUpdateForExecute(meta, { includeOutput: !terminalChunk });
+  const updates: V2SessionUpdate[] = [terminalUpdate];
   if (terminalChunk) {
     updates.push(terminalChunk);
   }
