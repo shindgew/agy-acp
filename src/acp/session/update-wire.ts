@@ -121,14 +121,39 @@ function cleanContentItem(item: unknown): unknown {
   return item;
 }
 
-const emittedTerminalOutputLengths = new Map<string, number>();
+export type TerminalOutputTracker = Map<string, number>;
+
+const MAX_TERMINAL_TRACKER_SIZE = 500;
+
+export function createTerminalOutputTracker(): TerminalOutputTracker {
+  return new Map<string, number>();
+}
+
+const defaultTerminalOutputTracker = createTerminalOutputTracker();
 
 export function resetTerminalOutputTracker(): void {
-  emittedTerminalOutputLengths.clear();
+  defaultTerminalOutputTracker.clear();
+}
+
+function setTrackedOutputLength(
+  tracker: TerminalOutputTracker,
+  terminalId: string,
+  length: number
+): void {
+  if (!tracker.has(terminalId) && tracker.size >= MAX_TERMINAL_TRACKER_SIZE) {
+    const oldestKey = tracker.keys().next().value;
+    if (oldestKey !== undefined) {
+      tracker.delete(oldestKey);
+    }
+  }
+  tracker.set(terminalId, length);
 }
 
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
-export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
+export function sessionUpdateToV1(
+  update: V1SessionUpdate,
+  tracker: TerminalOutputTracker = defaultTerminalOutputTracker
+): V1SessionUpdate {
   const raw = update as unknown as Record<string, unknown>;
   if (raw.sessionUpdate === "tool_call" || raw.sessionUpdate === "tool_call_update") {
     const v1Update: Record<string, unknown> = {
@@ -151,11 +176,14 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
         };
         metaObj.terminal_info = { terminal_id: meta.terminalId };
         if (meta.output != null && meta.output.length > 0) {
-          const prevLen = emittedTerminalOutputLengths.get(meta.terminalId) ?? 0;
+          const prevLen = tracker.get(meta.terminalId) ?? 0;
           if (meta.output.length > prevLen) {
             const newChunk = meta.output.slice(prevLen);
             metaObj.terminal_output = { data: Buffer.from(newChunk, "utf8").toString("base64") };
-            emittedTerminalOutputLengths.set(meta.terminalId, meta.output.length);
+            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
+          } else if (meta.output.length < prevLen) {
+            metaObj.terminal_output = { data: Buffer.from(meta.output, "utf8").toString("base64") };
+            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
           }
         }
         const finished =
@@ -163,7 +191,7 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
           meta.status === "failed" ||
           meta.status === "cancelled";
         if (finished) {
-          emittedTerminalOutputLengths.delete(meta.terminalId);
+          tracker.delete(meta.terminalId);
           const terminalExit: Record<string, unknown> = {};
           if (typeof meta.exitCode === "number") {
             terminalExit.exit_code = meta.exitCode;
