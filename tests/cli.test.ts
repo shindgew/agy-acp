@@ -26,6 +26,7 @@ import {
   permissionKeys,
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
+import { requestPermissionV1 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
@@ -220,6 +221,51 @@ describe("permission bridge", () => {
     ]);
     expect(interactionKeys("agy-q-q0-1", "ask_question", multiQuestionCall, 0)).toBe("\x1b[B\r");
     expect(interactionKeys("agy-q-q1-0,1", "ask_question", multiQuestionCall, 1)).toBe(" \x1b[B \r");
+
+    const fiveOptionCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q5",
+      title: "Five option question",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [{
+          question: "Select items",
+          options: ["A", "B", "C", "D", "E"],
+          is_multi_select: true
+        }]
+      }
+    };
+    const fiveOpts = permissionOptions(fiveOptionCall, "ask_question");
+    expect(fiveOpts).toContainEqual({ optionId: "agy-q-0,2,4", kind: "allow_once", name: "A + C + E" });
+    expect(interactionKeys("agy-q-0,2,4", "ask_question", fiveOptionCall)).toBe(" \x1b[B\x1b[B \x1b[B\x1b[B \r");
+  });
+
+  it("labels each v1 requestPermission toolCall title with the active question", async () => {
+    let capturedTitle: string | undefined;
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        capturedTitle = params.toolCall.title;
+        return { outcome: { outcome: "selected", optionId: "agy-q-q1-0" } };
+      })
+    };
+
+    const multiQCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q-multi",
+      title: "Initial question title",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [
+          { question: "First Question?", options: ["Opt1", "Opt2"] },
+          { question: "Second Question?", options: ["Opt3", "Opt4"] }
+        ]
+      }
+    };
+
+    await requestPermissionV1(mockClient as any, "s1", multiQCall, "ask_question", undefined, 1);
+    expect(capturedTitle).toBe("[Question 2/2] Second Question?");
   });
 
   it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
