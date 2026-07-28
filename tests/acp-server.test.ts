@@ -1565,7 +1565,7 @@ describe("ACP v2 (experimental draft)", () => {
     const metaFirst = v1First._meta as Record<string, Record<string, string>>;
     expect(metaFirst.terminal_output.data).toBe(Buffer.from("Long initial log text", "utf8").toString("base64"));
 
-    // Simulate upstream reset to shorter output
+    // Simulate upstream reset to shorter output (terminal_output is append-only, so do not append chunk)
     const step2 = {
       ...step1,
       content: [
@@ -1575,7 +1575,7 @@ describe("ACP v2 (experimental draft)", () => {
 
     const v1Second = sessionUpdateToV1(step2, tracker) as Record<string, unknown>;
     const metaSecond = v1Second._meta as Record<string, Record<string, string>>;
-    expect(metaSecond.terminal_output.data).toBe(Buffer.from("Reset", "utf8").toString("base64"));
+    expect(metaSecond.terminal_output).toBeUndefined();
   });
 
   it("bounds terminal output tracker size to prevent unbounded memory growth", () => {

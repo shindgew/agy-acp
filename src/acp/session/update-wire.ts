@@ -182,7 +182,8 @@ export function sessionUpdateToV1(
             metaObj.terminal_output = { data: Buffer.from(newChunk, "utf8").toString("base64") };
             setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
           } else if (meta.output.length < prevLen) {
-            metaObj.terminal_output = { data: Buffer.from(meta.output, "utf8").toString("base64") };
+            // terminal_output in ACP v1 is append-only. Do not append a reset snapshot
+            // to an existing terminal stream; update tracked length for future chunks.
             setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
           }
         }
