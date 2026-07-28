@@ -30,9 +30,15 @@ export function encodeToolRun(run: { call?: Uint8Array; titlePrimary?: string; t
   return w.finish();
 }
 
-export function encodeAgentText(text: string): Uint8Array {
+export function encodeAgentText(text: string | { text?: string; thought?: string }, thought?: string): Uint8Array {
   const w = new BinaryWriter();
-  w.tag(1, 2).string(text);
+  if (typeof text === "object") {
+    if (text.text) w.tag(1, 2).string(text.text);
+    if (text.thought) w.tag(3, 2).string(text.thought);
+  } else {
+    if (text) w.tag(1, 2).string(text);
+    if (thought) w.tag(3, 2).string(thought);
+  }
   return w.finish();
 }
 
@@ -166,7 +172,7 @@ export function encodePermissions(info: { kind?: string; value?: string; decisio
 
 export function encodeStepPayload(opts: {
   toolRun?: Uint8Array;
-  agentText?: string;
+  agentText?: string | { text?: string; thought?: string } | Uint8Array;
   titleUpdate?: string;
   userPrompt?: string;
   commandResult?: Uint8Array;
@@ -180,7 +186,10 @@ export function encodeStepPayload(opts: {
   if (opts.grepSearch) submessage(w, 13, opts.grepSearch);
   if (opts.viewFile) submessage(w, 14, opts.viewFile);
   if (opts.userPrompt !== undefined) submessage(w, 19, encodeUserPrompt(opts.userPrompt));
-  if (opts.agentText !== undefined) submessage(w, 20, encodeAgentText(opts.agentText));
+  if (opts.agentText !== undefined) {
+    const bytes = opts.agentText instanceof Uint8Array ? opts.agentText : encodeAgentText(opts.agentText);
+    submessage(w, 20, bytes);
+  }
   if (opts.commandResult) submessage(w, 28, opts.commandResult);
   if (opts.titleUpdate !== undefined) submessage(w, 30, encodeTitleUpdate(opts.titleUpdate));
   if (opts.urlContent) submessage(w, 40, opts.urlContent);
