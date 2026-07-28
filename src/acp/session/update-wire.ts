@@ -122,6 +122,7 @@ function cleanContentItem(item: unknown): unknown {
 }
 
 export type TerminalOutputTracker = Map<string, number>;
+export type ToolCallContentTracker = Map<string, number>;
 
 const MAX_TERMINAL_TRACKER_SIZE = 500;
 
@@ -129,10 +130,18 @@ export function createTerminalOutputTracker(): TerminalOutputTracker {
   return new Map<string, number>();
 }
 
+export function createToolCallContentTracker(): ToolCallContentTracker {
+  return new Map<string, number>();
+}
+
 const defaultTerminalOutputTracker = createTerminalOutputTracker();
+const defaultV2TerminalOutputTracker = createTerminalOutputTracker();
+const defaultToolCallContentTracker = createToolCallContentTracker();
 
 export function resetTerminalOutputTracker(): void {
   defaultTerminalOutputTracker.clear();
+  defaultV2TerminalOutputTracker.clear();
+  defaultToolCallContentTracker.clear();
 }
 
 function setTrackedOutputLength(
@@ -147,6 +156,20 @@ function setTrackedOutputLength(
     }
   }
   tracker.set(terminalId, length);
+}
+
+function setTrackedToolContentCount(
+  tracker: ToolCallContentTracker,
+  toolCallId: string,
+  count: number
+): void {
+  if (!tracker.has(toolCallId) && tracker.size >= MAX_TERMINAL_TRACKER_SIZE) {
+    const oldestKey = tracker.keys().next().value;
+    if (oldestKey !== undefined) {
+      tracker.delete(oldestKey);
+    }
+  }
+  tracker.set(toolCallId, count);
 }
 
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
@@ -305,18 +328,106 @@ function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
 
 /**
  * Expand one v1-shaped update into one or more v2 session updates.
- * Execute tools produce `terminal_update` then `tool_call_update` with a
- * display-only `{ type: "terminal", terminalId }` content block.
+ * Execute tools produce `terminal_update`, optional `terminal_output_chunk`,
+ * and `tool_call_update` with a display-only `{ type: "terminal", terminalId }`
+ * content block. Progressive tool call updates emit `tool_call_content_chunk`.
  */
-export function expandSessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdate[] {
+export function expandSessionUpdateToV2(
+  update: V1SessionUpdate,
+  terminalTracker: TerminalOutputTracker = defaultV2TerminalOutputTracker,
+  toolContentTracker: ToolCallContentTracker = defaultToolCallContentTracker
+): V2SessionUpdate[] {
   const meta = executeTerminalMeta(update);
+
   if (!meta) {
-    return [sessionUpdateToV2(update)];
+    const v2Update = sessionUpdateToV2(update);
+    return processV2ToolContentChunks(v2Update, toolContentTracker);
+  }
+
+  const prevLen = terminalTracker.get(meta.terminalId) ?? 0;
+  let terminalChunk: V2SessionUpdate | null = null;
+  if (meta.output != null && meta.output.length > prevLen) {
+    const newChunk = meta.output.slice(prevLen);
+    setTrackedOutputLength(terminalTracker, meta.terminalId, meta.output.length);
+    terminalChunk = {
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: meta.terminalId,
+      data: Buffer.from(newChunk, "utf8").toString("base64")
+    } as V2SessionUpdate;
+  } else if (meta.output != null && meta.output.length < prevLen) {
+    setTrackedOutputLength(terminalTracker, meta.terminalId, meta.output.length);
+  }
+
+  const finished =
+    meta.status === "completed" ||
+    meta.status === "failed" ||
+    meta.status === "cancelled";
+  if (finished) {
+    terminalTracker.delete(meta.terminalId);
   }
 
   const tool = sessionUpdateToV2(update) as unknown as Record<string, unknown>;
   tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
+  const toolV2Updates = processV2ToolContentChunks(tool as V2SessionUpdate, toolContentTracker);
 
-  return [terminalUpdateForExecute(meta), tool as V2SessionUpdate];
+  const updates: V2SessionUpdate[] = [terminalUpdateForExecute(meta)];
+  if (terminalChunk) {
+    updates.push(terminalChunk);
+  }
+  updates.push(...toolV2Updates);
+
+  return updates;
+}
+
+function processV2ToolContentChunks(
+  v2Update: V2SessionUpdate,
+  toolContentTracker: ToolCallContentTracker
+): V2SessionUpdate[] {
+  const raw = v2Update as unknown as Record<string, unknown>;
+  if (
+    raw.sessionUpdate !== "tool_call_update" ||
+    typeof raw.toolCallId !== "string" ||
+    !raw.toolCallId
+  ) {
+    return [v2Update];
+  }
+
+  const toolCallId = raw.toolCallId;
+  const contentItems = Array.isArray(raw.content)
+    ? (raw.content as Record<string, unknown>[])
+    : [];
+  const prevCount = toolContentTracker.get(toolCallId) ?? 0;
+
+  const finished =
+    raw.status === "completed" ||
+    raw.status === "failed" ||
+    raw.status === "cancelled";
+
+  if (prevCount === 0) {
+    setTrackedToolContentCount(toolContentTracker, toolCallId, contentItems.length);
+    if (finished) {
+      toolContentTracker.delete(toolCallId);
+    }
+    return [v2Update];
+  }
+
+  const updates: V2SessionUpdate[] = [];
+  if (contentItems.length > prevCount) {
+    for (let i = prevCount; i < contentItems.length; i++) {
+      updates.push({
+        sessionUpdate: "tool_call_content_chunk",
+        toolCallId,
+        content: contentItems[i]
+      } as V2SessionUpdate);
+    }
+    setTrackedToolContentCount(toolContentTracker, toolCallId, contentItems.length);
+  }
+
+  if (finished) {
+    toolContentTracker.delete(toolCallId);
+  }
+
+  updates.push(v2Update);
+  return updates;
 }
 
