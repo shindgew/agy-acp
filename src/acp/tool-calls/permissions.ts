@@ -407,7 +407,7 @@ export function askQuestionOptions(toolCall: SessionUpdate, questionIndex = 0): 
 
   const MAX_SUBSET_OPTIONS = 128;
 
-  if ((1 << n) <= MAX_SUBSET_OPTIONS) {
+  if (n <= 7) {
     const totalSubsets = 1 << n;
     for (let mask = 1; mask < totalSubsets; mask++) {
       const indices: number[] = [];
