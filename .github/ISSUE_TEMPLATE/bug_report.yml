@@ -1,0 +1,68 @@
+name: Bug Report
+description: Report a bug or issue in agy-acp adapter
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please fill out the sections below to help us reproduce and address the problem.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the issue in detail...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps-to-reproduce
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Run `npx agy-acp` with client...
+        2. Execute command/request...
+        3. See error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected Behavior
+      description: A clear and concise description of what you expected to happen.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Information about your environment.
+      placeholder: |
+        - OS: [e.g. macOS 14.5 / Linux / Windows]
+        - Node.js Version: [e.g. 22.x]
+        - agy-acp Version: [e.g. 0.3.3]
+        - ACP Client / IDE: [e.g. Zed / VS Code / Antigravity CLI]
+        - Antigravity CLI Version: [e.g. agy 2.x]
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs & Output
+      description: Copy and paste any relevant logs, stack traces, or console output.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: Add any other context or screenshots about the problem here.
+    validations:
+      required: false
