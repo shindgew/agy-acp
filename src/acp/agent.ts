@@ -277,8 +277,9 @@ export class AcpAgent {
         session: SessionState,
         conversationId: string,
         cwd: string,
-        emit: (update: v1.SessionUpdate) => Promise<void>
-      ) => this.replayConversation(session, conversationId, cwd, emit)
+        emit: (update: v1.SessionUpdate) => Promise<void>,
+        replayFrom?: unknown
+      ) => this.replayConversation(session, conversationId, cwd, emit, replayFrom)
     };
   }
 
@@ -410,9 +411,10 @@ export class AcpAgent {
     session: SessionState,
     conversationId: string,
     cwd: string,
-    emit: (update: v1.SessionUpdate) => Promise<void>
+    emit: (update: v1.SessionUpdate) => Promise<void>,
+    replayFrom?: unknown
   ): Promise<void> {
-    return replayConversation(this.#replayCache, session, conversationId, cwd, emit);
+    return replayConversation(this.#replayCache, session, conversationId, cwd, emit, replayFrom);
   }
 
   private requireSession(sessionId: string): SessionState {

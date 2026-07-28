@@ -32,7 +32,8 @@ export interface ResumeSessionDeps {
     session: SessionState,
     conversationId: string,
     cwd: string,
-    emit: (update: v1.SessionUpdate) => Promise<void>
+    emit: (update: v1.SessionUpdate) => Promise<void>,
+    replayFrom?: unknown
   ): Promise<void>;
 }
 
@@ -56,7 +57,7 @@ export async function handleResumeSessionV1(
 }
 
 /**
- * v2 `session/resume`: optional `replayFrom: { type: "start" }` replaces v1
+ * v2 `session/resume`: optional `replayFrom` cursor replaces v1
  * `session/load`. Omitting `replayFrom` reattaches without history.
  */
 export async function handleResumeSessionV2(
@@ -75,18 +76,21 @@ export async function handleResumeSessionV2(
 
   const replayFrom = params.replayFrom ?? null;
   if (replayFrom != null) {
-    if (replayFrom.type !== "start") {
-      throw new Error(`Unsupported replay cursor: ${String((replayFrom as { type?: string }).type)}`);
-    }
     if (stored.conversationId) {
-      await deps.replayConversation(session, stored.conversationId, cwd, async (update) => {
-        for (const v2Update of expandSessionUpdateToV2(update)) {
-          await client.notify(v2.methods.client.session.update, {
-            sessionId: params.sessionId,
-            update: v2Update
-          });
-        }
-      });
+      await deps.replayConversation(
+        session,
+        stored.conversationId,
+        cwd,
+        async (update) => {
+          for (const v2Update of expandSessionUpdateToV2(update)) {
+            await client.notify(v2.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: v2Update
+            });
+          }
+        },
+        replayFrom
+      );
     }
   }
 

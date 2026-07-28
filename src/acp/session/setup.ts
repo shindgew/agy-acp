@@ -151,21 +151,78 @@ export function persistSession(
   return store.persist(sessionId, sessionRecord(session));
 }
 
+export function filterUpdatesForReplayFrom(
+  updates: v1.SessionUpdate[],
+  replayFrom: Record<string, unknown>
+): v1.SessionUpdate[] {
+  const type = String(replayFrom.type ?? "").toLowerCase();
+
+  if (type === "start") {
+    return updates;
+  }
+
+  if (type === "message") {
+    const targetId = typeof replayFrom.messageId === "string" ? replayFrom.messageId : undefined;
+    if (!targetId) return updates;
+    const index = updates.findIndex((u) => {
+      const rec = u as unknown as Record<string, unknown>;
+      return rec.messageId === targetId;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  if (type === "step" || type === "step_idx" || type === "stepidx") {
+    const targetIdx =
+      typeof replayFrom.stepIdx === "number"
+        ? replayFrom.stepIdx
+        : typeof replayFrom.index === "number"
+        ? replayFrom.index
+        : typeof replayFrom.idx === "number"
+        ? replayFrom.idx
+        : undefined;
+    if (targetIdx == null) return updates;
+    const index = updates.findIndex((u) => {
+      const rec = u as unknown as Record<string, unknown>;
+      const stepIdxStr = typeof rec.messageId === "string" ? rec.messageId : undefined;
+      const stepNum = stepIdxStr != null ? parseInt(stepIdxStr, 10) : NaN;
+      return !isNaN(stepNum) && stepNum >= targetIdx;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  if (type === "tool_call" || type === "toolcall") {
+    const targetId = typeof replayFrom.toolCallId === "string" ? replayFrom.toolCallId : undefined;
+    if (!targetId) return updates;
+    const index = updates.findIndex((u) => {
+      const rec = u as unknown as Record<string, unknown>;
+      return rec.toolCallId === targetId;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  throw new Error(`Unsupported replay cursor: ${String(replayFrom.type)}`);
+}
+
 /** Replay a persisted conversation's session updates (used by `session/load` and
- *  `session/resume` with `replayFrom: { type: "start" }`). */
+ *  `session/resume` with `replayFrom`). */
 export async function replayConversation(
   replayCache: ReplayCache,
   session: SessionState,
   conversationId: string,
   cwd: string,
-  emit: (update: v1.SessionUpdate) => Promise<void>
+  emit: (update: v1.SessionUpdate) => Promise<void>,
+  replayFrom?: unknown
 ): Promise<void> {
   const replay = replayCache.get(session.agy.config.conversationsDir, conversationId, {
     skipNarration: false,
     cwd
   });
   if (!replay) return;
-  for (const update of replay.updates) {
+  const updates =
+    replayFrom != null
+      ? filterUpdatesForReplayFrom(replay.updates, replayFrom as Record<string, unknown>)
+      : replay.updates;
+  for (const update of updates) {
     await emit(update);
   }
 }
