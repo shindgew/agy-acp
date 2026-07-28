@@ -334,6 +334,7 @@ export class AgyCliSession {
         let offset = 0;
         while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
           this.#ptyIdleMarkerCount++;
+          this.#ptyPermissionPanelVisible = false;
           offset += idleMarker.length;
         }
         this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
@@ -787,8 +788,6 @@ export class AgyCliSession {
     if (visible) {
       this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
-    } else if (this.#ptyPermissionMarkerTail.length === 0) {
-      this.#ptyPermissionPanelVisible = false;
     }
     this.#ptyPermissionRender = "";
     this.#ptyPermissionRenderTimer = undefined;
