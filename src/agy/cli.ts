@@ -24,6 +24,7 @@ import {
   parseAskQuestion,
   type PermissionChoice
 } from "../acp/tool-calls/permissions.js";
+import type { ClientElicitationCapability } from "../acp/tool-calls/elicitation.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
@@ -281,11 +282,12 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission?: PermissionCallback,
-    fsBridge?: ClientFileSystem
+    fsBridge?: ClientFileSystem,
+    elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
     if (this.config.interactivePermissions) {
       if (!onPermission) throw new Error("interactive permissions require a permission callback");
-      return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge);
+      return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge, elicitationCap);
     }
     const command = this.commandForPrompt(prompt);
     try {
@@ -303,7 +305,8 @@ export class AgyCliSession {
     prompt: string,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     onPermission: PermissionCallback,
-    fsBridge?: ClientFileSystem
+    fsBridge?: ClientFileSystem,
+    elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
@@ -420,8 +423,9 @@ export class AgyCliSession {
           }
 
           if (interaction.blocked) {
-            if (!canBridgeInteraction(interaction.toolName, toolCall)) {
-              const detail = unsupportedInteractionDetail(interaction.toolName, toolCall);
+            const hasElicitation = Boolean(elicitationCap?.form);
+            if (!canBridgeInteraction(interaction.toolName, toolCall, { hasElicitation })) {
+              const detail = unsupportedInteractionDetail(interaction.toolName, toolCall, { hasElicitation });
               throw new AgyCliError(
                 `Unsupported agy interaction '${interaction.toolName}' (status 9); ${detail}`,
                 [this.config.agyPath],
@@ -1059,13 +1063,19 @@ export function parseAgyModels(output: string): string[] {
   return dedupe(lines);
 }
 
-function unsupportedInteractionDetail(toolName: string, toolCall: SessionUpdate): string {
+function unsupportedInteractionDetail(
+  toolName: string,
+  toolCall: SessionUpdate,
+  options?: { hasElicitation?: boolean }
+): string {
   if (toolName === "ask_question") {
     const ask = parseAskQuestion(toolCall);
     if (!ask) return "ask_question payload could not be parsed";
-    if (ask.questionCount !== 1) return "only single-question ask_question menus can be bridged safely";
-    if (ask.multiSelect) return "multi-select ask_question is not bridged yet";
-    if (ask.options.length === 0) return "ask_question has no selectable options";
+    if (!options?.hasElicitation) {
+      if (ask.questionCount !== 1) return "only single-question ask_question menus can be bridged safely without client elicitation capability";
+      if (ask.multiSelect) return "multi-select ask_question requires client elicitation capability";
+      if (ask.options.length === 0) return "free-text ask_question requires client elicitation capability";
+    }
     return "ask_question could not be bridged";
   }
   return "only standard permission menus (run_command, ask_permission, file read/write) and single-select ask_question can be bridged safely";
