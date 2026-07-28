@@ -139,8 +139,8 @@ export async function handlePromptV1(
         sessionId: params.sessionId,
         update: sessionUpdateToV1(update, tracker)
       });
-    }, async (toolCall, { toolName }) => {
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal);
+    }, async (toolCall, { toolName, questionIndex }) => {
+      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex);
     }, deps.clientFileSystemV1(client, params.sessionId));
     await deps.persistSession(params.sessionId, session);
     return {
@@ -258,8 +258,8 @@ async function runV2PromptTurn(
         for (const v2Update of expandSessionUpdateToV2(update)) {
           await notify(v2Update);
         }
-      }, async (toolCall, { toolName }) => {
-        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal);
+      }, async (toolCall, { toolName, questionIndex }) => {
+        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex);
       });
       await deps.persistSession(params.sessionId, session);
 

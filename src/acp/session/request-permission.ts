@@ -6,7 +6,7 @@ import * as v1 from "@agentclientprotocol/sdk";
 import type { AgentContext as V1AgentContext, SessionUpdate as V1SessionUpdate } from "@agentclientprotocol/sdk";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
 import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/experimental/v2";
-import { permissionOptions, type PermissionChoice } from "../tool-calls/permissions.js";
+import { permissionOptions, parseAskQuestion, type PermissionChoice } from "../tool-calls/permissions.js";
 import { expandSessionUpdateToV2, sessionUpdateToV2 } from "./update-wire.js";
 
 /** v1 `session/request_permission`: race the request against turn cancellation. */
@@ -15,7 +15,8 @@ export async function requestPermissionV1(
   sessionId: string,
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  questionIndex?: number
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal?.aborted) return "cancelled";
   const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
@@ -23,7 +24,7 @@ export async function requestPermissionV1(
     client.request(v1.methods.client.session.requestPermission, {
       sessionId,
       toolCall: requestToolCall as v1.ToolCallUpdate,
-      options: permissionOptions(toolCall, toolName)
+      options: permissionOptions(toolCall, toolName, questionIndex)
     }),
     signal
   );
@@ -36,7 +37,8 @@ export async function requestPermissionV2(
   sessionId: string,
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  questionIndex?: number
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal.aborted) return "cancelled";
   const expanded = expandSessionUpdateToV2(toolCall);
@@ -45,12 +47,23 @@ export async function requestPermissionV2(
     return kind === "tool_call_update" || kind === "tool_call";
   }) ?? sessionUpdateToV2(toolCall)) as unknown as Record<string, unknown>;
   const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
+
+  let title = String(requestToolCall.title ?? "Permission required");
+  if (toolName === "ask_question") {
+    const ask = parseAskQuestion(toolCall);
+    const qIdx = questionIndex ?? 0;
+    if (ask && ask.questions.length > 1 && qIdx < ask.questions.length) {
+      const q = ask.questions[qIdx];
+      title = `[Question ${qIdx + 1}/${ask.questions.length}] ${q.question || title}`;
+    }
+  }
+
   const response = await racePermissionCancellation(
     client.request(v2.methods.client.session.requestPermission, {
       sessionId,
-      title: String(requestToolCall.title ?? "Permission required"),
+      title,
       subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
-      options: permissionOptions(toolCall, toolName)
+      options: permissionOptions(toolCall, toolName, questionIndex)
     }),
     signal
   );
@@ -72,8 +85,7 @@ function selectedPermission(response: unknown, signal?: AbortSignal): Permission
     id === "agy-allow-conversation" ||
     id === "agy-allow-settings" ||
     id === "agy-reject-once" ||
-    id === "agy-q-skip" ||
-    /^agy-q-\d+$/.test(id)
+    id.startsWith("agy-q-")
   ) {
     return id;
   }
