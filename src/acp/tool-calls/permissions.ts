@@ -396,7 +396,9 @@ export function askQuestionOptions(toolCall: SessionUpdate, questionIndex = 0): 
   const options: PermissionMenuOption[] = [];
   const n = q.options.length;
 
-  if (n <= 4) {
+  const MAX_SUBSET_OPTIONS = 128;
+
+  if ((1 << n) <= MAX_SUBSET_OPTIONS) {
     const totalSubsets = 1 << n;
     for (let mask = 1; mask < totalSubsets; mask++) {
       const indices: number[] = [];
@@ -424,22 +426,38 @@ export function askQuestionOptions(toolCall: SessionUpdate, questionIndex = 0): 
       }
     }
   } else {
-    for (let i = 0; i < n; i++) {
-      options.push({
-        optionId: `${prefix}${i}`,
-        kind: "allow_once" as const,
-        name: q.options[i]
-      });
-    }
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        options.push({
-          optionId: `${prefix}${i},${j}`,
-          kind: "allow_once" as const,
-          name: `${q.options[i]} + ${q.options[j]}`
-        });
+    function generateCombos(start: number, combo: number[], k: number) {
+      if (options.length >= MAX_SUBSET_OPTIONS - 3) return;
+      if (combo.length === k) {
+        const key = combo.join(",");
+        if (combo.length === 1) {
+          options.push({
+            optionId: `${prefix}${combo[0]}`,
+            kind: "allow_once" as const,
+            name: q.options[combo[0]]
+          });
+        } else {
+          options.push({
+            optionId: `${prefix}${key}`,
+            kind: "allow_once" as const,
+            name: combo.map((i) => q.options[i]).join(" + ")
+          });
+        }
+        return;
+      }
+      for (let i = start; i < n; i++) {
+        combo.push(i);
+        generateCombos(i + 1, combo, k);
+        combo.pop();
+        if (options.length >= MAX_SUBSET_OPTIONS - 3) break;
       }
     }
+
+    for (let k = 1; k < n; k++) {
+      generateCombos(0, [], k);
+      if (options.length >= MAX_SUBSET_OPTIONS - 3) break;
+    }
+
     options.push({
       optionId: `${prefix}all`,
       kind: "allow_once" as const,
