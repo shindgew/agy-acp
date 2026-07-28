@@ -1458,16 +1458,16 @@ describe("ACP v2 (experimental draft)", () => {
     } as SessionUpdate;
 
     const expanded = expandSessionUpdateToV2(update) as Array<Record<string, unknown>>;
-    expect(expanded).toHaveLength(3);
+    expect(expanded).toHaveLength(4);
 
     const terminalId = terminalIdForToolCall("cmd-1");
     expect(expanded[0]).toMatchObject({
       sessionUpdate: "terminal_update",
       terminalId,
       command: "ls",
-      cwd: "/repo",
-      exitStatus: { exitCode: 0 }
+      cwd: "/repo"
     });
+    expect(expanded[0].exitStatus).toBeUndefined();
 
     expect(expanded[1]).toEqual({
       sessionUpdate: "terminal_output_chunk",
@@ -1476,12 +1476,18 @@ describe("ACP v2 (experimental draft)", () => {
     });
 
     expect(expanded[2]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId,
+      exitStatus: { exitCode: 0 }
+    });
+
+    expect(expanded[3]).toMatchObject({
       sessionUpdate: "tool_call_update",
       toolCallId: "cmd-1",
       kind: "execute",
       status: "completed"
     });
-    const content = expanded[2].content as Array<Record<string, unknown>>;
+    const content = expanded[3].content as Array<Record<string, unknown>>;
     expect(content.some((item) => item.type === "terminal")).toBe(false);
     expect(content.some((item) => item.type === "content")).toBe(true);
   });
@@ -1547,15 +1553,56 @@ describe("ACP v2 (experimental draft)", () => {
     } as unknown as SessionUpdate;
 
     const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
-    expect(res2).toHaveLength(3);
-    expect(res2[0]).toMatchObject({ sessionUpdate: "terminal_update", exitStatus: { exitCode: 0 } });
-    expect(res2[0].output).toBeUndefined();
+    expect(res2).toHaveLength(4);
+    expect(res2[0]).toMatchObject({ sessionUpdate: "terminal_update" });
+    expect(res2[0].exitStatus).toBeUndefined();
     expect(res2[1]).toEqual({
       sessionUpdate: "terminal_output_chunk",
       terminalId: terminalIdForToolCall("stream-cmd"),
       data: Buffer.from("compiling step 2\n", "utf8").toString("base64")
     });
-    expect(res2[2]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+    expect(res2[2]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      exitStatus: { exitCode: 0 }
+    });
+    expect(res2[3]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("emits tool_call_content_chunk when new content items are appended to a previously empty tool call", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-empty-init",
+      title: "fetch data",
+      kind: "fetch",
+      status: "in_progress",
+      content: []
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(1);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "tc-empty-init" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-empty-init",
+      title: "fetch data",
+      kind: "fetch",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "Late Data" } }]
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(2);
+    expect(res2[0]).toEqual({
+      sessionUpdate: "tool_call_content_chunk",
+      toolCallId: "tc-empty-init",
+      content: { type: "content", content: { type: "text", text: "Late Data" } }
+    });
+    expect(res2[1]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
   });
 
   it("emits tool_call_content_chunk when new content items are appended", () => {

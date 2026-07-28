@@ -370,13 +370,32 @@ export function expandSessionUpdateToV2(
   tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
   const toolV2Updates = processV2ToolContentChunks(tool as V2SessionUpdate, toolContentTracker);
 
-  // Omit output snapshot from terminal_update when terminal_output_chunk is emitted
-  // so output bytes are not sent twice to the client.
-  const terminalUpdate = terminalUpdateForExecute(meta, { includeOutput: !terminalChunk });
-  const updates: V2SessionUpdate[] = [terminalUpdate];
-  if (terminalChunk) {
+  const hasExitStatus = finished || typeof meta.exitCode === "number";
+  const updates: V2SessionUpdate[] = [];
+
+  if (terminalChunk && hasExitStatus) {
+    // When newly observed terminal output arrives at process completion,
+    // emit start metadata first, then the output chunk, then exitStatus.
+    // This prevents clients from evicting/closing the terminal before reading the chunk.
+    const startTerminalUpdate = terminalUpdateForExecute(meta, {
+      includeOutput: false,
+      includeExitStatus: false
+    });
+    const exitTerminalUpdate = terminalUpdateForExecute(meta, {
+      includeOutput: false,
+      includeExitStatus: true
+    });
+    updates.push(startTerminalUpdate);
     updates.push(terminalChunk);
+    updates.push(exitTerminalUpdate);
+  } else {
+    const terminalUpdate = terminalUpdateForExecute(meta, { includeOutput: !terminalChunk });
+    updates.push(terminalUpdate);
+    if (terminalChunk) {
+      updates.push(terminalChunk);
+    }
   }
+
   updates.push(...toolV2Updates);
 
   return updates;
@@ -399,14 +418,13 @@ function processV2ToolContentChunks(
   const contentItems = Array.isArray(raw.content)
     ? (raw.content as Record<string, unknown>[])
     : [];
-  const prevCount = toolContentTracker.get(toolCallId) ?? 0;
 
   const finished =
     raw.status === "completed" ||
     raw.status === "failed" ||
     raw.status === "cancelled";
 
-  if (prevCount === 0) {
+  if (!toolContentTracker.has(toolCallId)) {
     setTrackedToolContentCount(toolContentTracker, toolCallId, contentItems.length);
     if (finished) {
       toolContentTracker.delete(toolCallId);
@@ -414,6 +432,7 @@ function processV2ToolContentChunks(
     return [v2Update];
   }
 
+  const prevCount = toolContentTracker.get(toolCallId)!;
   const updates: V2SessionUpdate[] = [];
   if (contentItems.length > prevCount) {
     for (let i = prevCount; i < contentItems.length; i++) {

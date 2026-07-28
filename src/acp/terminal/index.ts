@@ -124,7 +124,7 @@ function utf8ToBase64(text: string): string {
  */
 export function terminalUpdateForExecute(
   meta: ExecuteTerminalMeta,
-  options?: { includeOutput?: boolean }
+  options?: { includeOutput?: boolean; includeExitStatus?: boolean }
 ): V2SessionUpdate {
   const update: Record<string, unknown> = {
     sessionUpdate: "terminal_update",
@@ -136,18 +136,20 @@ export function terminalUpdateForExecute(
     update.output = { data: utf8ToBase64(meta.output) };
   }
 
-  const finished =
-    meta.status === "completed" ||
-    meta.status === "failed" ||
-    meta.status === "cancelled";
-  if (finished) {
-    const exitStatus: Record<string, unknown> = {};
-    if (typeof meta.exitCode === "number") exitStatus.exitCode = meta.exitCode;
-    if (meta.status === "cancelled" && meta.exitCode == null) exitStatus.signal = "SIGINT";
-    update.exitStatus = exitStatus;
-  } else if (typeof meta.exitCode === "number") {
-    // Exit code without a terminal status still marks the process as exited.
-    update.exitStatus = { exitCode: meta.exitCode };
+  if (options?.includeExitStatus !== false) {
+    const finished =
+      meta.status === "completed" ||
+      meta.status === "failed" ||
+      meta.status === "cancelled";
+    if (finished) {
+      const exitStatus: Record<string, unknown> = {};
+      if (typeof meta.exitCode === "number") exitStatus.exitCode = meta.exitCode;
+      if (meta.status === "cancelled" && meta.exitCode == null) exitStatus.signal = "SIGINT";
+      update.exitStatus = exitStatus;
+    } else if (typeof meta.exitCode === "number") {
+      // Exit code without a terminal status still marks the process as exited.
+      update.exitStatus = { exitCode: meta.exitCode };
+    }
   }
 
   return update as V2SessionUpdate;
