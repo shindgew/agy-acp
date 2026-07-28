@@ -77,7 +77,6 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   const rawInput = asRecord(raw.rawInput) ?? {};
   const rawOutput = asRecord(raw.rawOutput) ?? {};
-  const texts = contentTexts(raw);
 
   const command =
     pickString(rawInput, "CommandLine", "commandLine", "command") ??
@@ -86,11 +85,18 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 1) {
-    // executeUpdate puts stdout as content[0]; auxiliary blocks (permission,
-    // error, task) are appended after by toolCallUpdate, so always pick the
-    // first text block for the terminal output.
-    output = texts[0];
+  if (output == null && Array.isArray(raw.content)) {
+    for (const item of raw.content) {
+      const block = asRecord(item);
+      if (!block || block.type !== "content") continue;
+      if (block.kind === "output") {
+        const content = asRecord(block.content);
+        if (content && typeof content.text === "string") {
+          output = unfence(content.text);
+          break;
+        }
+      }
+    }
   }
 
   const exitCode = typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;

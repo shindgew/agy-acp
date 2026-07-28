@@ -77,6 +77,12 @@ function codeBlock(text: string): Record<string, unknown> {
   return textBlock(fencedCodeBlock(text));
 }
 
+function outputCodeBlock(text: string): Record<string, unknown> {
+  const block = textBlock(fencedCodeBlock(text));
+  block.kind = "output";
+  return block;
+}
+
 function errorBlock(e: ErrorDetails): Record<string, unknown> {
   const message = e.message.trim() || e.detail.trim() || "Tool call failed";
   const detail = e.detail.trim() && e.detail.trim() !== message ? `\n${e.detail.trim()}` : "";
@@ -383,18 +389,24 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     asStr(pick(rawInput, "CommandLine", "commandLine", "command")) ??
     (commandResult?.command?.trim() ? commandResult.command : null);
   const firstLine = (command?.split("\n")[0] ?? "").trim();
-  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary", "toolAction", "ToolAction"))?.trim();
+  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim();
+  const action = asStr(pick(rawInput, "toolAction", "ToolAction"))?.trim();
   const title =
     summary ||
     firstLine ||
+    action ||
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
     "Command Execution";
 
   const content: Record<string, unknown>[] = [];
-  // Prefer decoded field-28 output over empty; surface when non-empty.
+  // Prefer decoded field-28 output over empty; fall back to showing the command line.
   const output = commandResult?.output ?? "";
-  if (output.trim()) content.push(codeBlock(output));
+  if (output.trim()) {
+    content.push(outputCodeBlock(output));
+  } else if (command?.trim()) {
+    content.push(codeBlock(command.trim()));
+  }
 
   // Prefer explicit Cwd from args; fall back to command-result cwd.
   const commandCwd =
@@ -421,11 +433,16 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     }
   }
 
-  // Attach structured exit when present (without dropping error rawOutput).
-  if (commandResult && !stepRow.error) {
-    update.rawOutput = {
-      exitCode: commandResult.exitCode
-    };
+  // Attach structured exit when finished and present (without dropping error rawOutput).
+  const status = toolCallStatus(stepRow);
+  const finished = status === "completed" || status === "failed" || status === "cancelled";
+  if (commandResult && typeof commandResult.exitCode === "number" && finished) {
+    const rawOut =
+      update.rawOutput && typeof update.rawOutput === "object" && !Array.isArray(update.rawOutput)
+        ? { ...(update.rawOutput as Record<string, unknown>) }
+        : {};
+    rawOut.exitCode = commandResult.exitCode;
+    update.rawOutput = rawOut;
   }
   return update;
 }

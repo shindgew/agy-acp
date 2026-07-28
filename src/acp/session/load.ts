@@ -12,7 +12,7 @@ import { sessionConfigOptionsV1 } from "./config-options.js";
 import { sessionModeState } from "./modes.js";
 import type { StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
-import { sessionUpdateToV1 } from "./update-wire.js";
+import { createTerminalOutputTracker, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface LoadSessionDeps {
   requireAuthenticated(cwd?: string): Promise<void>;
@@ -43,10 +43,11 @@ export async function handleLoadSession(
   );
 
   if (stored.conversationId) {
+    const tracker = createTerminalOutputTracker();
     await deps.replayConversation(session, stored.conversationId, cwd, async (update) => {
       await client.notify(v1.methods.client.session.update, {
         sessionId: params.sessionId,
-        update: sessionUpdateToV1(update)
+        update: sessionUpdateToV1(update, tracker)
       });
     });
   }

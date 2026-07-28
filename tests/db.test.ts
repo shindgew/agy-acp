@@ -360,6 +360,40 @@ describe("Translator", () => {
     expect(body).toContain("README.md");
   });
 
+  it("does not attach exitCode in rawOutput for pending run_command steps", () => {
+    const db = createConversationDb(dir, "conv-exec-pending");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 9,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({
+          command: "gh issue view",
+          cwd: "/path/to/cwd",
+          exitCode: 0
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-pending")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as {
+      sessionUpdate: string;
+      kind: string;
+      status: string;
+      rawOutput?: { exitCode?: number };
+    };
+    expect(update.sessionUpdate).toBe("tool_call");
+    expect(update.kind).toBe("execute");
+    expect(update.status).toBe("pending");
+    expect(update.rawOutput).toBeUndefined();
+  });
+
   it("surfaces web search query metadata from field 42", () => {
     const db = createConversationDb(dir, "conv-web-search");
     insertStep(db, {
