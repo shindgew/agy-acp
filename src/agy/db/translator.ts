@@ -177,7 +177,7 @@ export class Translator {
     const kind = raw.sessionUpdate;
 
     if (kind === "agent_thought_chunk") {
-      this.emitThought(update, out);
+      this.emitThought(stepIdx, update, out);
       return;
     }
 
@@ -214,7 +214,7 @@ export class Translator {
     out.push(asToolCallUpdate(stamped));
   }
 
-  private emitThought(update: SessionUpdate, out: SessionUpdate[]): void {
+  private emitThought(stepIdx: number, update: SessionUpdate, out: SessionUpdate[]): void {
     const raw = update as unknown as Record<string, unknown>;
     const content = raw.content as { type?: string; text?: string } | undefined;
     const text = typeof content?.text === "string" ? content.text : "";
@@ -226,7 +226,7 @@ export class Translator {
     if (text.length <= emitted) return;
     this.thoughtTextLengths.set(messageId, text.length);
     const delta = text.slice(emitted);
-    if (delta.length > 0) out.push(thoughtChunk(delta, messageId));
+    if (delta.length > 0) out.push(withStepMeta(thoughtChunk(delta, messageId), stepIdx));
   }
 
   private handleTitle(row: StepRow, out: SessionUpdate[]): void {
@@ -235,20 +235,20 @@ export class Translator {
     const currentTitle = blocks?.shift() || null;
     if (currentTitle !== this._lastTitle) {
       this._lastTitle = currentTitle;
-      out.push({ sessionUpdate: "session_info_update", title: currentTitle });
+      out.push(withStepMeta({ sessionUpdate: "session_info_update", title: currentTitle } as SessionUpdate, row.idx));
     }
 
     const narration = blocks?.filter((b) => b.trim().length > 0).join("\n\n") ?? "";
     if (!narration) return;
 
     // Title-attached "Think" narration is real agent thought, not a tool card.
-    this.emitThought(thoughtChunk(narration, `title-thought-${row.idx}`), out);
+    this.emitThought(row.idx, thoughtChunk(narration, `title-thought-${row.idx}`), out);
   }
 
   private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
-      this.emitThought(thoughtChunk(thought, `agent-thought-${row.idx}`), out);
+      this.emitThought(row.idx, thoughtChunk(thought, `agent-thought-${row.idx}`), out);
     }
 
     const text = row.stepPayload.agentText?.text ?? "";

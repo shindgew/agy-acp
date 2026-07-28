@@ -252,11 +252,12 @@ describe("Translator", () => {
     conn.close();
 
     expect(updates).toEqual([
-      { sessionUpdate: "session_info_update", title: "My session" },
+      { sessionUpdate: "session_info_update", title: "My session", _meta: { stepIdx: 1 } },
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "title-thought-1",
-        content: { type: "text", text: "I will inspect the repo structure first." }
+        content: { type: "text", text: "I will inspect the repo structure first." },
+        _meta: { stepIdx: 1 }
       }
     ]);
 
@@ -287,7 +288,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
@@ -306,7 +308,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
@@ -786,6 +789,43 @@ describe("Translator", () => {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
         content: { type: "text", text: "Hello\n world" }
+      }
+    ]);
+  });
+
+  it("stamps _meta.stepIdx on title and thought updates", () => {
+    const db = createConversationDb(dir, "conv-stamped");
+    insertStep(db, { idx: 10, stepType: 23, stepPayload: encodeStepPayload({ titleUpdate: "My Title\n\nTitle narration" }) });
+    insertStep(db, { idx: 11, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Done", thought: "Thinking..." } }) });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-stamped")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "session_info_update",
+        title: "My Title",
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "title-thought-10",
+        content: { type: "text", text: "Title narration" },
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-11",
+        content: { type: "text", text: "Thinking..." },
+        _meta: { stepIdx: 11 }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "11",
+        content: { type: "text", text: "Done" }
       }
     ]);
   });
