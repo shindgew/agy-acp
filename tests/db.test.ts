@@ -58,6 +58,27 @@ describe("ConversationDb", () => {
     expect(rows[1].stepPayload.toolRun?.call?.rawInputJson).toBe('{"CommandLine":"echo hi"}');
   });
 
+  it("decodes agent text thinking/reasoning (tag 3) from step type 15 payload", () => {
+    const db = createConversationDb(dir, "conv-thought-step15");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({
+        agentText: { text: "Result: 309524", thought: "Calculating 347 * 892..." }
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-thought-step15");
+    expect(conn).not.toBeNull();
+    const rows = conn!.readAfter(0);
+    conn!.close();
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].stepPayload.agentText?.text).toBe("Result: 309524");
+    expect(rows[0].stepPayload.agentText?.thought).toBe("Calculating 347 * 892...");
+  });
+
   it("returns null for a missing conversation", () => {
     expect(ConversationDb.open(dir, "does-not-exist")).toBeNull();
   });
@@ -243,6 +264,56 @@ describe("Translator", () => {
     const conn2 = ConversationDb.open(dir, "conv-thought")!;
     expect(translator.translate(conn2.readAfter(0))).toHaveLength(0);
     conn2.close();
+  });
+
+  it("emits agent_thought_chunk for step type 15 carrying thought payload in streaming and replay modes", () => {
+    const db = createConversationDb(dir, "conv-agent-thought-stream");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({
+        agentText: { text: "Final output", thought: "Thinking deeply..." }
+      })
+    });
+    db.close();
+
+    // Stream mode
+    const connStream = ConversationDb.open(dir, "conv-agent-thought-stream")!;
+    const streamTranslator = new Translator({ mode: "stream", skipNarration: false });
+    const streamUpdates = streamTranslator.translate(connStream.readAfter(0));
+    connStream.close();
+
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-1",
+        content: { type: "text", text: "Thinking deeply..." }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Final output" }
+      }
+    ]);
+
+    // Replay mode
+    const connReplay = ConversationDb.open(dir, "conv-agent-thought-stream")!;
+    const replayTranslator = new Translator({ mode: "replay", skipNarration: false });
+    const replayUpdates = replayTranslator.translate(connReplay.readAfter(-1));
+    connReplay.close();
+
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-1",
+        content: { type: "text", text: "Thinking deeply..." }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Final output" }
+      }
+    ]);
   });
 
 

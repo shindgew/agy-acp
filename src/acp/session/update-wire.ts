@@ -87,22 +87,28 @@ function mapToolStatusForV1(status: unknown): unknown {
 
 function withTerminalContent(
   content: unknown,
-  terminalId: string
+  terminalId: string,
+  status?: string
 ): Record<string, unknown>[] {
-  const terminalBlock = { type: "terminal", terminalId };
-  if (!Array.isArray(content) || content.length === 0) {
-    return [terminalBlock];
+  const items = Array.isArray(content)
+    ? (content.map((item) =>
+        item && typeof item === "object"
+          ? toolContentToV2(item as Record<string, unknown>)
+          : item
+      ) as Record<string, unknown>[])
+    : [];
+
+  const nonTerminalItems = items.filter((item) => item?.type !== "terminal");
+
+  // Terminal content blocks are display-only embeds for active executions.
+  // Once execution completes, fails, or cancels (or before it starts in pending),
+  // drop the terminal block so clients like Zed that evict finished terminals
+  // don't throw "Terminal with id ... not found" errors when processing tool_call_update.
+  if (status === "in_progress") {
+    return [{ type: "terminal", terminalId }, ...nonTerminalItems];
   }
-  const mapped = content.map((item) =>
-    item && typeof item === "object"
-      ? toolContentToV2(item as Record<string, unknown>)
-      : item
-  ) as Record<string, unknown>[];
-  // Avoid duplicating the same terminal embed on progressive updates.
-  if (mapped.some((item) => item?.type === "terminal" && item.terminalId === terminalId)) {
-    return mapped;
-  }
-  return [terminalBlock, ...mapped];
+
+  return nonTerminalItems;
 }
 
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
@@ -254,7 +260,7 @@ export function expandSessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdat
   }
 
   const tool = sessionUpdateToV2(update) as unknown as Record<string, unknown>;
-  tool.content = withTerminalContent(tool.content, meta.terminalId);
+  tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
 
   return [terminalUpdateForExecute(meta), tool as V2SessionUpdate];
 }

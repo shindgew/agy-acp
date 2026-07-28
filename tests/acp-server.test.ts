@@ -1478,11 +1478,11 @@ describe("ACP v2 (experimental draft)", () => {
       status: "completed"
     });
     const content = expanded[1].content as Array<Record<string, unknown>>;
-    expect(content[0]).toEqual({ type: "terminal", terminalId });
+    expect(content.some((item) => item.type === "terminal")).toBe(false);
     expect(content.some((item) => item.type === "content")).toBe(true);
   });
 
-  it("emits in-progress terminal_update without exitStatus", () => {
+  it("emits in-progress terminal_update with terminal content block", () => {
     const update = {
       sessionUpdate: "tool_call",
       toolCallId: "cmd-2",
@@ -1545,6 +1545,32 @@ describe("ACP v2 (experimental draft)", () => {
       terminal_info: { terminal_id: terminalIdForToolCall("cmd-failed") },
       terminal_exit: { exit_code: 1 }
     });
+  });
+
+  it("drops terminal content block on completed or failed status to prevent lookup of evicted terminals", () => {
+    const updateWithTerminal = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "cmd-3",
+      title: "git status",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "git status" },
+      content: [
+        { type: "terminal", terminalId: terminalIdForToolCall("cmd-3") },
+        { type: "content", content: { type: "text", text: "working tree clean" } }
+      ]
+    } as SessionUpdate;
+
+    const [terminal, tool] = expandSessionUpdateToV2(updateWithTerminal) as Array<Record<string, unknown>>;
+    expect(terminal).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId: terminalIdForToolCall("cmd-3"),
+      command: "git status",
+      exitStatus: {}
+    });
+    expect(tool.content).toEqual([
+      { type: "content", content: { type: "text", text: "working tree clean" } }
+    ]);
   });
 });
 
