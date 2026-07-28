@@ -70,7 +70,7 @@ Need interactive agy control plane or client terminal protocol beyond DB polling
 
 - [ ] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): expand for multi-select / multi-question `ask_question` and remaining status-9 tools (unsupported paths fail closed)
 - [ ] [`terminal/create`](https://agentclientprotocol.com/protocol/v1/terminals): client-executed terminal suite (`output` / `release` / `wait_for_exit` / `kill` too) — blocked while agy owns the shell
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ already uses `session/request_permission`
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ falls back to `session/request_permission`
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor on `session/new`, real `mcpCapabilities`, route `mcp/message` · `mcp/connect` · `mcp/disconnect` when agy can consume external servers
 
 ### Medium priority
@@ -129,6 +129,7 @@ differs or is incomplete.
 - [x] [`tool_call_update`](https://agentclientprotocol.com/rfds/v2/tool-call-updates): upsert shape (first-sight collapsed from v1 `tool_call`); `cancelled` preserved
 - [x] [`diff`](https://agentclientprotocol.com/rfds/v2/diff-file-states): `changes[]` + optional `git_patch` (`add` / `modify`, `fileType: "text"`)
 - [x] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): `subject: { type: "tool_call", … }` + `title`
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text / single-select `ask_question` (+ `elicitation/complete`)
 - [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): prompt caps `image`, `embeddedContext`
 - [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): capability advertised
 - [x] [`terminal_update`](https://agentclientprotocol.com/rfds/v2/terminal-output): agent-owned execute terminals + `type: "terminal"` embeds (DB snapshots)
@@ -140,7 +141,6 @@ differs or is incomplete.
 
 ### High priority
 
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text `ask_question` (+ `elicitation/complete`; today: fail closed)
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor session servers, advertise `capabilities.session.mcp`, route `mcp/*` when agy can consume them
 - [ ] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): expand bridge to remaining agy menus once TUI channels are verified
 
