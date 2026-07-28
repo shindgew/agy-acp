@@ -221,6 +221,29 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("maps active step status 1 to in_progress tool status", () => {
+    const db = createConversationDb(dir, "conv-status-1");
+    const call = encodeToolCall({ callId: "active-1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo active"}' });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 1, // active
+      stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call }) })
+    });
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-status-1")!;
+    const res = translator.translate(conn.readAfter(0));
+    expect(res).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "active-1",
+        status: "in_progress"
+      }
+    ]);
+    conn.close();
+    db.close();
+  });
+
   it("maps permission-pending status 9 and dedupes its transition", () => {
     const db = createConversationDb(dir, "conv-pending");
     const payload = encodeStepPayload({ toolRun: encodeToolRun({ call: encodeToolCall({ callId: "p1", namePrimary: "run_command", rawInputJson: "{}" }) }) });

@@ -45,13 +45,14 @@ export function toolCallId(stepRow: StepRow): string {
 }
 
 /** Map agy's step `status` column to an ACP tool_call status.
- *  2 = in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed,
+ *  1/2 = active/in progress, 3 = completed, 6 = cancelled/aborted, 7 = failed,
  *  9 = generic RequestedInteraction (represented as pending for inspection).
  *  `cancelled` is ACP v2; v1 clients map it to `failed` at the protocol boundary. */
 function toolCallStatus(stepRow: StepRow): "pending" | "in_progress" | "completed" | "failed" | "cancelled" {
   switch (stepRow.status) {
     case 9:
       return "pending";
+    case 1:
     case 2:
       return "in_progress";
     case 6:
