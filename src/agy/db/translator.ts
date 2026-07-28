@@ -231,6 +231,11 @@ export class Translator {
   }
 
   private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
+    const thought = row.stepPayload.agentText?.thought;
+    if (thought) {
+      this.emitThought(thoughtChunk(thought, `agent-thought-${row.idx}`), out);
+    }
+
     const text = row.stepPayload.agentText?.text ?? "";
     const messageId = String(row.idx);
 

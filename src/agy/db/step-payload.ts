@@ -83,6 +83,7 @@ export interface UserPrompt {
 
 export interface AgentText {
   text: string;
+  thought?: string;
 }
 
 export interface TitleUpdate {
@@ -240,7 +241,10 @@ function decodeUserPrompt(bytes: Uint8Array): UserPrompt {
 }
 
 function decodeAgentText(bytes: Uint8Array): AgentText {
-  return readMessage(bytes, { text: "" }, { 1: (m, r) => (m.text = r.string()) });
+  return readMessage<AgentText>(bytes, { text: "" }, {
+    1: (m, r) => (m.text = r.string()),
+    3: (m, r) => (m.thought = r.string())
+  });
 }
 
 function decodeTitleUpdate(bytes: Uint8Array): TitleUpdate {
