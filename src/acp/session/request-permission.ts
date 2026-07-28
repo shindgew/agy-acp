@@ -7,17 +7,45 @@ import type { AgentContext as V1AgentContext, SessionUpdate as V1SessionUpdate }
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
 import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/experimental/v2";
 import { permissionOptions, type PermissionChoice } from "../tool-calls/permissions.js";
+import {
+  buildElicitationRequestFromAskQuestion,
+  encodeElicitationKeys,
+  type ClientElicitationCapability,
+  type ElicitationCreateResponseResult
+} from "../tool-calls/elicitation.js";
 import { expandSessionUpdateToV2, sessionUpdateToV2 } from "./update-wire.js";
 
-/** v1 `session/request_permission`: race the request against turn cancellation. */
+/** v1 `session/request_permission` or `elicitation/create`: race request against turn cancellation. */
 export async function requestPermissionV1(
   client: V1AgentContext,
   sessionId: string,
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
-  signal: AbortSignal | undefined
+  signal: AbortSignal | undefined,
+  clientElicitation?: ClientElicitationCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal?.aborted) return "cancelled";
+
+  if (toolName === "ask_question" && clientElicitation?.form) {
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    if (elicitationParams) {
+      const response = (await racePermissionCancellation(
+        client.request(v1.methods.client.elicitation.create, elicitationParams as any),
+        signal
+      )) as ElicitationCreateResponseResult | null;
+
+      if (!response || signal?.aborted) return "cancelled";
+      if (response.action === "decline" || response.action === "cancel") {
+        return "agy-q-skip";
+      }
+      if (response.action === "accept") {
+        const encoded = encodeElicitationKeys(toolCall, response.content);
+        return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
+      }
+      return "cancelled";
+    }
+  }
+
   const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
   const response = await racePermissionCancellation(
     client.request(v1.methods.client.session.requestPermission, {
@@ -30,15 +58,37 @@ export async function requestPermissionV1(
   return selectedPermission(response, signal);
 }
 
-/** v2 `session/request_permission`: subject uses the tool_call_update only (skip terminal_update). */
+/** v2 `session/request_permission` or `elicitation/create`: race request against turn cancellation. */
 export async function requestPermissionV2(
   client: V2AgentContext,
   sessionId: string,
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
-  signal: AbortSignal
+  signal: AbortSignal,
+  clientElicitation?: ClientElicitationCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal.aborted) return "cancelled";
+
+  if (toolName === "ask_question" && clientElicitation?.form) {
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    if (elicitationParams) {
+      const response = (await racePermissionCancellation(
+        client.request(v2.methods.client.elicitation.create, elicitationParams as any),
+        signal
+      )) as ElicitationCreateResponseResult | null;
+
+      if (!response || signal.aborted) return "cancelled";
+      if (response.action === "decline" || response.action === "cancel") {
+        return "agy-q-skip";
+      }
+      if (response.action === "accept") {
+        const encoded = encodeElicitationKeys(toolCall, response.content);
+        return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
+      }
+      return "cancelled";
+    }
+  }
+
   const expanded = expandSessionUpdateToV2(toolCall);
   const converted = (expanded.find((item) => {
     const kind = (item as unknown as { sessionUpdate?: string }).sessionUpdate;

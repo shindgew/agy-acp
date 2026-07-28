@@ -70,7 +70,7 @@ Need interactive agy control plane or client terminal protocol beyond DB polling
 
 - [ ] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): expand for multi-select / multi-question `ask_question` and remaining status-9 tools (unsupported paths fail closed)
 - [ ] [`terminal/create`](https://agentclientprotocol.com/protocol/v1/terminals): client-executed terminal suite (`output` / `release` / `wait_for_exit` / `kill` too) — blocked while agy owns the shell
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ already uses `session/request_permission`
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ falls back to `session/request_permission`
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor on `session/new`, real `mcpCapabilities`, route `mcp/message` · `mcp/connect` · `mcp/disconnect` when agy can consume external servers
 
 ### Medium priority
@@ -138,7 +138,7 @@ differs or is incomplete.
 ### High priority
 
 - [ ] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): richer cursors beyond `{ "type": "start" }` when the draft stabilizes incremental replay
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text `ask_question` (+ `elicitation/complete`; today: fail closed)
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text / single-select `ask_question` (+ `elicitation/complete`)
 - [ ] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is still running (today: full snapshot when field 28 is present)
 - [ ] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool content while a call is running (today: only on `tool_call_update` snapshots)
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor session servers, advertise `capabilities.session.mcp`, route `mcp/*` when agy can consume them

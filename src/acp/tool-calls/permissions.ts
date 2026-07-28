@@ -48,10 +48,15 @@ export function isEditToolCall(toolCall: SessionUpdate): boolean {
   return false;
 }
 
-/** True when this status-9 tool can be bridged (permission menu or single-select MCQ). */
-export function canBridgeInteraction(toolName: string, toolCall?: SessionUpdate): boolean {
+/** True when this status-9 tool can be bridged (permission menu, single-select MCQ, or elicitation). */
+export function canBridgeInteraction(
+  toolName: string,
+  toolCall?: SessionUpdate,
+  options?: { hasElicitation?: boolean }
+): boolean {
   if (isBridgeablePermissionTool(toolName)) return true;
   if (toolName !== "ask_question" || !toolCall) return false;
+  if (options?.hasElicitation) return true;
   const ask = parseAskQuestion(toolCall);
   return ask != null && isBridgeableAskQuestion(ask);
 }
@@ -101,6 +106,10 @@ export function interactionKeys(
   toolName: string,
   toolCall?: SessionUpdate
 ): string | null {
+  if (choice.startsWith("pty-keys:")) {
+    return choice.slice("pty-keys:".length);
+  }
+
   if (toolName === "ask_question") {
     if (choice === "agy-q-skip") return "\x1b"; // Esc — cancel / skip the modal
     const match = /^agy-q-(\d+)$/.exec(choice);
