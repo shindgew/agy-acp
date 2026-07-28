@@ -95,7 +95,7 @@ export interface TitleUpdate {
  */
 export interface CommandResult {
   cwd: string;
-  exitCode: number;
+  exitCode?: number;
   /** Shell stdout/stderr text when present (may include truncation markers). */
   output: string;
   command: string;
@@ -266,7 +266,7 @@ export function sanitizeCommandOutput(raw: string): string {
 function decodeCommandResult(bytes: Uint8Array): CommandResult {
   return readMessage<CommandResult>(
     bytes,
-    { cwd: "", exitCode: 0, output: "", command: "" },
+    { cwd: "", output: "", command: "" },
     {
       2: (m, r) => (m.cwd = r.string()),
       6: (m, r) => (m.exitCode = readInt(r)),
