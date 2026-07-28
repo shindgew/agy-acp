@@ -1,12 +1,28 @@
-// ACP Elicitation Protocol (elicitation/create and elicitation/complete)
-// Docs & RFD: https://agentclientprotocol.com/rfds/elicitation
-
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import * as v1 from "@agentclientprotocol/sdk";
+import type { AgentContext as V1AgentContext, SessionUpdate } from "@agentclientprotocol/sdk";
+import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
+import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/experimental/v2";
 import { parseAskQuestion } from "./permissions.js";
 
 export interface ClientElicitationCapability {
   form: boolean;
   url: boolean;
+}
+
+/** Send `elicitation/complete` notification to v1 client when a URL elicitation completes. */
+export async function notifyElicitationCompleteV1(
+  client: V1AgentContext,
+  elicitationId: string
+): Promise<void> {
+  await client.notify(v1.methods.client.elicitation.complete, { elicitationId });
+}
+
+/** Send `elicitation/complete` notification to v2 client when a URL elicitation completes. */
+export async function notifyElicitationCompleteV2(
+  client: V2AgentContext,
+  elicitationId: string
+): Promise<void> {
+  await client.notify(v2.methods.client.elicitation.complete, { elicitationId });
 }
 
 export type ElicitationMode = "form" | "url";

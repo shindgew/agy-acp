@@ -30,7 +30,7 @@ export async function requestPermissionV1(
     const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
-        client.request("elicitation/create" as any, elicitationParams),
+        client.request(v1.methods.client.elicitation.create, elicitationParams as any),
         signal
       )) as ElicitationCreateResponseResult | null;
 
@@ -73,7 +73,7 @@ export async function requestPermissionV2(
     const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
-        client.request("elicitation/create" as any, elicitationParams),
+        client.request(v2.methods.client.elicitation.create, elicitationParams as any),
         signal
       )) as ElicitationCreateResponseResult | null;
 
