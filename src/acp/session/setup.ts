@@ -151,16 +151,19 @@ export function persistSession(
   return store.persist(sessionId, sessionRecord(session));
 }
 
-function getUpdateStepIdx(u: v1.SessionUpdate): number | undefined {
+function getUpdateStepRange(u: v1.SessionUpdate): { stepIdx: number; endStepIdx: number } | undefined {
   const rec = u as unknown as Record<string, unknown>;
   const meta = rec._meta as Record<string, unknown> | undefined;
-  if (typeof meta?.stepIdx === "number") return meta.stepIdx;
-  if (typeof rec.stepIdx === "number") return rec.stepIdx;
-  if (typeof rec.messageId === "string") {
+  let startIdx: number | undefined;
+  if (typeof meta?.stepIdx === "number") startIdx = meta.stepIdx;
+  else if (typeof rec.stepIdx === "number") startIdx = rec.stepIdx;
+  else if (typeof rec.messageId === "string") {
     const parsed = parseInt(rec.messageId, 10);
-    if (!isNaN(parsed)) return parsed;
+    if (!isNaN(parsed)) startIdx = parsed;
   }
-  return undefined;
+  if (startIdx == null) return undefined;
+  const endIdx = typeof meta?.endStepIdx === "number" ? meta.endStepIdx : startIdx;
+  return { stepIdx: startIdx, endStepIdx: endIdx };
 }
 
 export function filterUpdatesForReplayFrom(
@@ -194,8 +197,8 @@ export function filterUpdatesForReplayFrom(
         : undefined;
     if (targetIdx == null) return updates;
     const index = updates.findIndex((u) => {
-      const stepIdx = getUpdateStepIdx(u);
-      return stepIdx != null && stepIdx >= targetIdx;
+      const range = getUpdateStepRange(u);
+      return range != null && range.endStepIdx >= targetIdx;
     });
     return index >= 0 ? updates.slice(index) : [];
   }

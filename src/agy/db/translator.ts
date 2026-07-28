@@ -97,6 +97,8 @@ export class Translator {
   private readonly pendingAgentParts: string[] = [];
   // Replay: message id for the current buffered agent-text group.
   private pendingAgentMessageId: string | null = null;
+  private pendingAgentStartStepIdx: number | null = null;
+  private pendingAgentEndStepIdx: number | null = null;
 
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
@@ -258,7 +260,9 @@ export class Translator {
       if (text.length > 0) {
         if (this.pendingAgentMessageId === null) {
           this.pendingAgentMessageId = messageId;
+          this.pendingAgentStartStepIdx = row.idx;
         }
+        this.pendingAgentEndStepIdx = row.idx;
         this.pendingAgentParts.push(text);
       }
       return;
@@ -280,8 +284,23 @@ export class Translator {
       ? filterNarration(this.pendingAgentParts)
       : this.pendingAgentParts.join("\n");
     const messageId = this.pendingAgentMessageId ?? "agent";
+    const startStepIdx = this.pendingAgentStartStepIdx;
+    const endStepIdx = this.pendingAgentEndStepIdx;
     this.pendingAgentParts.length = 0;
     this.pendingAgentMessageId = null;
-    if (text && text.length > 0) out.push(agentChunk(text, messageId));
+    this.pendingAgentStartStepIdx = null;
+    this.pendingAgentEndStepIdx = null;
+    if (text && text.length > 0) {
+      const chunk = agentChunk(text, messageId);
+      if (startStepIdx != null) {
+        const stamped = withStepMeta(chunk, startStepIdx);
+        if (endStepIdx != null && endStepIdx > startStepIdx) {
+          ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+        }
+        out.push(stamped);
+      } else {
+        out.push(chunk);
+      }
+    }
   }
 }

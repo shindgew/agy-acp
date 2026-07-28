@@ -1712,6 +1712,23 @@ describe("ACP v2 (experimental draft)", () => {
 
     expect(filterUpdatesForReplayFrom(updates, { type: "step", stepIdx: 2 })).toEqual([updates[1], updates[2]]);
 
+    const mergedUpdates = [
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "merged 1 and 2" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      },
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-3",
+        title: "run",
+        _meta: { stepIdx: 3 }
+      }
+    ] as SessionUpdate[];
+
+    expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "step", stepIdx: 2 })).toEqual(mergedUpdates);
+
     expect(filterUpdatesForReplayFrom(updates, { type: "tool_call", toolCallId: "call-1" })).toEqual([
       updates[1],
       updates[2]

@@ -314,7 +314,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Final output" }
+        content: { type: "text", text: "Final output" },
+        _meta: { stepIdx: 1 }
       }
     ]);
   });
@@ -788,12 +789,13 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Hello\n world" }
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
       }
     ]);
   });
 
-  it("stamps _meta.stepIdx on title and thought updates", () => {
+  it("stamps _meta.stepIdx on title, thought, and agent text updates", () => {
     const db = createConversationDb(dir, "conv-stamped");
     insertStep(db, { idx: 10, stepType: 23, stepPayload: encodeStepPayload({ titleUpdate: "My Title\n\nTitle narration" }) });
     insertStep(db, { idx: 11, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Done", thought: "Thinking..." } }) });
@@ -825,7 +827,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "11",
-        content: { type: "text", text: "Done" }
+        content: { type: "text", text: "Done" },
+        _meta: { stepIdx: 11 }
       }
     ]);
   });
