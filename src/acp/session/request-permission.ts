@@ -28,7 +28,7 @@ export async function requestPermissionV1(
   if (signal?.aborted) return "cancelled";
 
   if (toolName === "ask_question" && clientElicitation?.form) {
-    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId, questionIndex);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
         client.request(v1.methods.client.elicitation.create, elicitationParams as any),
@@ -40,7 +40,7 @@ export async function requestPermissionV1(
         return "agy-q-skip";
       }
       if (response.action === "accept") {
-        const encoded = encodeElicitationKeys(toolCall, response.content);
+        const encoded = encodeElicitationKeys(toolCall, response.content, questionIndex);
         return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
       }
       return "cancelled";
@@ -84,7 +84,7 @@ export async function requestPermissionV2(
   if (signal.aborted) return "cancelled";
 
   if (toolName === "ask_question" && clientElicitation?.form) {
-    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId, questionIndex);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
         client.request(v2.methods.client.elicitation.create, elicitationParams as any),
@@ -96,7 +96,7 @@ export async function requestPermissionV2(
         return "agy-q-skip";
       }
       if (response.action === "accept") {
-        const encoded = encodeElicitationKeys(toolCall, response.content);
+        const encoded = encodeElicitationKeys(toolCall, response.content, questionIndex);
         return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
       }
       return "cancelled";

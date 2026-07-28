@@ -162,6 +162,31 @@ describe("AskQuestion Payload Parsing & Elicitation Requests", () => {
       }
     });
   });
+
+  it("builds form elicitation request per questionIndex for multi-question dialogs", () => {
+    const multiQCall: SessionUpdate = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc_mq",
+      title: "Wizard",
+      rawInput: {
+        questions: [
+          { question: "Env?", options: ["Dev", "Prod"], is_multi_select: false },
+          { question: "Features?", options: ["Auth", "DB"], is_multi_select: true }
+        ]
+      }
+    } as any;
+
+    const req0 = buildElicitationRequestFromAskQuestion(multiQCall, "sess_1", 0);
+    expect(req0?.message).toBe("[Question 1/2] Env?");
+    expect(req0?.requestedSchema?.required).toEqual(["q0"]);
+
+    const req1 = buildElicitationRequestFromAskQuestion(multiQCall, "sess_1", 1);
+    expect(req1?.message).toBe("[Question 2/2] Features?");
+    expect(req1?.requestedSchema?.required).toEqual(["q1"]);
+
+    expect(encodeElicitationKeys(multiQCall, { q0: "Prod" }, 0)).toBe("\x1b[B\r");
+    expect(encodeElicitationKeys(multiQCall, { q1: ["Auth", "DB"] }, 1)).toBe(" \x1b[B \r");
+  });
 });
 
 describe("Encoding Elicitation Responses to PTY Keypresses", () => {
