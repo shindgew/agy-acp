@@ -179,8 +179,11 @@ describe("permission bridge", () => {
     expect(permissionOptions(multiAskCall, "ask_question")).toEqual([
       { optionId: "agy-q-0", kind: "allow_once", name: "Auth" },
       { optionId: "agy-q-1", kind: "allow_once", name: "DB" },
+      { optionId: "agy-q-0,1", kind: "allow_once", name: "Auth + DB" },
       { optionId: "agy-q-2", kind: "allow_once", name: "Analytics" },
-      { optionId: "agy-q-all", kind: "allow_once", name: "Select All" },
+      { optionId: "agy-q-0,2", kind: "allow_once", name: "Auth + Analytics" },
+      { optionId: "agy-q-1,2", kind: "allow_once", name: "DB + Analytics" },
+      { optionId: "agy-q-all", kind: "allow_once", name: "Select All (Auth + DB + Analytics)" },
       { optionId: "agy-q-none", kind: "allow_once", name: "Submit (None selected)" },
       { optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }
     ]);
@@ -211,7 +214,7 @@ describe("permission bridge", () => {
     expect(permissionOptions(multiQuestionCall, "ask_question", 1)).toEqual([
       { optionId: "agy-q-q1-0", kind: "allow_once", name: "Auth" },
       { optionId: "agy-q-q1-1", kind: "allow_once", name: "Logging" },
-      { optionId: "agy-q-q1-all", kind: "allow_once", name: "Select All" },
+      { optionId: "agy-q-q1-all", kind: "allow_once", name: "Select All (Auth + Logging)" },
       { optionId: "agy-q-q1-none", kind: "allow_once", name: "Submit (None selected)" },
       { optionId: "agy-q-q1-skip", kind: "reject_once", name: "Skip" }
     ]);

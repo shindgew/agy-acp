@@ -383,25 +383,75 @@ export function askQuestionOptions(toolCall: SessionUpdate, questionIndex = 0): 
 
   const prefix = ask.questions.length > 1 ? `agy-q-q${qIndex}-` : "agy-q-";
 
-  const options: PermissionMenuOption[] = q.options.map((name, index) => ({
-    optionId: `${prefix}${index}`,
-    kind: "allow_once" as const,
-    name
-  }));
+  if (!q.multiSelect) {
+    const options: PermissionMenuOption[] = q.options.map((name, index) => ({
+      optionId: `${prefix}${index}`,
+      kind: "allow_once" as const,
+      name
+    }));
+    options.push({ optionId: `${prefix}skip`, kind: "reject_once", name: "Skip" });
+    return options;
+  }
 
-  if (q.multiSelect) {
+  const options: PermissionMenuOption[] = [];
+  const n = q.options.length;
+
+  if (n <= 4) {
+    const totalSubsets = 1 << n;
+    for (let mask = 1; mask < totalSubsets; mask++) {
+      const indices: number[] = [];
+      for (let i = 0; i < n; i++) {
+        if ((mask & (1 << i)) !== 0) indices.push(i);
+      }
+      if (indices.length === 1) {
+        options.push({
+          optionId: `${prefix}${indices[0]}`,
+          kind: "allow_once" as const,
+          name: q.options[indices[0]]
+        });
+      } else if (indices.length === n) {
+        options.push({
+          optionId: `${prefix}all`,
+          kind: "allow_once" as const,
+          name: `Select All (${indices.map((i) => q.options[i]).join(" + ")})`
+        });
+      } else {
+        options.push({
+          optionId: `${prefix}${indices.join(",")}`,
+          kind: "allow_once" as const,
+          name: indices.map((i) => q.options[i]).join(" + ")
+        });
+      }
+    }
+  } else {
+    for (let i = 0; i < n; i++) {
+      options.push({
+        optionId: `${prefix}${i}`,
+        kind: "allow_once" as const,
+        name: q.options[i]
+      });
+    }
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        options.push({
+          optionId: `${prefix}${i},${j}`,
+          kind: "allow_once" as const,
+          name: `${q.options[i]} + ${q.options[j]}`
+        });
+      }
+    }
     options.push({
       optionId: `${prefix}all`,
       kind: "allow_once" as const,
       name: "Select All"
     });
-    options.push({
-      optionId: `${prefix}none`,
-      kind: "allow_once" as const,
-      name: "Submit (None selected)"
-    });
   }
 
+  options.push({
+    optionId: `${prefix}none`,
+    kind: "allow_once" as const,
+    name: "Submit (None selected)"
+  });
   options.push({ optionId: `${prefix}skip`, kind: "reject_once", name: "Skip" });
   return options;
 }

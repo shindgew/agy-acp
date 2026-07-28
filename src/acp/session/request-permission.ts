@@ -20,10 +20,21 @@ export async function requestPermissionV1(
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal?.aborted) return "cancelled";
   const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
+  const toolCallPayload = { ...requestToolCall };
+  if (toolName === "ask_question") {
+    const ask = parseAskQuestion(toolCall);
+    const qIdx = questionIndex ?? 0;
+    if (ask && ask.questions.length > 1 && qIdx < ask.questions.length) {
+      const q = ask.questions[qIdx];
+      const origTitle = String(toolCallPayload.title ?? "Question");
+      toolCallPayload.title = `[Question ${qIdx + 1}/${ask.questions.length}] ${q.question || origTitle}`;
+    }
+  }
+
   const response = await racePermissionCancellation(
     client.request(v1.methods.client.session.requestPermission, {
       sessionId,
-      toolCall: requestToolCall as v1.ToolCallUpdate,
+      toolCall: toolCallPayload as v1.ToolCallUpdate,
       options: permissionOptions(toolCall, toolName, questionIndex)
     }),
     signal
