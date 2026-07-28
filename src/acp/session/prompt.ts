@@ -14,6 +14,7 @@ import type {
   PromptRequest as V2PromptRequest,
   PromptResponse as V2PromptResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
+import type { ClientElicitationCapability } from "../tool-calls/elicitation.js";
 import type { SessionModeId } from "../../agy/cli.js";
 import { contentBlocksToPrompt } from "../content/index.js";
 import type { ClientFileSystem } from "../../agy/edit/bridge.js";
@@ -34,10 +35,12 @@ export interface PromptV1Deps extends PromptTurnDeps {
   notifyCurrentModeUpdate(client: V1AgentContext, sessionId: string, mode: SessionModeId): Promise<void>;
   notifyConfigOptionUpdateV1(client: V1AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined;
+  clientElicitationV1?(client: V1AgentContext): ClientElicitationCapability | undefined;
 }
 
 export interface PromptV2Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV2(client: V2AgentContext, sessionId: string, session: SessionState): Promise<void>;
+  clientElicitationV2?(client: V2AgentContext): ClientElicitationCapability | undefined;
 }
 
 /**
@@ -140,8 +143,9 @@ export async function handlePromptV1(
         update: sessionUpdateToV1(update, tracker)
       });
     }, async (toolCall, { toolName, questionIndex }) => {
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex);
-    }, deps.clientFileSystemV1(client, params.sessionId));
+      const elicitationCap = deps.clientElicitationV1?.(client);
+      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+    }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
     await deps.persistSession(params.sessionId, session);
     return {
       stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
@@ -259,8 +263,9 @@ async function runV2PromptTurn(
           await notify(v2Update);
         }
       }, async (toolCall, { toolName, questionIndex }) => {
-        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex);
-      });
+        const elicitationCap = deps.clientElicitationV2?.(client);
+        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+      }, undefined, deps.clientElicitationV2?.(client));
       await deps.persistSession(params.sessionId, session);
 
       const stopReason =
