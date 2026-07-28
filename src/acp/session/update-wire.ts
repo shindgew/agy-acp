@@ -49,8 +49,9 @@ export function gitPatchForFile(
 }
 
 function toolContentToV2(item: Record<string, unknown>): Record<string, unknown> {
-  if (item.type !== "diff") {
-    return item;
+  const clean = cleanContentItem(item) as Record<string, unknown>;
+  if (clean.type !== "diff") {
+    return clean;
   }
 
   const path = typeof item.path === "string" ? item.path : "";
@@ -87,32 +88,129 @@ function mapToolStatusForV1(status: unknown): unknown {
 
 function withTerminalContent(
   content: unknown,
-  terminalId: string
+  terminalId: string,
+  status?: string
 ): Record<string, unknown>[] {
-  const terminalBlock = { type: "terminal", terminalId };
-  if (!Array.isArray(content) || content.length === 0) {
-    return [terminalBlock];
+  const items = Array.isArray(content)
+    ? (content.map((item) =>
+        item && typeof item === "object"
+          ? toolContentToV2(item as Record<string, unknown>)
+          : item
+      ) as Record<string, unknown>[])
+    : [];
+
+  const nonTerminalItems = items.filter((item) => item?.type !== "terminal");
+
+  // Terminal content blocks are display-only embeds for active executions.
+  // Once execution completes, fails, or cancels (or before it starts in pending),
+  // drop the terminal block so clients like Zed that evict finished terminals
+  // don't throw "Terminal with id ... not found" errors when processing tool_call_update.
+  if (status === "in_progress") {
+    return [{ type: "terminal", terminalId }, ...nonTerminalItems];
   }
-  const mapped = content.map((item) =>
-    item && typeof item === "object"
-      ? toolContentToV2(item as Record<string, unknown>)
-      : item
-  ) as Record<string, unknown>[];
-  // Avoid duplicating the same terminal embed on progressive updates.
-  if (mapped.some((item) => item?.type === "terminal" && item.terminalId === terminalId)) {
-    return mapped;
+
+  return nonTerminalItems;
+}
+
+function cleanContentItem(item: unknown): unknown {
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    const rec = { ...(item as Record<string, unknown>) };
+    delete rec.kind;
+    return rec;
   }
-  return [terminalBlock, ...mapped];
+  return item;
+}
+
+export type TerminalOutputTracker = Map<string, number>;
+
+const MAX_TERMINAL_TRACKER_SIZE = 500;
+
+export function createTerminalOutputTracker(): TerminalOutputTracker {
+  return new Map<string, number>();
+}
+
+const defaultTerminalOutputTracker = createTerminalOutputTracker();
+
+export function resetTerminalOutputTracker(): void {
+  defaultTerminalOutputTracker.clear();
+}
+
+function setTrackedOutputLength(
+  tracker: TerminalOutputTracker,
+  terminalId: string,
+  length: number
+): void {
+  if (!tracker.has(terminalId) && tracker.size >= MAX_TERMINAL_TRACKER_SIZE) {
+    const oldestKey = tracker.keys().next().value;
+    if (oldestKey !== undefined) {
+      tracker.delete(oldestKey);
+    }
+  }
+  tracker.set(terminalId, length);
 }
 
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
-export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
+export function sessionUpdateToV1(
+  update: V1SessionUpdate,
+  tracker: TerminalOutputTracker = defaultTerminalOutputTracker
+): V1SessionUpdate {
   const raw = update as unknown as Record<string, unknown>;
   if (raw.sessionUpdate === "tool_call" || raw.sessionUpdate === "tool_call_update") {
-    return {
+    const v1Update: Record<string, unknown> = {
       ...raw,
       status: mapToolStatusForV1(raw.status)
-    } as V1SessionUpdate;
+    };
+
+    if (Array.isArray(v1Update.content)) {
+      v1Update.content = v1Update.content.map(cleanContentItem);
+    }
+
+    // Attach v1 terminal metadata (_meta.terminal_info/output/exit) for execute tool calls
+    // so ACP v1 clients (like Zed) can render terminal output panels.
+    // Docs: https://agentclientprotocol.com/protocol/v1/terminals
+    if (raw.kind === "execute") {
+      const meta = executeTerminalMeta(update);
+      if (meta) {
+        const metaObj: Record<string, unknown> = {
+          ...(raw._meta as Record<string, unknown> ?? {})
+        };
+        metaObj.terminal_info = { terminal_id: meta.terminalId };
+        if (meta.output != null && meta.output.length > 0) {
+          const prevLen = tracker.get(meta.terminalId) ?? 0;
+          if (meta.output.length > prevLen) {
+            const newChunk = meta.output.slice(prevLen);
+            metaObj.terminal_output = { data: Buffer.from(newChunk, "utf8").toString("base64") };
+            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
+          } else if (meta.output.length < prevLen) {
+            // terminal_output in ACP v1 is append-only. Do not append a reset snapshot
+            // to an existing terminal stream; update tracked length for future chunks.
+            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
+          }
+        }
+        const finished =
+          meta.status === "completed" ||
+          meta.status === "failed" ||
+          meta.status === "cancelled";
+        if (finished) {
+          tracker.delete(meta.terminalId);
+          const terminalExit: Record<string, unknown> = {};
+          if (typeof meta.exitCode === "number") {
+            terminalExit.exit_code = meta.exitCode;
+          } else if (meta.status === "cancelled") {
+            terminalExit.signal = "SIGINT";
+            terminalExit.exit_code = 130;
+          } else {
+            terminalExit.exit_code = meta.status === "failed" ? 1 : 0;
+          }
+          metaObj.terminal_exit = terminalExit;
+        } else if (typeof meta.exitCode === "number") {
+          metaObj.terminal_exit = { exit_code: meta.exitCode };
+        }
+        v1Update._meta = metaObj;
+      }
+    }
+
+    return v1Update as V1SessionUpdate;
   }
   // Drop agent-private plan _meta keys from the v1 wire (entries stay).
   if (raw.sessionUpdate === "plan" && raw._meta && typeof raw._meta === "object") {
@@ -217,7 +315,7 @@ export function expandSessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdat
   }
 
   const tool = sessionUpdateToV2(update) as unknown as Record<string, unknown>;
-  tool.content = withTerminalContent(tool.content, meta.terminalId);
+  tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
 
   return [terminalUpdateForExecute(meta), tool as V2SessionUpdate];
 }

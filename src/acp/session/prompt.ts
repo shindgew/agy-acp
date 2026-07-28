@@ -22,7 +22,7 @@ import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
 import type { SessionState } from "./types.js";
-import { expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
+import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface PromptTurnDeps {
   requireSession(sessionId: string): SessionState;
@@ -133,10 +133,11 @@ export async function handlePromptV1(
   signal?.addEventListener("abort", cancelPrompt, { once: true });
 
   try {
+    const tracker = createTerminalOutputTracker();
     const outcome = await session.agy.prompt(prompt, async (update) => {
       await client.notify(v1.methods.client.session.update, {
         sessionId: params.sessionId,
-        update: sessionUpdateToV1(update)
+        update: sessionUpdateToV1(update, tracker)
       });
     }, async (toolCall, { toolName }) => {
       return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal);

@@ -83,6 +83,7 @@ export interface UserPrompt {
 
 export interface AgentText {
   text: string;
+  thought?: string;
 }
 
 export interface TitleUpdate {
@@ -95,7 +96,7 @@ export interface TitleUpdate {
  */
 export interface CommandResult {
   cwd: string;
-  exitCode: number;
+  exitCode?: number;
   /** Shell stdout/stderr text when present (may include truncation markers). */
   output: string;
   command: string;
@@ -240,7 +241,10 @@ function decodeUserPrompt(bytes: Uint8Array): UserPrompt {
 }
 
 function decodeAgentText(bytes: Uint8Array): AgentText {
-  return readMessage(bytes, { text: "" }, { 1: (m, r) => (m.text = r.string()) });
+  return readMessage<AgentText>(bytes, { text: "" }, {
+    1: (m, r) => (m.text = r.string()),
+    3: (m, r) => (m.thought = r.string())
+  });
 }
 
 function decodeTitleUpdate(bytes: Uint8Array): TitleUpdate {
@@ -266,7 +270,7 @@ export function sanitizeCommandOutput(raw: string): string {
 function decodeCommandResult(bytes: Uint8Array): CommandResult {
   return readMessage<CommandResult>(
     bytes,
-    { cwd: "", exitCode: 0, output: "", command: "" },
+    { cwd: "", output: "", command: "" },
     {
       2: (m, r) => (m.cwd = r.string()),
       6: (m, r) => (m.exitCode = readInt(r)),

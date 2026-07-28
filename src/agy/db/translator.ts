@@ -79,8 +79,8 @@ export class Translator {
   private readonly agentTextLengths = new Map<number, number>();
   // Streaming: thought messageId -> chars already emitted.
   private readonly thoughtTextLengths = new Map<string, number>();
-  // Stream + replay: last emitted snapshot keyed by step idx (tool progressive lifecycle).
-  private readonly toolSnapshots = new Map<number, string>();
+  // Stream + replay: last emitted snapshot keyed by tool call id / plan id (tool progressive lifecycle).
+  private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
@@ -173,9 +173,10 @@ export class Translator {
 
     if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
       const snapshot = updateSnapshot(update);
-      const previous = this.toolSnapshots.get(stepIdx);
+      const key = typeof raw.planId === "string" && raw.planId ? `plan:${raw.planId}` : `plan:${stepIdx}`;
+      const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
-      this.toolSnapshots.set(stepIdx, snapshot);
+      this.toolSnapshots.set(key, snapshot);
       out.push(update);
       return;
     }
@@ -186,16 +187,18 @@ export class Translator {
     }
 
     const snapshot = updateSnapshot(update);
-    const previous = this.toolSnapshots.get(stepIdx);
+    const toolId = typeof raw.toolCallId === "string" && raw.toolCallId.trim() ? raw.toolCallId.trim() : undefined;
+    const key = toolId ? `tool:${toolId}` : `step:${stepIdx}`;
+    const previous = this.toolSnapshots.get(key);
     if (previous === undefined) {
-      this.toolSnapshots.set(stepIdx, snapshot);
+      this.toolSnapshots.set(key, snapshot);
       // First sight always uses create shape; v2 boundary may rewrite to upsert.
       out.push({ ...raw, sessionUpdate: "tool_call" } as SessionUpdate);
       return;
     }
     if (previous === snapshot) return;
 
-    this.toolSnapshots.set(stepIdx, snapshot);
+    this.toolSnapshots.set(key, snapshot);
     out.push(asToolCallUpdate(update));
   }
 
@@ -231,6 +234,11 @@ export class Translator {
   }
 
   private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
+    const thought = row.stepPayload.agentText?.thought;
+    if (thought) {
+      this.emitThought(thoughtChunk(thought, `agent-thought-${row.idx}`), out);
+    }
+
     const text = row.stepPayload.agentText?.text ?? "";
     const messageId = String(row.idx);
 

@@ -77,21 +77,26 @@ export function executeTerminalMeta(update: V1SessionUpdate): ExecuteTerminalMet
 
   const rawInput = asRecord(raw.rawInput) ?? {};
   const rawOutput = asRecord(raw.rawOutput) ?? {};
-  const texts = contentTexts(raw);
 
   const command =
     pickString(rawInput, "CommandLine", "commandLine", "command") ??
-    (texts[0]?.includes("\n") ? texts[0].split("\n")[0] : texts[0]) ??
     (typeof raw.title === "string" && raw.title.trim() ? raw.title.trim() : undefined);
 
   const cwd = pickString(rawInput, "Cwd", "cwd");
 
   let output = typeof rawOutput.output === "string" ? rawOutput.output : undefined;
-  if (output == null && texts.length >= 2) {
-    // executeUpdate: content[0] = command, content[1] = output when both present.
-    output = texts[1];
-  } else if (output == null && texts.length === 1 && command && texts[0] !== command) {
-    output = texts[0];
+  if (output == null && Array.isArray(raw.content)) {
+    for (const item of raw.content) {
+      const block = asRecord(item);
+      if (!block || block.type !== "content") continue;
+      if (block.kind === "output") {
+        const content = asRecord(block.content);
+        if (content && typeof content.text === "string") {
+          output = unfence(content.text);
+          break;
+        }
+      }
+    }
   }
 
   const exitCode = typeof rawOutput.exitCode === "number" ? rawOutput.exitCode : undefined;

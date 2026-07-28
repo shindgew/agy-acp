@@ -250,6 +250,32 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("preserves permission panel visibility when intervening non-marker PTY data arrives before applying permission response", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-intervening-pty");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("go", async () => {}, async () => {
+      // Simulate stray terminal output / ANSI codes arriving while user is reviewing prompt
+      pty.emitData("\x1b[?25hstray output");
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-intervening-pty.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 100);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("accepts an idle marker emitted after the DB write but before the next poll", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {

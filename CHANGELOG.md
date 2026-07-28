@@ -9,6 +9,22 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-07-28
+
+### Added
+
+- Emit `agent_thought_chunk` notifications in ACP v2 when step 15 carries a thought payload (tag 3), enabling clients like Zed to render model thinking content. (#30)
+- Embed terminal metadata (`_meta.terminal`) on ACP v1 `execute` tool call updates. (#28)
+
+### Fixed
+
+- Preserve permission panel visibility when intervening non-marker PTY data arrives before applying permission response in the interactive CLI session adapter.
+- Fix duplicated command line and output in `run_command` tool updates by preferring `toolSummary`/`toolAction` for titles and extracting output from the primary content block. (#27)
+- Drop terminal content blocks when an `execute` tool call is no longer `in_progress`, resolving `session/update` errors referencing evicted terminals. (#29)
+- Strip internal `kind` attributes from content items, emit incremental terminal output bytes, and bound tracker memory size per turn. (#28)
+- Deduplicate tool call updates by keying tool call snapshots with `toolCallId`. (#28)
+- Preserve `commandResult.exitCode` in `rawOutput` on failed execute steps, making `exitCode` optional on `CommandResult` instead of defaulting to zero. (#28)
+
 ## [0.3.3] - 2026-07-26
 
 ### Fixed
