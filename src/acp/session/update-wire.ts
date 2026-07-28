@@ -49,8 +49,9 @@ export function gitPatchForFile(
 }
 
 function toolContentToV2(item: Record<string, unknown>): Record<string, unknown> {
-  if (item.type !== "diff") {
-    return item;
+  const clean = cleanContentItem(item) as Record<string, unknown>;
+  if (clean.type !== "diff") {
+    return clean;
   }
 
   const path = typeof item.path === "string" ? item.path : "";
@@ -111,6 +112,21 @@ function withTerminalContent(
   return nonTerminalItems;
 }
 
+function cleanContentItem(item: unknown): unknown {
+  if (item && typeof item === "object" && !Array.isArray(item)) {
+    const rec = { ...(item as Record<string, unknown>) };
+    delete rec.kind;
+    return rec;
+  }
+  return item;
+}
+
+const emittedTerminalOutputLengths = new Map<string, number>();
+
+export function resetTerminalOutputTracker(): void {
+  emittedTerminalOutputLengths.clear();
+}
+
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
 export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
   const raw = update as unknown as Record<string, unknown>;
@@ -119,6 +135,10 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
       ...raw,
       status: mapToolStatusForV1(raw.status)
     };
+
+    if (Array.isArray(v1Update.content)) {
+      v1Update.content = v1Update.content.map(cleanContentItem);
+    }
 
     // Attach v1 terminal metadata (_meta.terminal_info/output/exit) for execute tool calls
     // so ACP v1 clients (like Zed) can render terminal output panels.
@@ -131,13 +151,19 @@ export function sessionUpdateToV1(update: V1SessionUpdate): V1SessionUpdate {
         };
         metaObj.terminal_info = { terminal_id: meta.terminalId };
         if (meta.output != null && meta.output.length > 0) {
-          metaObj.terminal_output = { data: Buffer.from(meta.output, "utf8").toString("base64") };
+          const prevLen = emittedTerminalOutputLengths.get(meta.terminalId) ?? 0;
+          if (meta.output.length > prevLen) {
+            const newChunk = meta.output.slice(prevLen);
+            metaObj.terminal_output = { data: Buffer.from(newChunk, "utf8").toString("base64") };
+            emittedTerminalOutputLengths.set(meta.terminalId, meta.output.length);
+          }
         }
         const finished =
           meta.status === "completed" ||
           meta.status === "failed" ||
           meta.status === "cancelled";
         if (finished) {
+          emittedTerminalOutputLengths.delete(meta.terminalId);
           const terminalExit: Record<string, unknown> = {};
           if (typeof meta.exitCode === "number") {
             terminalExit.exit_code = meta.exitCode;
