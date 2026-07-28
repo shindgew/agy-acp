@@ -24,10 +24,11 @@ export async function requestPermissionV1(
   if (toolName === "ask_question") {
     const ask = parseAskQuestion(toolCall);
     const qIdx = questionIndex ?? 0;
-    if (ask && ask.questions.length > 1 && qIdx < ask.questions.length) {
+    if (ask && qIdx < ask.questions.length) {
       const q = ask.questions[qIdx];
       const origTitle = String(toolCallPayload.title ?? "Question");
-      toolCallPayload.title = `[Question ${qIdx + 1}/${ask.questions.length}] ${q.question || origTitle}`;
+      const qText = q.question || origTitle;
+      toolCallPayload.title = ask.questions.length > 1 ? `[Question ${qIdx + 1}/${ask.questions.length}] ${qText}` : qText;
     }
   }
 
