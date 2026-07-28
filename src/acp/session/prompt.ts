@@ -22,7 +22,7 @@ import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
 import type { SessionState } from "./types.js";
-import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface PromptTurnDeps {
   requireSession(sessionId: string): SessionState;
@@ -254,8 +254,10 @@ async function runV2PromptTurn(
     signal.addEventListener("abort", cancelPrompt, { once: true });
 
     try {
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
       const outcome = await session.agy.prompt(promptText, async (update) => {
-        for (const v2Update of expandSessionUpdateToV2(update)) {
+        for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
           await notify(v2Update);
         }
       }, async (toolCall, { toolName }) => {

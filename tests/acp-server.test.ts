@@ -1597,6 +1597,61 @@ describe("ACP v2 (experimental draft)", () => {
     expect(res2[1]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
   });
 
+  it("isolates progressive trackers across separate sessions with identical toolCallIds", () => {
+    const sessionATermTracker = createTerminalOutputTracker();
+    const sessionAToolTracker = createToolCallContentTracker();
+    const sessionBTermTracker = createTerminalOutputTracker();
+    const sessionBToolTracker = createToolCallContentTracker();
+
+    const updateA1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { output: "session A output prefix\n" }
+    } as unknown as SessionUpdate;
+
+    const resA1 = expandSessionUpdateToV2(updateA1, sessionATermTracker, sessionAToolTracker) as Array<Record<string, unknown>>;
+    expect(resA1[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("session A output prefix\n", "utf8").toString("base64")
+    });
+
+    const updateB1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { output: "B\n" }
+    } as unknown as SessionUpdate;
+
+    const resB1 = expandSessionUpdateToV2(updateB1, sessionBTermTracker, sessionBToolTracker) as Array<Record<string, unknown>>;
+    expect(resB1[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("B\n", "utf8").toString("base64")
+    });
+
+    const updateA2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { exitCode: 0, output: "session A output prefix\nsession A output suffix\n" }
+    } as unknown as SessionUpdate;
+
+    const resA2 = expandSessionUpdateToV2(updateA2, sessionATermTracker, sessionAToolTracker) as Array<Record<string, unknown>>;
+    expect(resA2[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("session A output suffix\n", "utf8").toString("base64")
+    });
+  });
+
   it("filters updates for replayFrom cursors", () => {
     const updates = [
       { sessionUpdate: "agent_message_chunk", messageId: "1", content: { type: "text", text: "one" } },

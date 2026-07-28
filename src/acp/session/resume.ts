@@ -19,7 +19,7 @@ import { sessionConfigOptionsV1, sessionConfigOptionsV2 } from "./config-options
 import { sessionModeState } from "./modes.js";
 import type { StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
-import { expandSessionUpdateToV2 } from "./update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2 } from "./update-wire.js";
 
 export interface ResumeSessionDeps {
   requireAuthenticated(cwd?: string): Promise<void>;
@@ -77,12 +77,14 @@ export async function handleResumeSessionV2(
   const replayFrom = params.replayFrom ?? null;
   if (replayFrom != null) {
     if (stored.conversationId) {
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
       await deps.replayConversation(
         session,
         stored.conversationId,
         cwd,
         async (update) => {
-          for (const v2Update of expandSessionUpdateToV2(update)) {
+          for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
             await client.notify(v2.methods.client.session.update, {
               sessionId: params.sessionId,
               update: v2Update
