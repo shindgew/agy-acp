@@ -67,6 +67,16 @@ function updateSnapshot(update: SessionUpdate): string {
   });
 }
 
+function withStepMeta(update: SessionUpdate, stepIdx: number): SessionUpdate {
+  const raw = update as unknown as Record<string, unknown>;
+  const meta = (raw._meta as Record<string, unknown> | undefined) ?? {};
+  if (meta.stepIdx === stepIdx) return update;
+  return {
+    ...raw,
+    _meta: { ...meta, stepIdx }
+  } as unknown as SessionUpdate;
+}
+
 function asToolCallUpdate(update: SessionUpdate): SessionUpdate {
   return {
     ...(update as object),
@@ -171,35 +181,37 @@ export class Translator {
       return;
     }
 
+    const stamped = withStepMeta(update, stepIdx);
+
     if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
-      const snapshot = updateSnapshot(update);
+      const snapshot = updateSnapshot(stamped);
       const key = typeof raw.planId === "string" && raw.planId ? `plan:${raw.planId}` : `plan:${stepIdx}`;
       const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
       this.toolSnapshots.set(key, snapshot);
-      out.push(update);
+      out.push(stamped);
       return;
     }
 
     if (kind !== "tool_call" && kind !== "tool_call_update") {
-      out.push(update);
+      out.push(stamped);
       return;
     }
 
-    const snapshot = updateSnapshot(update);
+    const snapshot = updateSnapshot(stamped);
     const toolId = typeof raw.toolCallId === "string" && raw.toolCallId.trim() ? raw.toolCallId.trim() : undefined;
     const key = toolId ? `tool:${toolId}` : `step:${stepIdx}`;
     const previous = this.toolSnapshots.get(key);
     if (previous === undefined) {
       this.toolSnapshots.set(key, snapshot);
       // First sight always uses create shape; v2 boundary may rewrite to upsert.
-      out.push({ ...raw, sessionUpdate: "tool_call" } as SessionUpdate);
+      out.push({ ...(stamped as object), sessionUpdate: "tool_call" } as SessionUpdate);
       return;
     }
     if (previous === snapshot) return;
 
     this.toolSnapshots.set(key, snapshot);
-    out.push(asToolCallUpdate(update));
+    out.push(asToolCallUpdate(stamped));
   }
 
   private emitThought(update: SessionUpdate, out: SessionUpdate[]): void {
