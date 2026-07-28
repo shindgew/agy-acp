@@ -20,7 +20,7 @@ import {
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import { expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -1545,6 +1545,60 @@ describe("ACP v2 (experimental draft)", () => {
       terminal_info: { terminal_id: terminalIdForToolCall("cmd-failed") },
       terminal_exit: { exit_code: 1 }
     });
+  });
+
+  it("handles terminal output buffer reset / truncation", () => {
+    const tracker = createTerminalOutputTracker();
+    const step1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "cmd-reset",
+      title: "run",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "run" },
+      content: [
+        { type: "content", kind: "output", content: { type: "text", text: "```\nLong initial log text\n```" } }
+      ]
+    } as unknown as SessionUpdate;
+
+    const v1First = sessionUpdateToV1(step1, tracker) as Record<string, unknown>;
+    const metaFirst = v1First._meta as Record<string, Record<string, string>>;
+    expect(metaFirst.terminal_output.data).toBe(Buffer.from("Long initial log text", "utf8").toString("base64"));
+
+    // Simulate upstream reset to shorter output
+    const step2 = {
+      ...step1,
+      content: [
+        { type: "content", kind: "output", content: { type: "text", text: "```\nReset\n```" } }
+      ]
+    } as unknown as SessionUpdate;
+
+    const v1Second = sessionUpdateToV1(step2, tracker) as Record<string, unknown>;
+    const metaSecond = v1Second._meta as Record<string, Record<string, string>>;
+    expect(metaSecond.terminal_output.data).toBe(Buffer.from("Reset", "utf8").toString("base64"));
+  });
+
+  it("bounds terminal output tracker size to prevent unbounded memory growth", () => {
+    const tracker = createTerminalOutputTracker();
+    // Fill tracker beyond MAX_TERMINAL_TRACKER_SIZE (500)
+    for (let i = 0; i < 505; i++) {
+      const step = {
+        sessionUpdate: "tool_call",
+        toolCallId: `cmd-orphan-${i}`,
+        title: "run",
+        kind: "execute",
+        status: "in_progress",
+        rawInput: { CommandLine: "run" },
+        content: [
+          { type: "content", kind: "output", content: { type: "text", text: "```\noutput\n```" } }
+        ]
+      } as unknown as SessionUpdate;
+      sessionUpdateToV1(step, tracker);
+    }
+    expect(tracker.size).toBeLessThanOrEqual(500);
+    // Oldest entries like cmd-orphan-0 should have been evicted
+    expect(tracker.has(terminalIdForToolCall("cmd-orphan-0"))).toBe(false);
+    expect(tracker.has(terminalIdForToolCall("cmd-orphan-504"))).toBe(true);
   });
 
   it("drops terminal content block on completed or failed status to prevent lookup of evicted terminals", () => {
