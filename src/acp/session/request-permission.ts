@@ -6,7 +6,7 @@ import * as v1 from "@agentclientprotocol/sdk";
 import type { AgentContext as V1AgentContext, SessionUpdate as V1SessionUpdate } from "@agentclientprotocol/sdk";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
 import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/experimental/v2";
-import { permissionOptions, type PermissionChoice } from "../tool-calls/permissions.js";
+import { permissionOptions, parseAskQuestion, type PermissionChoice } from "../tool-calls/permissions.js";
 import {
   buildElicitationRequestFromAskQuestion,
   encodeElicitationKeys,
@@ -22,12 +22,13 @@ export async function requestPermissionV1(
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
   signal: AbortSignal | undefined,
+  questionIndex?: number,
   clientElicitation?: ClientElicitationCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal?.aborted) return "cancelled";
 
   if (toolName === "ask_question" && clientElicitation?.form) {
-    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId, questionIndex);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
         client.request(v1.methods.client.elicitation.create, elicitationParams as any),
@@ -39,7 +40,7 @@ export async function requestPermissionV1(
         return "agy-q-skip";
       }
       if (response.action === "accept") {
-        const encoded = encodeElicitationKeys(toolCall, response.content);
+        const encoded = encodeElicitationKeys(toolCall, response.content, questionIndex);
         return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
       }
       return "cancelled";
@@ -47,11 +48,23 @@ export async function requestPermissionV1(
   }
 
   const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
+  const toolCallPayload = { ...requestToolCall };
+  if (toolName === "ask_question") {
+    const ask = parseAskQuestion(toolCall);
+    const qIdx = questionIndex ?? 0;
+    if (ask && qIdx < ask.questions.length) {
+      const q = ask.questions[qIdx];
+      const origTitle = String(toolCallPayload.title ?? "Question");
+      const qText = q.question || origTitle;
+      toolCallPayload.title = ask.questions.length > 1 ? `[Question ${qIdx + 1}/${ask.questions.length}] ${qText}` : qText;
+    }
+  }
+
   const response = await racePermissionCancellation(
     client.request(v1.methods.client.session.requestPermission, {
       sessionId,
-      toolCall: requestToolCall as v1.ToolCallUpdate,
-      options: permissionOptions(toolCall, toolName)
+      toolCall: toolCallPayload as v1.ToolCallUpdate,
+      options: permissionOptions(toolCall, toolName, questionIndex)
     }),
     signal
   );
@@ -65,12 +78,13 @@ export async function requestPermissionV2(
   toolCall: V1SessionUpdate,
   toolName: string | undefined,
   signal: AbortSignal,
+  questionIndex?: number,
   clientElicitation?: ClientElicitationCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal.aborted) return "cancelled";
 
   if (toolName === "ask_question" && clientElicitation?.form) {
-    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId);
+    const elicitationParams = buildElicitationRequestFromAskQuestion(toolCall, sessionId, questionIndex);
     if (elicitationParams) {
       const response = (await racePermissionCancellation(
         client.request(v2.methods.client.elicitation.create, elicitationParams as any),
@@ -82,7 +96,7 @@ export async function requestPermissionV2(
         return "agy-q-skip";
       }
       if (response.action === "accept") {
-        const encoded = encodeElicitationKeys(toolCall, response.content);
+        const encoded = encodeElicitationKeys(toolCall, response.content, questionIndex);
         return encoded ? `pty-keys:${encoded}` : "agy-q-skip";
       }
       return "cancelled";
@@ -95,12 +109,23 @@ export async function requestPermissionV2(
     return kind === "tool_call_update" || kind === "tool_call";
   }) ?? sessionUpdateToV2(toolCall)) as unknown as Record<string, unknown>;
   const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
+
+  let title = String(requestToolCall.title ?? "Permission required");
+  if (toolName === "ask_question") {
+    const ask = parseAskQuestion(toolCall);
+    const qIdx = questionIndex ?? 0;
+    if (ask && ask.questions.length > 1 && qIdx < ask.questions.length) {
+      const q = ask.questions[qIdx];
+      title = `[Question ${qIdx + 1}/${ask.questions.length}] ${q.question || title}`;
+    }
+  }
+
   const response = await racePermissionCancellation(
     client.request(v2.methods.client.session.requestPermission, {
       sessionId,
-      title: String(requestToolCall.title ?? "Permission required"),
+      title,
       subject: { type: "tool_call", toolCall: requestToolCall as v2.ToolCallUpdate },
-      options: permissionOptions(toolCall, toolName)
+      options: permissionOptions(toolCall, toolName, questionIndex)
     }),
     signal
   );
@@ -122,8 +147,7 @@ function selectedPermission(response: unknown, signal?: AbortSignal): Permission
     id === "agy-allow-conversation" ||
     id === "agy-allow-settings" ||
     id === "agy-reject-once" ||
-    id === "agy-q-skip" ||
-    /^agy-q-\d+$/.test(id)
+    id.startsWith("agy-q-")
   ) {
     return id;
   }

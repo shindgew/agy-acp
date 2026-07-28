@@ -16,11 +16,18 @@ export interface PermissionMenuOption {
   name: string;
 }
 
-export interface AskQuestionPayload {
+export interface AskQuestionPrompt {
   question: string;
   options: string[];
   multiSelect: boolean;
+}
+
+export interface AskQuestionPayload {
+  questions: AskQuestionPrompt[];
   questionCount: number;
+  question: string;
+  options: string[];
+  multiSelect: boolean;
 }
 
 /**
@@ -48,7 +55,7 @@ export function isEditToolCall(toolCall: SessionUpdate): boolean {
   return false;
 }
 
-/** True when this status-9 tool can be bridged (permission menu, single-select MCQ, or elicitation). */
+/** True when this status-9 tool can be bridged (permission menu, multi-select MCQ, or elicitation). */
 export function canBridgeInteraction(
   toolName: string,
   toolCall?: SessionUpdate,
@@ -61,9 +68,18 @@ export function canBridgeInteraction(
   return ask != null && isBridgeableAskQuestion(ask);
 }
 
-/** Single-select, single-question ask_question is safe to map to PTY keys. */
+export const MAX_BRIDGABLE_MULTI_SELECT_OPTIONS = 6;
+
+/** ask_question is safe to bridge when it has non-empty options for all questions. */
 export function isBridgeableAskQuestion(ask: AskQuestionPayload): boolean {
-  return ask.questionCount === 1 && !ask.multiSelect && ask.options.length > 0;
+  return (
+    ask.questionCount > 0 &&
+    ask.questions.every((q) => {
+      if (q.options.length === 0) return false;
+      if (q.multiSelect && q.options.length > MAX_BRIDGABLE_MULTI_SELECT_OPTIONS) return false;
+      return true;
+    })
+  );
 }
 
 /** Normalize client-selected option ids (standard ACP or legacy agy-*). */
@@ -104,21 +120,77 @@ export function permissionKeys(choice: PermissionChoice): string | null {
 export function interactionKeys(
   choice: PermissionChoice,
   toolName: string,
-  toolCall?: SessionUpdate
+  toolCall?: SessionUpdate,
+  questionIndex = 0
 ): string | null {
   if (choice.startsWith("pty-keys:")) {
     return choice.slice("pty-keys:".length);
   }
 
   if (toolName === "ask_question") {
-    if (choice === "agy-q-skip") return "\x1b"; // Esc — cancel / skip the modal
-    const match = /^agy-q-(\d+)$/.exec(choice);
-    if (!match || !toolCall) return null;
-    const index = Number(match[1]);
+    if (choice === "agy-q-skip" || choice.endsWith("-skip")) return "\x1b"; // Esc — cancel / skip modal
+    if (!toolCall) return null;
     const ask = parseAskQuestion(toolCall);
-    if (!ask || !isBridgeableAskQuestion(ask) || index < 0 || index >= ask.options.length) return null;
-    // First option is focused by default; Down N then Enter selects option N.
-    return `${"\x1b[B".repeat(index)}\r`;
+    if (!ask || !isBridgeableAskQuestion(ask)) return null;
+
+    let targetQIndex = questionIndex;
+    let rest = choice;
+
+    const qMatch = /^agy-q-q(\d+)-(.*)$/.exec(choice);
+    if (qMatch) {
+      targetQIndex = Number(qMatch[1]);
+      rest = `agy-q-${qMatch[2]}`;
+    }
+
+    if (targetQIndex < 0 || targetQIndex >= ask.questions.length) return null;
+    const q = ask.questions[targetQIndex];
+
+    const match = /^agy-q-(.*)$/.exec(rest);
+    if (!match) return null;
+    const spec = match[1];
+
+    if (spec === "skip") return "\x1b";
+
+    let selectedIndices: number[] = [];
+    if (spec === "all") {
+      selectedIndices = q.options.map((_, idx) => idx);
+    } else if (spec === "none" || spec === "submit") {
+      selectedIndices = [];
+    } else {
+      let rawSpec = spec;
+      if (rawSpec.startsWith("ms:") || rawSpec.startsWith("select:")) {
+        rawSpec = rawSpec.slice(rawSpec.indexOf(":") + 1);
+      }
+      const parts = rawSpec.split(/[,+]/).map((s) => s.trim()).filter(Boolean);
+      for (const p of parts) {
+        const num = Number(p);
+        if (Number.isInteger(num) && num >= 0 && num < q.options.length) {
+          selectedIndices.push(num);
+        } else {
+          return null;
+        }
+      }
+    }
+
+    if (!q.multiSelect) {
+      if (selectedIndices.length !== 1) return null;
+      const index = selectedIndices[0];
+      return `${"\x1b[B".repeat(index)}\r`;
+    } else {
+      const sorted = Array.from(new Set(selectedIndices)).sort((a, b) => a - b);
+      let currentPos = 0;
+      let keys = "";
+      for (const targetPos of sorted) {
+        const moves = targetPos - currentPos;
+        if (moves > 0) {
+          keys += "\x1b[B".repeat(moves);
+        }
+        keys += " ";
+        currentPos = targetPos;
+      }
+      keys += "\r";
+      return keys;
+    }
   }
 
   // Edit tools: map standard ACP allow/reject onto agy's 4-row menu.
@@ -154,41 +226,56 @@ function toolRawInput(toolCall: SessionUpdate): Record<string, unknown> {
 export function parseAskQuestion(toolCall: SessionUpdate): AskQuestionPayload | null {
   const input = toolRawInput(toolCall);
   const questionsRaw = input.questions ?? input.Questions;
-  const questions = Array.isArray(questionsRaw) ? questionsRaw : [];
+  const questionsList = Array.isArray(questionsRaw) ? questionsRaw : [];
+  if (questionsList.length === 0) return null;
+
+  const questions: AskQuestionPrompt[] = [];
+  for (let i = 0; i < questionsList.length; i++) {
+    const item = questionsList[i];
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const entry = item as Record<string, unknown>;
+    let question = pickString(entry, "question", "Question") ?? "";
+    if (!question && i === 0) {
+      question = String((toolCall as unknown as { title?: unknown }).title ?? "Question");
+    }
+    const optionsRaw = entry.options ?? entry.Options;
+    const optionsList = Array.isArray(optionsRaw) ? optionsRaw : [];
+    const options = optionsList
+      .map((opt) => {
+        if (typeof opt === "string") return opt.trim();
+        if (opt && typeof opt === "object" && !Array.isArray(opt)) {
+          return pickString(opt as Record<string, unknown>, "label", "Label", "text", "Text", "id", "Id") ?? "";
+        }
+        return "";
+      })
+      .filter(Boolean);
+    const multiSelect = Boolean(entry.is_multi_select ?? entry.isMultiSelect ?? entry.IsMultiSelect);
+    questions.push({
+      question,
+      options,
+      multiSelect
+    });
+  }
+
   if (questions.length === 0) return null;
 
-  const first = questions[0];
-  const entry = first && typeof first === "object" && !Array.isArray(first)
-    ? first as Record<string, unknown>
-    : {};
-  const question =
-    pickString(entry, "question", "Question") ??
-    String((toolCall as unknown as { title?: unknown }).title ?? "Question");
-  const optionsRaw = entry.options ?? entry.Options;
-  const optionsList = Array.isArray(optionsRaw) ? optionsRaw : [];
-  const options = optionsList
-    .map((opt) => {
-      if (typeof opt === "string") return opt.trim();
-      if (opt && typeof opt === "object" && !Array.isArray(opt)) {
-        return pickString(opt as Record<string, unknown>, "label", "Label", "text", "Text", "id", "Id") ?? "";
-      }
-      return "";
-    })
-    .filter(Boolean);
-  const multiSelect = Boolean(entry.is_multi_select ?? entry.isMultiSelect ?? entry.IsMultiSelect);
-
   return {
-    question,
-    options,
-    multiSelect,
-    questionCount: questions.length
+    questions,
+    questionCount: questions.length,
+    question: questions[0].question,
+    options: questions[0].options,
+    multiSelect: questions[0].multiSelect
   };
 }
 
 /** Build ACP permission options for the given pending tool interaction. */
-export function permissionOptions(toolCall: SessionUpdate, toolName?: string): PermissionMenuOption[] {
+export function permissionOptions(
+  toolCall: SessionUpdate,
+  toolName?: string,
+  questionIndex = 0
+): PermissionMenuOption[] {
   if (toolName === "ask_question") {
-    return askQuestionOptions(toolCall);
+    return askQuestionOptions(toolCall, questionIndex);
   }
 
   // agy's sandbox-bypass request (run a command / read a file outside the
@@ -300,17 +387,108 @@ function askPermissionOptions(toolCall: SessionUpdate): PermissionMenuOption[] {
   ];
 }
 
-function askQuestionOptions(toolCall: SessionUpdate): PermissionMenuOption[] {
+export function askQuestionOptions(toolCall: SessionUpdate, questionIndex = 0): PermissionMenuOption[] {
   const ask = parseAskQuestion(toolCall);
   if (!ask || !isBridgeableAskQuestion(ask)) {
     return [{ optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }];
   }
-  const options: PermissionMenuOption[] = ask.options.map((name, index) => ({
-    optionId: `agy-q-${index}`,
+
+  const qIndex = questionIndex >= 0 && questionIndex < ask.questions.length ? questionIndex : 0;
+  const q = ask.questions[qIndex];
+  if (!q || q.options.length === 0) {
+    return [{ optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }];
+  }
+
+  const prefix = ask.questions.length > 1 ? `agy-q-q${qIndex}-` : "agy-q-";
+
+  if (!q.multiSelect) {
+    const options: PermissionMenuOption[] = q.options.map((name, index) => ({
+      optionId: `${prefix}${index}`,
+      kind: "allow_once" as const,
+      name
+    }));
+    options.push({ optionId: `${prefix}skip`, kind: "reject_once", name: "Skip" });
+    return options;
+  }
+
+  const options: PermissionMenuOption[] = [];
+  const n = q.options.length;
+
+  const MAX_SUBSET_OPTIONS = 128;
+
+  if (n <= 7) {
+    const totalSubsets = 1 << n;
+    for (let mask = 1; mask < totalSubsets; mask++) {
+      const indices: number[] = [];
+      for (let i = 0; i < n; i++) {
+        if ((mask & (1 << i)) !== 0) indices.push(i);
+      }
+      if (indices.length === 1) {
+        options.push({
+          optionId: `${prefix}${indices[0]}`,
+          kind: "allow_once" as const,
+          name: q.options[indices[0]]
+        });
+      } else if (indices.length === n) {
+        options.push({
+          optionId: `${prefix}all`,
+          kind: "allow_once" as const,
+          name: `Select All (${indices.map((i) => q.options[i]).join(" + ")})`
+        });
+      } else {
+        options.push({
+          optionId: `${prefix}${indices.join(",")}`,
+          kind: "allow_once" as const,
+          name: indices.map((i) => q.options[i]).join(" + ")
+        });
+      }
+    }
+  } else {
+    function generateCombos(start: number, combo: number[], k: number) {
+      if (options.length >= MAX_SUBSET_OPTIONS - 3) return;
+      if (combo.length === k) {
+        const key = combo.join(",");
+        if (combo.length === 1) {
+          options.push({
+            optionId: `${prefix}${combo[0]}`,
+            kind: "allow_once" as const,
+            name: q.options[combo[0]]
+          });
+        } else {
+          options.push({
+            optionId: `${prefix}${key}`,
+            kind: "allow_once" as const,
+            name: combo.map((i) => q.options[i]).join(" + ")
+          });
+        }
+        return;
+      }
+      for (let i = start; i < n; i++) {
+        combo.push(i);
+        generateCombos(i + 1, combo, k);
+        combo.pop();
+        if (options.length >= MAX_SUBSET_OPTIONS - 3) break;
+      }
+    }
+
+    for (let k = 1; k < n; k++) {
+      generateCombos(0, [], k);
+      if (options.length >= MAX_SUBSET_OPTIONS - 3) break;
+    }
+
+    options.push({
+      optionId: `${prefix}all`,
+      kind: "allow_once" as const,
+      name: "Select All"
+    });
+  }
+
+  options.push({
+    optionId: `${prefix}none`,
     kind: "allow_once" as const,
-    name
-  }));
-  options.push({ optionId: "agy-q-skip", kind: "reject_once", name: "Skip" });
+    name: "Submit (None selected)"
+  });
+  options.push({ optionId: `${prefix}skip`, kind: "reject_once", name: "Skip" });
   return options;
 }
 

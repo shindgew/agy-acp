@@ -132,9 +132,11 @@ export function parseAskQuestionFull(toolCall: SessionUpdate): AskQuestionPayloa
 }
 
 /** Build elicitation/create params for an ask_question tool call. */
+/** Build elicitation/create params for an ask_question tool call. */
 export function buildElicitationRequestFromAskQuestion(
   toolCall: SessionUpdate,
-  sessionId: string
+  sessionId: string,
+  questionIndex = 0
 ): ElicitationCreateRequestParams | null {
   const parsed = parseAskQuestionFull(toolCall);
   if (!parsed || parsed.items.length === 0) return null;
@@ -142,41 +144,40 @@ export function buildElicitationRequestFromAskQuestion(
   const raw = toolCall as unknown as Record<string, unknown>;
   const toolCallId = typeof raw.toolCallId === "string" ? raw.toolCallId : undefined;
 
+  const qIdx = questionIndex >= 0 && questionIndex < parsed.items.length ? questionIndex : 0;
+  const item = parsed.items[qIdx];
   const properties: Record<string, unknown> = {};
   const required: string[] = [];
 
-  for (let i = 0; i < parsed.items.length; i++) {
-    const item = parsed.items[i];
-    const key = `q${i}`;
-    required.push(key);
+  const key = `q${qIdx}`;
+  required.push(key);
 
-    if (item.options.length > 0 && !item.multiSelect) {
-      properties[key] = {
-        type: "string",
-        title: item.question,
-        oneOf: item.options.map((opt) => ({ const: opt, title: opt }))
-      };
-    } else if (item.options.length > 0 && item.multiSelect) {
-      properties[key] = {
-        type: "array",
-        title: item.question,
-        items: {
-          anyOf: item.options.map((opt) => ({ const: opt, title: opt }))
-        }
-      };
-    } else {
-      // Free-text input
-      properties[key] = {
-        type: "string",
-        title: item.question
-      };
-    }
+  if (item.options.length > 0 && !item.multiSelect) {
+    properties[key] = {
+      type: "string",
+      title: item.question,
+      oneOf: item.options.map((opt) => ({ const: opt, title: opt }))
+    };
+  } else if (item.options.length > 0 && item.multiSelect) {
+    properties[key] = {
+      type: "array",
+      title: item.question,
+      items: {
+        anyOf: item.options.map((opt) => ({ const: opt, title: opt }))
+      }
+    };
+  } else {
+    // Free-text input
+    properties[key] = {
+      type: "string",
+      title: item.question
+    };
   }
 
   const message =
-    parsed.items.length === 1
-      ? parsed.items[0].question
-      : parsed.question || "Please answer the following questions";
+    parsed.items.length > 1
+      ? `[Question ${qIdx + 1}/${parsed.items.length}] ${item.question}`
+      : item.question;
 
   return {
     sessionId,
@@ -194,72 +195,67 @@ export function buildElicitationRequestFromAskQuestion(
 /** Convert user elicitation submission into PTY keys for ask_question. */
 export function encodeElicitationKeys(
   toolCall: SessionUpdate,
-  content?: Record<string, unknown>
+  content?: Record<string, unknown>,
+  questionIndex = 0
 ): string | null {
   if (!content) return "\x1b";
 
   const parsed = parseAskQuestionFull(toolCall);
   if (!parsed || parsed.items.length === 0) return null;
 
-  let allKeys = "";
+  const qIdx = questionIndex >= 0 && questionIndex < parsed.items.length ? questionIndex : 0;
+  const item = parsed.items[qIdx];
+  const key = `q${qIdx}`;
+  const val = content[key] ?? content[item.question] ?? content["q0"] ?? content["q"];
 
-  for (let i = 0; i < parsed.items.length; i++) {
-    const item = parsed.items[i];
-    const key = `q${i}`;
-    const val = content[key] ?? content[item.question];
+  if (val == null) return "\x1b";
 
-    if (val == null) {
-      allKeys += "\x1b";
-      continue;
+  if (item.options.length > 0 && !item.multiSelect) {
+    const strVal = String(val).trim();
+    let index = item.options.findIndex((opt) => opt === strVal);
+    if (index === -1) {
+      const num = Number(strVal);
+      if (!isNaN(num) && num >= 0 && num < item.options.length) {
+        index = num;
+      }
     }
-
-    if (item.options.length > 0 && !item.multiSelect) {
-      const strVal = String(val).trim();
-      let index = item.options.findIndex((opt) => opt === strVal);
-      if (index === -1) {
-        const num = Number(strVal);
-        if (!isNaN(num) && num >= 0 && num < item.options.length) {
-          index = num;
-        }
-      }
-      if (index >= 0) {
-        allKeys += `${"\x1b[B".repeat(index)}\r`;
-      } else {
-        allKeys += `${strVal}\r`;
-      }
-    } else if (item.options.length > 0 && item.multiSelect) {
-      const selected = Array.isArray(val) ? val.map(String) : [String(val)];
-      const selectedIndices = new Set<number>();
-      for (const sel of selected) {
-        const idx = item.options.findIndex((opt) => opt === sel.trim());
-        if (idx >= 0) selectedIndices.add(idx);
-        else {
-          const num = Number(sel);
-          if (!isNaN(num) && num >= 0 && num < item.options.length) {
-            selectedIndices.add(num);
-          }
-        }
-      }
-
-      if (selectedIndices.size === 0) {
-        allKeys += "\r";
-      } else {
-        const maxIdx = Math.max(...selectedIndices);
-        for (let k = 0; k <= maxIdx; k++) {
-          if (selectedIndices.has(k)) {
-            allKeys += " ";
-          }
-          if (k < maxIdx) {
-            allKeys += "\x1b[B";
-          }
-        }
-        allKeys += "\r";
-      }
+    if (index >= 0) {
+      return `${"\x1b[B".repeat(index)}\r`;
     } else {
-      const textVal = String(val);
-      allKeys += `${textVal}\r`;
+      return `${strVal}\r`;
     }
-  }
+  } else if (item.options.length > 0 && item.multiSelect) {
+    const selected = Array.isArray(val) ? val.map(String) : [String(val)];
+    const selectedIndices = new Set<number>();
+    for (const sel of selected) {
+      const idx = item.options.findIndex((opt) => opt === sel.trim());
+      if (idx >= 0) selectedIndices.add(idx);
+      else {
+        const num = Number(sel);
+        if (!isNaN(num) && num >= 0 && num < item.options.length) {
+          selectedIndices.add(num);
+        }
+      }
+    }
 
-  return allKeys || "\r";
+    if (selectedIndices.size === 0) {
+      return "\r";
+    } else {
+      let keys = "";
+      const maxIdx = Math.max(...selectedIndices);
+      for (let k = 0; k <= maxIdx; k++) {
+        if (selectedIndices.has(k)) {
+          keys += " ";
+        }
+        if (k < maxIdx) {
+          keys += "\x1b[B";
+        }
+      }
+      keys += "\r";
+      return keys;
+    }
+  } else {
+    const textVal = String(val);
+    return `${textVal}\r`;
+  }
 }

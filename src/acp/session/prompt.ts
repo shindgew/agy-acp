@@ -142,9 +142,9 @@ export async function handlePromptV1(
         sessionId: params.sessionId,
         update: sessionUpdateToV1(update, tracker)
       });
-    }, async (toolCall, { toolName }) => {
+    }, async (toolCall, { toolName, questionIndex }) => {
       const elicitationCap = deps.clientElicitationV1?.(client);
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, elicitationCap);
+      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
     }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
     await deps.persistSession(params.sessionId, session);
     return {
@@ -262,9 +262,9 @@ async function runV2PromptTurn(
         for (const v2Update of expandSessionUpdateToV2(update)) {
           await notify(v2Update);
         }
-      }, async (toolCall, { toolName }) => {
+      }, async (toolCall, { toolName, questionIndex }) => {
         const elicitationCap = deps.clientElicitationV2?.(client);
-        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, elicitationCap);
+        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
       }, undefined, deps.clientElicitationV2?.(client));
       await deps.persistSession(params.sessionId, session);
 
