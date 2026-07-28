@@ -20,7 +20,8 @@ import {
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -1457,7 +1458,7 @@ describe("ACP v2 (experimental draft)", () => {
     } as SessionUpdate;
 
     const expanded = expandSessionUpdateToV2(update) as Array<Record<string, unknown>>;
-    expect(expanded).toHaveLength(2);
+    expect(expanded).toHaveLength(3);
 
     const terminalId = terminalIdForToolCall("cmd-1");
     expect(expanded[0]).toMatchObject({
@@ -1467,17 +1468,20 @@ describe("ACP v2 (experimental draft)", () => {
       cwd: "/repo",
       exitStatus: { exitCode: 0 }
     });
-    expect((expanded[0].output as { data?: string })?.data).toBe(
-      Buffer.from("README.md\n", "utf8").toString("base64")
-    );
 
-    expect(expanded[1]).toMatchObject({
+    expect(expanded[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId,
+      data: Buffer.from("README.md\n", "utf8").toString("base64")
+    });
+
+    expect(expanded[2]).toMatchObject({
       sessionUpdate: "tool_call_update",
       toolCallId: "cmd-1",
       kind: "execute",
       status: "completed"
     });
-    const content = expanded[1].content as Array<Record<string, unknown>>;
+    const content = expanded[2].content as Array<Record<string, unknown>>;
     expect(content.some((item) => item.type === "terminal")).toBe(false);
     expect(content.some((item) => item.type === "content")).toBe(true);
   });
@@ -1505,6 +1509,113 @@ describe("ACP v2 (experimental draft)", () => {
       status: "in_progress",
       content: [{ type: "terminal", terminalId: terminalIdForToolCall("cmd-2") }]
     });
+  });
+
+  it("emits terminal_output_chunk for incremental command output bytes", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "stream-cmd",
+      title: "build",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { output: "compiling step 1\n" }
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(3);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "terminal_update", command: "make" });
+    expect(res1[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      data: Buffer.from("compiling step 1\n", "utf8").toString("base64")
+    });
+    expect(res1[2]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "stream-cmd" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "stream-cmd",
+      title: "build",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { exitCode: 0, output: "compiling step 1\ncompiling step 2\n" }
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(3);
+    expect(res2[0]).toMatchObject({ sessionUpdate: "terminal_update", exitStatus: { exitCode: 0 } });
+    expect(res2[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      data: Buffer.from("compiling step 2\n", "utf8").toString("base64")
+    });
+    expect(res2[2]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("emits tool_call_content_chunk when new content items are appended", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-progress",
+      title: "fetch data",
+      kind: "fetch",
+      status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: "Part 1" } }]
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(1);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "tc-progress" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-progress",
+      title: "fetch data",
+      kind: "fetch",
+      status: "completed",
+      content: [
+        { type: "content", content: { type: "text", text: "Part 1" } },
+        { type: "content", content: { type: "text", text: "Part 2" } }
+      ]
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(2);
+    expect(res2[0]).toEqual({
+      sessionUpdate: "tool_call_content_chunk",
+      toolCallId: "tc-progress",
+      content: { type: "content", content: { type: "text", text: "Part 2" } }
+    });
+    expect(res2[1]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("filters updates for replayFrom cursors", () => {
+    const updates = [
+      { sessionUpdate: "agent_message_chunk", messageId: "1", content: { type: "text", text: "one" } },
+      { sessionUpdate: "tool_call", toolCallId: "call-1", title: "read" },
+      { sessionUpdate: "agent_message_chunk", messageId: "2", content: { type: "text", text: "two" } }
+    ] as SessionUpdate[];
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "start" })).toEqual(updates);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "message", messageId: "2" })).toEqual([updates[2]]);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "step", stepIdx: 2 })).toEqual([updates[2]]);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "tool_call", toolCallId: "call-1" })).toEqual([
+      updates[1],
+      updates[2]
+    ]);
+
+    expect(() => filterUpdatesForReplayFrom(updates, { type: "invalid_cursor" })).toThrow(
+      "Unsupported replay cursor: invalid_cursor"
+    );
   });
 
   it("embeds _meta.terminal_* on v1 execute tool calls", () => {
