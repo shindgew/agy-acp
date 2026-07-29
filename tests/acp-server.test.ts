@@ -20,7 +20,8 @@ import {
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
-import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
+import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -1301,22 +1302,138 @@ describe("ACP v2 (experimental draft)", () => {
     });
   });
 
-  it("replays history on session/resume with replayFrom start", async () => {
+  it("keeps curated slash command IDs out of the DB step namespace", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: Array<Record<string, unknown>> = [];
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-slash-id", [
+            { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) }
+          ])
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/plan" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const slashMessage = updates.find((u) => u.sessionUpdate === "user_message");
+        expect(slashMessage?.messageId).toMatch(/^slash-[0-9a-f-]{36}$/);
+
+        updates.length = 0;
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const ordinaryMessage = updates.find((u) => u.sessionUpdate === "user_message");
+        expect(ordinaryMessage?.messageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(ordinaryMessage?.messageId).not.toBe(slashMessage?.messageId);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("does not reuse a v2 user message ID after a prompt fails before persistence", async () => {
+    await withConversationsDir(async (dir) => {
+      let promptAttempts = 0;
+      const spawnProcess = ((_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        promptAttempts++;
+        if (promptAttempts === 1) {
+          return new FakeProcess([], { exitCode: 1, stderr: "prompt failed" });
+        }
+        const db = createConversationDb(dir, "conv-v2-after-failure");
+        insertStep(db, {
+          idx: 7,
+          stepType: 14,
+          stepPayload: encodeStepPayload({ userPrompt: "second prompt" })
+        });
+        db.close();
+        return new FakeProcess([]);
+      }) as unknown as SpawnFactory;
+      const updates: Array<Record<string, unknown>> = [];
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, { cwd: "/repo" });
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "first prompt" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const failedMessageId = updates.find((u) => u.sessionUpdate === "user_message")?.messageId;
+        await new Promise((resolve) => setImmediate(resolve));
+
+        updates.length = 0;
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "second prompt" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const persistedMessageId = updates.find((u) => u.sessionUpdate === "user_message")?.messageId;
+
+        expect(failedMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(persistedMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(persistedMessageId).not.toBe(failedMessageId);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("replays a persisted v2 user message from its live message ID", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
+          { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) },
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
       };
 
       let sessionId: string;
+      let liveUserMessageId: string;
       {
-        const updates: unknown[] = [];
+        const updates: Array<Record<string, unknown>> = [];
         const client = acpV2.client({ name: "test-client" }).onNotification(
           acpV2.methods.client.session.update,
           (ctx) => {
-            updates.push(ctx.params.update);
+            updates.push(ctx.params.update as Record<string, unknown>);
           }
         );
         const connection = client.connect(createAcpV2App(appOptions));
@@ -1335,7 +1452,11 @@ describe("ACP v2 (experimental draft)", () => {
             prompt: [{ type: "text", text: "hi" }]
           });
           // Drain the async turn so the conversation binding is persisted.
-          await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+          await waitFor(() => updates.some((u) => u.state === "idle"));
+          liveUserMessageId = String(
+            updates.find((u) => u.sessionUpdate === "user_message")?.messageId
+          );
+          expect(liveUserMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
         } finally {
           connection.close();
         }
@@ -1359,8 +1480,14 @@ describe("ACP v2 (experimental draft)", () => {
           await connection.agent.request(acpV2.methods.agent.session.resume, {
             sessionId,
             cwd: "/repo",
-            replayFrom: { type: "start" }
+            replayFrom: { type: "message", messageId: liveUserMessageId }
           });
+          expect(updates).toContainEqual(
+            expect.objectContaining({
+              sessionUpdate: "user_message_chunk",
+              messageId: liveUserMessageId
+            })
+          );
           expect(updates).toContainEqual(
             expect.objectContaining({
               sessionUpdate: "agent_message_chunk",
@@ -1457,27 +1584,36 @@ describe("ACP v2 (experimental draft)", () => {
     } as SessionUpdate;
 
     const expanded = expandSessionUpdateToV2(update) as Array<Record<string, unknown>>;
-    expect(expanded).toHaveLength(2);
+    expect(expanded).toHaveLength(4);
 
     const terminalId = terminalIdForToolCall("cmd-1");
     expect(expanded[0]).toMatchObject({
       sessionUpdate: "terminal_update",
       terminalId,
       command: "ls",
-      cwd: "/repo",
+      cwd: "/repo"
+    });
+    expect(expanded[0].exitStatus).toBeUndefined();
+
+    expect(expanded[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId,
+      data: Buffer.from("README.md\n", "utf8").toString("base64")
+    });
+
+    expect(expanded[2]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId,
       exitStatus: { exitCode: 0 }
     });
-    expect((expanded[0].output as { data?: string })?.data).toBe(
-      Buffer.from("README.md\n", "utf8").toString("base64")
-    );
 
-    expect(expanded[1]).toMatchObject({
+    expect(expanded[3]).toMatchObject({
       sessionUpdate: "tool_call_update",
       toolCallId: "cmd-1",
       kind: "execute",
       status: "completed"
     });
-    const content = expanded[1].content as Array<Record<string, unknown>>;
+    const content = expanded[3].content as Array<Record<string, unknown>>;
     expect(content.some((item) => item.type === "terminal")).toBe(false);
     expect(content.some((item) => item.type === "content")).toBe(true);
   });
@@ -1505,6 +1641,302 @@ describe("ACP v2 (experimental draft)", () => {
       status: "in_progress",
       content: [{ type: "terminal", terminalId: terminalIdForToolCall("cmd-2") }]
     });
+  });
+
+  it("emits terminal_output_chunk for incremental command output bytes", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "stream-cmd",
+      title: "build",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { output: "compiling step 1\n" }
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(3);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "terminal_update", command: "make" });
+    expect(res1[0].output).toBeUndefined();
+    expect(res1[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      data: Buffer.from("compiling step 1\n", "utf8").toString("base64")
+    });
+    expect(res1[2]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "stream-cmd" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "stream-cmd",
+      title: "build",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { exitCode: 0, output: "compiling step 1\ncompiling step 2\n" }
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(4);
+    expect(res2[0]).toMatchObject({ sessionUpdate: "terminal_update" });
+    expect(res2[0].exitStatus).toBeUndefined();
+    expect(res2[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      data: Buffer.from("compiling step 2\n", "utf8").toString("base64")
+    });
+    expect(res2[2]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      terminalId: terminalIdForToolCall("stream-cmd"),
+      exitStatus: { exitCode: 0 }
+    });
+    expect(res2[3]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("uses a terminal output snapshot when new output does not extend the previous snapshot", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+    const update = (output: string) => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "rewritten-output",
+      title: "build",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { output }
+    } as unknown as SessionUpdate);
+
+    expandSessionUpdateToV2(update("abc"), termTracker, toolTracker);
+    const replaced = expandSessionUpdateToV2(
+      update("XYZ12"),
+      termTracker,
+      toolTracker
+    ) as Array<Record<string, unknown>>;
+
+    expect(replaced.some((item) => item.sessionUpdate === "terminal_output_chunk")).toBe(false);
+    expect(replaced[0]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      output: { data: Buffer.from("XYZ12", "utf8").toString("base64") }
+    });
+  });
+
+  it("retains terminal output progress when a completed row grows after first sight", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+    const update = (output: string) => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "late-completed-output",
+      title: "build",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { exitCode: 0, output }
+    } as unknown as SessionUpdate);
+
+    expandSessionUpdateToV2(update("abc"), termTracker, toolTracker);
+    const grown = expandSessionUpdateToV2(
+      update("abcdef"),
+      termTracker,
+      toolTracker
+    ) as Array<Record<string, unknown>>;
+
+    expect(grown[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("late-completed-output"),
+      data: Buffer.from("def", "utf8").toString("base64")
+    });
+  });
+
+  it("emits tool_call_content_chunk when new content items are appended to a previously empty tool call", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-empty-init",
+      title: "fetch data",
+      kind: "fetch",
+      status: "in_progress",
+      content: []
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(1);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "tc-empty-init" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-empty-init",
+      title: "fetch data",
+      kind: "fetch",
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "Late Data" } }]
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(2);
+    expect(res2[0]).toEqual({
+      sessionUpdate: "tool_call_content_chunk",
+      toolCallId: "tc-empty-init",
+      content: { type: "content", content: { type: "text", text: "Late Data" } }
+    });
+    expect(res2[1]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("emits tool_call_content_chunk when new content items are appended", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+
+    const update1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "tc-progress",
+      title: "fetch data",
+      kind: "fetch",
+      status: "in_progress",
+      content: [{ type: "content", content: { type: "text", text: "Part 1" } }]
+    } as unknown as SessionUpdate;
+
+    const res1 = expandSessionUpdateToV2(update1, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res1).toHaveLength(1);
+    expect(res1[0]).toMatchObject({ sessionUpdate: "tool_call_update", toolCallId: "tc-progress" });
+
+    const update2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "tc-progress",
+      title: "fetch data",
+      kind: "fetch",
+      status: "completed",
+      content: [
+        { type: "content", content: { type: "text", text: "Part 1" } },
+        { type: "content", content: { type: "text", text: "Part 2" } }
+      ]
+    } as unknown as SessionUpdate;
+
+    const res2 = expandSessionUpdateToV2(update2, termTracker, toolTracker) as Array<Record<string, unknown>>;
+    expect(res2).toHaveLength(2);
+    expect(res2[0]).toEqual({
+      sessionUpdate: "tool_call_content_chunk",
+      toolCallId: "tc-progress",
+      content: { type: "content", content: { type: "text", text: "Part 2" } }
+    });
+    expect(res2[1]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
+  });
+
+  it("isolates progressive trackers across separate sessions with identical toolCallIds", () => {
+    const sessionATermTracker = createTerminalOutputTracker();
+    const sessionAToolTracker = createToolCallContentTracker();
+    const sessionBTermTracker = createTerminalOutputTracker();
+    const sessionBToolTracker = createToolCallContentTracker();
+
+    const updateA1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { output: "session A output prefix\n" }
+    } as unknown as SessionUpdate;
+
+    const resA1 = expandSessionUpdateToV2(updateA1, sessionATermTracker, sessionAToolTracker) as Array<Record<string, unknown>>;
+    expect(resA1[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("session A output prefix\n", "utf8").toString("base64")
+    });
+
+    const updateB1 = {
+      sessionUpdate: "tool_call",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { output: "B\n" }
+    } as unknown as SessionUpdate;
+
+    const resB1 = expandSessionUpdateToV2(updateB1, sessionBTermTracker, sessionBToolTracker) as Array<Record<string, unknown>>;
+    expect(resB1[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("B\n", "utf8").toString("base64")
+    });
+
+    const updateA2 = {
+      sessionUpdate: "tool_call_update",
+      toolCallId: "shared-cmd",
+      title: "run",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "run" },
+      rawOutput: { exitCode: 0, output: "session A output prefix\nsession A output suffix\n" }
+    } as unknown as SessionUpdate;
+
+    const resA2 = expandSessionUpdateToV2(updateA2, sessionATermTracker, sessionAToolTracker) as Array<Record<string, unknown>>;
+    expect(resA2[1]).toMatchObject({
+      sessionUpdate: "terminal_output_chunk",
+      data: Buffer.from("session A output suffix\n", "utf8").toString("base64")
+    });
+  });
+
+  it("filters updates for replayFrom cursors", () => {
+    const updates = [
+      { sessionUpdate: "agent_message_chunk", messageId: "1", content: { type: "text", text: "one" } },
+      { sessionUpdate: "tool_call", toolCallId: "call-1", title: "read", _meta: { stepIdx: 2 } },
+      { sessionUpdate: "agent_message_chunk", messageId: "3", content: { type: "text", text: "two" } }
+    ] as SessionUpdate[];
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "start" })).toEqual(updates);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "message", messageId: "3" })).toEqual([updates[2]]);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "step", stepIdx: 2 })).toEqual([updates[1], updates[2]]);
+
+    const mergedUpdates = [
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "merged 1 and 2" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      },
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-3",
+        title: "run",
+        _meta: { stepIdx: 3 }
+      }
+    ] as SessionUpdate[];
+
+    expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "step", stepIdx: 2 })).toEqual(mergedUpdates);
+    expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "1" })).toEqual(mergedUpdates);
+    expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "2" })).toEqual(mergedUpdates);
+
+    const thoughtAndAnswer = [
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-4",
+        content: { type: "text", text: "thinking" },
+        _meta: { stepIdx: 4 }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "4",
+        content: { type: "text", text: "answer" },
+        _meta: { stepIdx: 4 }
+      }
+    ] as SessionUpdate[];
+    expect(filterUpdatesForReplayFrom(thoughtAndAnswer, { type: "message", messageId: "4" })).toEqual([
+      thoughtAndAnswer[1]
+    ]);
+
+    expect(filterUpdatesForReplayFrom(updates, { type: "tool_call", toolCallId: "call-1" })).toEqual([
+      updates[1],
+      updates[2]
+    ]);
+
+    expect(() => filterUpdatesForReplayFrom(updates, { type: "invalid_cursor" })).toThrow(
+      "Unsupported replay cursor: invalid_cursor"
+    );
   });
 
   it("embeds _meta.terminal_* on v1 execute tool calls", () => {

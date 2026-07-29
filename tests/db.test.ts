@@ -135,6 +135,83 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("uses one message id for consecutive agent-text rows in streaming and replay", () => {
+    const db = createConversationDb(dir, "conv-stream-message-group");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "world" }) });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\nworld" }
+      }
+    ]);
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\nworld" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
+  });
+
+  it("starts a streaming message group at the first row containing answer text", () => {
+    const db = createConversationDb(dir, "conv-stream-thought-first");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { thought: "Thinking" } })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: "Answer" })
+    });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" }
+    });
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" },
+      _meta: { stepIdx: 2 }
+    });
+  });
+
   it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {
@@ -221,6 +298,29 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("maps active step status 1 to in_progress tool status", () => {
+    const db = createConversationDb(dir, "conv-status-1");
+    const call = encodeToolCall({ callId: "active-1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo active"}' });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 1, // active
+      stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call }) })
+    });
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-status-1")!;
+    const res = translator.translate(conn.readAfter(0));
+    expect(res).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "active-1",
+        status: "in_progress"
+      }
+    ]);
+    conn.close();
+    db.close();
+  });
+
   it("maps permission-pending status 9 and dedupes its transition", () => {
     const db = createConversationDb(dir, "conv-pending");
     const payload = encodeStepPayload({ toolRun: encodeToolRun({ call: encodeToolCall({ callId: "p1", namePrimary: "run_command", rawInputJson: "{}" }) }) });
@@ -252,11 +352,12 @@ describe("Translator", () => {
     conn.close();
 
     expect(updates).toEqual([
-      { sessionUpdate: "session_info_update", title: "My session" },
+      { sessionUpdate: "session_info_update", title: "My session", _meta: { stepIdx: 1 } },
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "title-thought-1",
-        content: { type: "text", text: "I will inspect the repo structure first." }
+        content: { type: "text", text: "I will inspect the repo structure first." },
+        _meta: { stepIdx: 1 }
       }
     ]);
 
@@ -287,7 +388,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
@@ -306,12 +408,14 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Final output" }
+        content: { type: "text", text: "Final output" },
+        _meta: { stepIdx: 1 }
       }
     ]);
   });
@@ -785,7 +889,46 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Hello\n world" }
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
+  });
+
+  it("stamps _meta.stepIdx on title, thought, and agent text updates", () => {
+    const db = createConversationDb(dir, "conv-stamped");
+    insertStep(db, { idx: 10, stepType: 23, stepPayload: encodeStepPayload({ titleUpdate: "My Title\n\nTitle narration" }) });
+    insertStep(db, { idx: 11, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Done", thought: "Thinking..." } }) });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-stamped")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "session_info_update",
+        title: "My Title",
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "title-thought-10",
+        content: { type: "text", text: "Title narration" },
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-11",
+        content: { type: "text", text: "Thinking..." },
+        _meta: { stepIdx: 11 }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "11",
+        content: { type: "text", text: "Done" },
+        _meta: { stepIdx: 11 }
       }
     ]);
   });
@@ -1042,7 +1185,7 @@ describe("StreamPoller", () => {
 });
 
 describe("ReplayCache", () => {
-  it("serves a cache hit without re-reading the file, and appends only the new tail on growth", () => {
+  it("serves unchanged cache hits and rebuilds grouped messages after growth", () => {
     const db = createConversationDb(dir, "conv-5");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
 
@@ -1057,8 +1200,32 @@ describe("ReplayCache", () => {
     db.close();
 
     const grown = cache.get(dir, "conv-5", { skipNarration: false });
-    expect(grown?.updates).toHaveLength(2);
+    expect(grown?.updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
     expect(grown?.maxIdx).toBe(2);
+  });
+
+  it("rebuilds cached replay after an in-place step update", () => {
+    const db = createConversationDb(dir, "conv-replay-mutation");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "partial" }) });
+
+    const cache = new ReplayCache(8);
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "partial" } }
+    ]);
+
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "complete result" }));
+    db.close();
+
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "complete result" } }
+    ]);
   });
 
   it("returns null for a missing conversation", () => {

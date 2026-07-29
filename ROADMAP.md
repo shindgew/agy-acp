@@ -129,18 +129,18 @@ differs or is incomplete.
 - [x] [`tool_call_update`](https://agentclientprotocol.com/rfds/v2/tool-call-updates): upsert shape (first-sight collapsed from v1 `tool_call`); `cancelled` preserved
 - [x] [`diff`](https://agentclientprotocol.com/rfds/v2/diff-file-states): `changes[]` + optional `git_patch` (`add` / `modify`, `fileType: "text"`)
 - [x] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): `subject: { type: "tool_call", … }` + `title`
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text / single-select `ask_question` (+ `elicitation/complete`)
 - [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): prompt caps `image`, `embeddedContext`
 - [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): capability advertised
 - [x] [`terminal_update`](https://agentclientprotocol.com/rfds/v2/terminal-output): agent-owned execute terminals + `type: "terminal"` embeds (DB snapshots)
 - [x] [`plan_update`](https://agentclientprotocol.com/protocol/v2/agent-plan): brain plans ([`markdown`](https://agentclientprotocol.com/rfds/v2/plan-variants) preferred, else `items`); no `plan_removed`
 - [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands): same curated list + config intercept as v1
+- [x] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is actively running
+- [x] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool call output and content updates
+- [x] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): replay cursors (`start`, `message`, `step`, `tool_call`)
 
 ### High priority
 
-- [ ] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): richer cursors beyond `{ "type": "start" }` when the draft stabilizes incremental replay
-- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text / single-select `ask_question` (+ `elicitation/complete`)
-- [ ] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is still running (today: full snapshot when field 28 is present)
-- [ ] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool content while a call is running (today: only on `tool_call_update` snapshots)
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor session servers, advertise `capabilities.session.mcp`, route `mcp/*` when agy can consume them
 - [ ] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): expand bridge to remaining agy menus once TUI channels are verified
 

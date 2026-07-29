@@ -54,7 +54,8 @@ export async function buildSession(
     catalog,
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
-    activePrompt: false
+    activePrompt: false,
+    v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
 }
 
@@ -139,6 +140,7 @@ export function sessionRecord(session: SessionState): StoredSession {
     model: session.selectedBaseModel,
     reasoningEffort: session.selectedReasoningEffort,
     mode: session.agy.config.mode,
+    v2UserMessageIdsByStep: session.v2UserMessageIdsByStep,
     updatedAt: new Date().toISOString()
   };
 }
@@ -151,23 +153,118 @@ export function persistSession(
   return store.persist(sessionId, sessionRecord(session));
 }
 
+function getUpdateStepRange(u: v1.SessionUpdate): { stepIdx: number; endStepIdx: number } | undefined {
+  const rec = u as unknown as Record<string, unknown>;
+  const meta = rec._meta as Record<string, unknown> | undefined;
+  let startIdx: number | undefined;
+  if (typeof meta?.stepIdx === "number") startIdx = meta.stepIdx;
+  else if (typeof rec.stepIdx === "number") startIdx = rec.stepIdx;
+  else if (typeof rec.messageId === "string") {
+    const parsed = parseInt(rec.messageId, 10);
+    if (!isNaN(parsed)) startIdx = parsed;
+  }
+  if (startIdx == null) return undefined;
+  const endIdx = typeof meta?.endStepIdx === "number" ? meta.endStepIdx : startIdx;
+  return { stepIdx: startIdx, endStepIdx: endIdx };
+}
+
+export function filterUpdatesForReplayFrom(
+  updates: v1.SessionUpdate[],
+  replayFrom: Record<string, unknown>
+): v1.SessionUpdate[] {
+  const type = String(replayFrom.type ?? "").toLowerCase();
+
+  if (type === "start") {
+    return updates;
+  }
+
+  if (type === "message") {
+    const targetId = typeof replayFrom.messageId === "string" ? replayFrom.messageId : undefined;
+    if (!targetId) return updates;
+    const targetNum = parseInt(targetId, 10);
+    const index = updates.findIndex((u) => {
+      const rec = u as unknown as Record<string, unknown>;
+      if (rec.messageId === targetId) return true;
+      const range = getUpdateStepRange(u);
+      if (rec.sessionUpdate === "agent_message_chunk" && range != null && !isNaN(targetNum)) {
+        return range.stepIdx <= targetNum && targetNum <= range.endStepIdx;
+      }
+      return false;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  if (type === "step" || type === "step_idx" || type === "stepidx") {
+    const targetIdx =
+      typeof replayFrom.stepIdx === "number"
+        ? replayFrom.stepIdx
+        : typeof replayFrom.index === "number"
+        ? replayFrom.index
+        : typeof replayFrom.idx === "number"
+        ? replayFrom.idx
+        : undefined;
+    if (targetIdx == null) return updates;
+    const index = updates.findIndex((u) => {
+      const range = getUpdateStepRange(u);
+      return range != null && range.endStepIdx >= targetIdx;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  if (type === "tool_call" || type === "toolcall") {
+    const targetId = typeof replayFrom.toolCallId === "string" ? replayFrom.toolCallId : undefined;
+    if (!targetId) return updates;
+    const index = updates.findIndex((u) => {
+      const rec = u as unknown as Record<string, unknown>;
+      return rec.toolCallId === targetId;
+    });
+    return index >= 0 ? updates.slice(index) : [];
+  }
+
+  throw new Error(`Unsupported replay cursor: ${String(replayFrom.type)}`);
+}
+
 /** Replay a persisted conversation's session updates (used by `session/load` and
- *  `session/resume` with `replayFrom: { type: "start" }`). */
+ *  `session/resume` with `replayFrom`). */
 export async function replayConversation(
   replayCache: ReplayCache,
   session: SessionState,
   conversationId: string,
   cwd: string,
-  emit: (update: v1.SessionUpdate) => Promise<void>
+  emit: (update: v1.SessionUpdate) => Promise<void>,
+  replayFrom?: unknown,
+  v2UserMessageIdsByStep?: Record<string, string>
 ): Promise<void> {
   const replay = replayCache.get(session.agy.config.conversationsDir, conversationId, {
     skipNarration: false,
     cwd
   });
   if (!replay) return;
-  for (const update of replay.updates) {
+  const replayUpdates = v2UserMessageIdsByStep
+    ? remapV2UserMessageIds(replay.updates, v2UserMessageIdsByStep)
+    : replay.updates;
+  const updates =
+    replayFrom != null
+      ? filterUpdatesForReplayFrom(replayUpdates, replayFrom as Record<string, unknown>)
+      : replayUpdates;
+  for (const update of updates) {
     await emit(update);
   }
+}
+
+function remapV2UserMessageIds(
+  updates: v1.SessionUpdate[],
+  messageIdsByStep: Record<string, string>
+): v1.SessionUpdate[] {
+  return updates.map((update) => {
+    const raw = update as unknown as Record<string, unknown>;
+    if (raw.sessionUpdate !== "user_message_chunk") return update;
+    const meta = raw._meta as Record<string, unknown> | undefined;
+    const messageId = typeof meta?.stepIdx === "number"
+      ? messageIdsByStep[String(meta.stepIdx)]
+      : undefined;
+    return messageId ? ({ ...raw, messageId } as unknown as v1.SessionUpdate) : update;
+  });
 }
 
 function dedupe(values: string[]): string[] {
