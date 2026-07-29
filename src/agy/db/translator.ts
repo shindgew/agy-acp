@@ -123,7 +123,8 @@ export class Translator {
     for (const row of rows) {
       if (this.opts.mode === "stream") {
         if (row.stepType === 15) {
-          streamingAgentMessageId ??= String(row.idx);
+          const text = row.stepPayload.agentText?.text ?? "";
+          if (text.length > 0) streamingAgentMessageId ??= String(row.idx);
         } else {
           streamingAgentMessageId = null;
         }

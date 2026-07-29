@@ -161,6 +161,44 @@ describe("Translator", () => {
     ]);
   });
 
+  it("starts a streaming message group at the first row containing answer text", () => {
+    const db = createConversationDb(dir, "conv-stream-thought-first");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { thought: "Thinking" } })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: "Answer" })
+    });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" }
+    });
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" },
+      _meta: { stepIdx: 2 }
+    });
+  });
+
   it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {
