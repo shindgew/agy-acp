@@ -123,15 +123,13 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
 
       const result = await waitForTerminalExit(client, {
         sessionId: "sess-1",
-        terminalId: "term-123",
-        timeoutMs: 5000
+        terminalId: "term-123"
       });
 
       expect(result).toEqual({ exitCode: 0 });
       expect(requestMock).toHaveBeenCalledWith("terminal/wait_for_exit", {
         sessionId: "sess-1",
-        terminalId: "term-123",
-        timeoutMs: 5000
+        terminalId: "term-123"
       });
     });
 
@@ -182,8 +180,7 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
       });
       expect(requestMock).toHaveBeenNthCalledWith(2, "terminal/wait_for_exit", {
         sessionId: "sess-1",
-        terminalId: "term-flow-1",
-        timeoutMs: undefined
+        terminalId: "term-flow-1"
       });
       expect(requestMock).toHaveBeenNthCalledWith(3, "terminal/output", {
         sessionId: "sess-1",
@@ -192,6 +189,35 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
       expect(requestMock).toHaveBeenNthCalledWith(4, "terminal/release", {
         sessionId: "sess-1",
         terminalId: "term-flow-1"
+      });
+    });
+
+    it("executeClientTerminal kills and releases terminal on local timeout", async () => {
+      const requestMock = vi.fn().mockImplementation((method: string) => {
+        if (method === "terminal/create") return Promise.resolve({ terminalId: "term-timeout-1" });
+        if (method === "terminal/wait_for_exit") return new Promise(() => {}); // never resolves
+        if (method === "terminal/kill") return Promise.resolve({});
+        if (method === "terminal/release") return Promise.resolve({});
+        return Promise.reject(new Error(`Unexpected method: ${method}`));
+      });
+      const client = { request: requestMock } as unknown as AcpClientContext;
+
+      await expect(
+        executeClientTerminal(client, {
+          sessionId: "sess-1",
+          command: "sleep",
+          args: ["100"],
+          timeoutMs: 50
+        })
+      ).rejects.toThrow("Terminal execution timed out after 50ms");
+
+      expect(requestMock).toHaveBeenCalledWith("terminal/kill", {
+        sessionId: "sess-1",
+        terminalId: "term-timeout-1"
+      });
+      expect(requestMock).toHaveBeenCalledWith("terminal/release", {
+        sessionId: "sess-1",
+        terminalId: "term-timeout-1"
       });
     });
   });

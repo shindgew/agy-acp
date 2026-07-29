@@ -45,7 +45,6 @@ export interface TerminalReleaseParams {
 export interface TerminalWaitForExitParams {
   sessionId: string;
   terminalId: string;
-  timeoutMs?: number;
 }
 
 export interface TerminalWaitForExitResult {
@@ -125,13 +124,16 @@ export async function releaseTerminal(
 
 /**
  * ACP `terminal/wait_for_exit` client RPC call:
- * Wait for a client-managed terminal process to exit or until optional timeout expires.
+ * Wait for a client-managed terminal process to exit.
  */
 export async function waitForTerminalExit(
   client: AcpClientContext,
   params: TerminalWaitForExitParams
 ): Promise<TerminalWaitForExitResult> {
-  return await client.request("terminal/wait_for_exit", params as unknown as Record<string, unknown>);
+  return await client.request("terminal/wait_for_exit", {
+    sessionId: params.sessionId,
+    terminalId: params.terminalId
+  });
 }
 
 /**
@@ -148,7 +150,7 @@ export async function killTerminal(
 /**
  * Execute a complete client-managed terminal command flow:
  * 1. `terminal/create`
- * 2. `terminal/wait_for_exit`
+ * 2. `terminal/wait_for_exit` (with local timeout enforcement)
  * 3. `terminal/output`
  * 4. `terminal/release`
  */
@@ -158,11 +160,29 @@ export async function executeClientTerminal(
 ): Promise<ExecuteClientTerminalResult> {
   const { terminalId } = await createTerminal(client, params);
   try {
-    const exitStatus = await waitForTerminalExit(client, {
-      sessionId: params.sessionId,
-      terminalId,
-      timeoutMs: params.timeoutMs
-    });
+    let exitStatus: TerminalWaitForExitResult;
+    if (typeof params.timeoutMs === "number" && params.timeoutMs > 0) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`Terminal execution timed out after ${params.timeoutMs}ms`));
+        }, params.timeoutMs);
+      });
+      try {
+        exitStatus = await Promise.race([
+          waitForTerminalExit(client, { sessionId: params.sessionId, terminalId }),
+          timeoutPromise
+        ]);
+      } catch (err) {
+        await killTerminal(client, { sessionId: params.sessionId, terminalId }).catch(() => {});
+        throw err;
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    } else {
+      exitStatus = await waitForTerminalExit(client, { sessionId: params.sessionId, terminalId });
+    }
+
     const { output, truncated } = await getTerminalOutput(client, {
       sessionId: params.sessionId,
       terminalId
