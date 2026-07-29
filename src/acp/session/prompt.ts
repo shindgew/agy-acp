@@ -218,7 +218,7 @@ async function runV2PromptTurn(
     });
   };
 
-  const userMessageId = randomUUID();
+  const userMessageId = String(Math.max(0, session.agy.lastStepIdx + 1));
   try {
     signal.throwIfAborted();
 

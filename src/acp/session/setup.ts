@@ -181,7 +181,9 @@ export function filterUpdatesForReplayFrom(
     if (!targetId) return updates;
     const index = updates.findIndex((u) => {
       const rec = u as unknown as Record<string, unknown>;
-      return rec.messageId === targetId;
+      if (rec.messageId === targetId) return true;
+      const range = getUpdateStepRange(u);
+      return range != null && String(range.stepIdx) === targetId;
     });
     return index >= 0 ? updates.slice(index) : [];
   }
