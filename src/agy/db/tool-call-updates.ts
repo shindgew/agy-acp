@@ -242,7 +242,12 @@ function fsPath(p: string | null | undefined): string | null {
   try {
     return fileURLToPath(p);
   } catch {
-    return decodeURIComponent(p.slice("file://".length));
+    const raw = p.slice("file://".length);
+    try {
+      return decodeURIComponent(raw);
+    } catch {
+      return raw;
+    }
   }
 }
 

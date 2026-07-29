@@ -724,6 +724,27 @@ describe("Translator", () => {
     expect(update.locations).toEqual([{ path: winFile, line: 1 }]);
   });
 
+  it("handles malformed percent-encoded file URIs without throwing URIError", () => {
+    const db = createConversationDb(dir, "conv-malformed-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///tmp/foo%bar",
+          content: "malformed URI test content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-malformed-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    expect(() => translator.translate(conn.readAfter(-1))).not.toThrow();
+    conn.close();
+  });
+
   it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
     const db = createConversationDb(dir, "conv-write-diff-rel");
     insertStep(db, {
