@@ -54,7 +54,8 @@ export async function buildSession(
     catalog,
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
-    activePrompt: false
+    activePrompt: false,
+    v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
 }
 
@@ -139,6 +140,7 @@ export function sessionRecord(session: SessionState): StoredSession {
     model: session.selectedBaseModel,
     reasoningEffort: session.selectedReasoningEffort,
     mode: session.agy.config.mode,
+    v2UserMessageIdsByStep: session.v2UserMessageIdsByStep,
     updatedAt: new Date().toISOString()
   };
 }
@@ -230,20 +232,39 @@ export async function replayConversation(
   conversationId: string,
   cwd: string,
   emit: (update: v1.SessionUpdate) => Promise<void>,
-  replayFrom?: unknown
+  replayFrom?: unknown,
+  v2UserMessageIdsByStep?: Record<string, string>
 ): Promise<void> {
   const replay = replayCache.get(session.agy.config.conversationsDir, conversationId, {
     skipNarration: false,
     cwd
   });
   if (!replay) return;
+  const replayUpdates = v2UserMessageIdsByStep
+    ? remapV2UserMessageIds(replay.updates, v2UserMessageIdsByStep)
+    : replay.updates;
   const updates =
     replayFrom != null
-      ? filterUpdatesForReplayFrom(replay.updates, replayFrom as Record<string, unknown>)
-      : replay.updates;
+      ? filterUpdatesForReplayFrom(replayUpdates, replayFrom as Record<string, unknown>)
+      : replayUpdates;
   for (const update of updates) {
     await emit(update);
   }
+}
+
+function remapV2UserMessageIds(
+  updates: v1.SessionUpdate[],
+  messageIdsByStep: Record<string, string>
+): v1.SessionUpdate[] {
+  return updates.map((update) => {
+    const raw = update as unknown as Record<string, unknown>;
+    if (raw.sessionUpdate !== "user_message_chunk") return update;
+    const meta = raw._meta as Record<string, unknown> | undefined;
+    const messageId = typeof meta?.stepIdx === "number"
+      ? messageIdsByStep[String(meta.stepIdx)]
+      : undefined;
+    return messageId ? ({ ...raw, messageId } as unknown as v1.SessionUpdate) : update;
+  });
 }
 
 function dedupe(values: string[]): string[] {

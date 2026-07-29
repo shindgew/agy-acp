@@ -164,6 +164,7 @@ export class AgyCliSession {
   #extraPath: string | undefined;
   #conversationId: string | null = null;
   #lastStepIdx = -1;
+  #lastPromptUserStepIdxs: number[] = [];
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
   readonly ptyFactory?: PtyFactory;
@@ -190,6 +191,11 @@ export class AgyCliSession {
   /** Highest conversation-database step idx already delivered to the ACP client. */
   get lastStepIdx(): number {
     return this.#lastStepIdx;
+  }
+
+  /** Type-14 user rows observed during the most recent prompt invocation. */
+  get lastPromptUserStepIdxs(): readonly number[] {
+    return this.#lastPromptUserStepIdxs;
   }
 
   /** Seed the conversation binding from persisted state (for session/load and session/resume). */
@@ -285,6 +291,7 @@ export class AgyCliSession {
     fsBridge?: ClientFileSystem,
     elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
+    this.#lastPromptUserStepIdxs = [];
     if (this.config.interactivePermissions) {
       if (!onPermission) throw new Error("interactive permissions require a permission callback");
       return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge, elicitationCap);
@@ -555,6 +562,7 @@ export class AgyCliSession {
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#cancelled && !failed) await this.stopPty();
       this.#cancelTurn = undefined;
@@ -656,9 +664,6 @@ export class AgyCliSession {
         if (attempt < TRAILING_POLL_ATTEMPTS - 1) await sleep(TRAILING_POLL_DELAY_MS);
       }
 
-      this.#conversationId = poller.conversationId;
-      this.#lastStepIdx = poller.lastStepIdx;
-
       if (exitCode && !this.#cancelled) {
         const stderr = Buffer.concat(stderrChunks).toString("utf8");
         throw new AgyCliError(
@@ -671,6 +676,9 @@ export class AgyCliSession {
 
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } finally {
+      this.#conversationId = poller.conversationId ?? this.#conversationId;
+      this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#process === child) {
         this.#process = undefined;

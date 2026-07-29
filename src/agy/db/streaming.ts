@@ -49,6 +49,7 @@ export class StreamPoller {
   private failedDataVersionAttempts = 0;
   private rowSnapshot = "";
   private readonly activePending = new Map<string, PendingInteraction>();
+  private readonly observedUserStepIdxs = new Set<number>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -69,6 +70,11 @@ export class StreamPoller {
 
   get hadUpdates(): boolean {
     return this.translator.hadUpdates;
+  }
+
+  /** User-prompt rows observed during this prompt-scoped polling session. */
+  get userStepIdxs(): number[] {
+    return [...this.observedUserStepIdxs];
   }
 
   /** Newly observed status-9 tool calls from the most recent poll. */
@@ -110,6 +116,9 @@ export class StreamPoller {
     if (this.dataVersion === dataVersion) return [];
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
+    for (const row of rows) {
+      if (row.stepType === 14) this.observedUserStepIdxs.add(row.idx);
+    }
     if (!rows.hasDecodeError) {
       this.dataVersion = dataVersion;
       this.failedDataVersion = null;

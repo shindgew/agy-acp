@@ -223,7 +223,7 @@ async function runV2PromptTurn(
   const userMessageId =
     slashResult && slashResult.kind !== "pass"
       ? `slash-${randomUUID()}`
-      : String(Math.max(0, session.agy.lastStepIdx + 1));
+      : `user-${randomUUID()}`;
   try {
     signal.throwIfAborted();
 
@@ -265,14 +265,26 @@ async function runV2PromptTurn(
     try {
       const terminalTracker = createTerminalOutputTracker();
       const toolContentTracker = createToolCallContentTracker();
-      const outcome = await session.agy.prompt(promptText, async (update) => {
-        for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
-          await notify(v2Update);
+      const outcome = await (async () => {
+        try {
+          return await session.agy.prompt(promptText, async (update) => {
+            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
+              await notify(v2Update);
+            }
+          }, async (toolCall, { toolName, questionIndex }) => {
+            const elicitationCap = deps.clientElicitationV2?.(client);
+            return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+          }, undefined, deps.clientElicitationV2?.(client));
+        } finally {
+          const userStepIdxs = session.agy.lastPromptUserStepIdxs;
+          if (userStepIdxs.length > 1) {
+            throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
+          }
+          if (userStepIdxs.length === 1) {
+            session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
+          }
         }
-      }, async (toolCall, { toolName, questionIndex }) => {
-        const elicitationCap = deps.clientElicitationV2?.(client);
-        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
-      }, undefined, deps.clientElicitationV2?.(client));
+      })();
       await deps.persistSession(params.sessionId, session);
 
       const stopReason =

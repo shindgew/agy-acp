@@ -1344,29 +1344,96 @@ describe("ACP v2 (experimental draft)", () => {
         });
         await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
         const ordinaryMessage = updates.find((u) => u.sessionUpdate === "user_message");
-        expect(ordinaryMessage?.messageId).toBe("0");
+        expect(ordinaryMessage?.messageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(ordinaryMessage?.messageId).not.toBe(slashMessage?.messageId);
       } finally {
         connection.close();
       }
     });
   });
 
-  it("replays history on session/resume with replayFrom start", async () => {
+  it("does not reuse a v2 user message ID after a prompt fails before persistence", async () => {
+    await withConversationsDir(async (dir) => {
+      let promptAttempts = 0;
+      const spawnProcess = ((_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        promptAttempts++;
+        if (promptAttempts === 1) {
+          return new FakeProcess([], { exitCode: 1, stderr: "prompt failed" });
+        }
+        const db = createConversationDb(dir, "conv-v2-after-failure");
+        insertStep(db, {
+          idx: 7,
+          stepType: 14,
+          stepPayload: encodeStepPayload({ userPrompt: "second prompt" })
+        });
+        db.close();
+        return new FakeProcess([]);
+      }) as unknown as SpawnFactory;
+      const updates: Array<Record<string, unknown>> = [];
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, { cwd: "/repo" });
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "first prompt" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const failedMessageId = updates.find((u) => u.sessionUpdate === "user_message")?.messageId;
+        await new Promise((resolve) => setImmediate(resolve));
+
+        updates.length = 0;
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "second prompt" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const persistedMessageId = updates.find((u) => u.sessionUpdate === "user_message")?.messageId;
+
+        expect(failedMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(persistedMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
+        expect(persistedMessageId).not.toBe(failedMessageId);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("replays a persisted v2 user message from its live message ID", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
+          { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) },
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
       };
 
       let sessionId: string;
+      let liveUserMessageId: string;
       {
-        const updates: unknown[] = [];
+        const updates: Array<Record<string, unknown>> = [];
         const client = acpV2.client({ name: "test-client" }).onNotification(
           acpV2.methods.client.session.update,
           (ctx) => {
-            updates.push(ctx.params.update);
+            updates.push(ctx.params.update as Record<string, unknown>);
           }
         );
         const connection = client.connect(createAcpV2App(appOptions));
@@ -1385,7 +1452,11 @@ describe("ACP v2 (experimental draft)", () => {
             prompt: [{ type: "text", text: "hi" }]
           });
           // Drain the async turn so the conversation binding is persisted.
-          await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+          await waitFor(() => updates.some((u) => u.state === "idle"));
+          liveUserMessageId = String(
+            updates.find((u) => u.sessionUpdate === "user_message")?.messageId
+          );
+          expect(liveUserMessageId).toMatch(/^user-[0-9a-f-]{36}$/);
         } finally {
           connection.close();
         }
@@ -1409,8 +1480,14 @@ describe("ACP v2 (experimental draft)", () => {
           await connection.agent.request(acpV2.methods.agent.session.resume, {
             sessionId,
             cwd: "/repo",
-            replayFrom: { type: "start" }
+            replayFrom: { type: "message", messageId: liveUserMessageId }
           });
+          expect(updates).toContainEqual(
+            expect.objectContaining({
+              sessionUpdate: "user_message_chunk",
+              messageId: liveUserMessageId
+            })
+          );
           expect(updates).toContainEqual(
             expect.objectContaining({
               sessionUpdate: "agent_message_chunk",

@@ -33,7 +33,8 @@ export interface ResumeSessionDeps {
     conversationId: string,
     cwd: string,
     emit: (update: v1.SessionUpdate) => Promise<void>,
-    replayFrom?: unknown
+    replayFrom?: unknown,
+    v2UserMessageIdsByStep?: Record<string, string>
   ): Promise<void>;
 }
 
@@ -91,7 +92,8 @@ export async function handleResumeSessionV2(
             });
           }
         },
-        replayFrom
+        replayFrom,
+        session.v2UserMessageIdsByStep
       );
     }
   }
