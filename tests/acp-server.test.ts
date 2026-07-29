@@ -1780,6 +1780,24 @@ describe("ACP v2 (experimental draft)", () => {
     expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "1" })).toEqual(mergedUpdates);
     expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "2" })).toEqual(mergedUpdates);
 
+    const thoughtAndAnswer = [
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-4",
+        content: { type: "text", text: "thinking" },
+        _meta: { stepIdx: 4 }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "4",
+        content: { type: "text", text: "answer" },
+        _meta: { stepIdx: 4 }
+      }
+    ] as SessionUpdate[];
+    expect(filterUpdatesForReplayFrom(thoughtAndAnswer, { type: "message", messageId: "4" })).toEqual([
+      thoughtAndAnswer[1]
+    ]);
+
     expect(filterUpdatesForReplayFrom(updates, { type: "tool_call", toolCallId: "call-1" })).toEqual([
       updates[1],
       updates[2]

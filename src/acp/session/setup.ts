@@ -184,7 +184,7 @@ export function filterUpdatesForReplayFrom(
       const rec = u as unknown as Record<string, unknown>;
       if (rec.messageId === targetId) return true;
       const range = getUpdateStepRange(u);
-      if (range != null && !isNaN(targetNum)) {
+      if (rec.sessionUpdate === "agent_message_chunk" && range != null && !isNaN(targetNum)) {
         return range.stepIdx <= targetNum && targetNum <= range.endStepIdx;
       }
       return false;
