@@ -23,6 +23,27 @@ export interface ClientFsCapability {
   writeTextFile: boolean;
 }
 
+export interface ClientTerminalCapability {
+  create: boolean;
+}
+
+export function parseClientTerminal(rawCaps: unknown): ClientTerminalCapability {
+  if (!rawCaps || typeof rawCaps !== "object") return { create: false };
+  const caps = rawCaps as Record<string, unknown>;
+  const terminal =
+    caps.terminal ??
+    (caps.clientCapabilities as Record<string, unknown> | undefined)?.terminal ??
+    (caps.capabilities as Record<string, unknown> | undefined)?.terminal;
+  if (!terminal) return { create: false };
+  if (typeof terminal === "boolean") return { create: terminal };
+  if (typeof terminal === "object") {
+    const createObj = (terminal as Record<string, unknown>).create;
+    const create = createObj != null ? Boolean(createObj) : true;
+    return { create };
+  }
+  return { create: false };
+}
+
 function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   if (!rawCaps || typeof rawCaps !== "object") return { form: false, url: false };
   const caps = rawCaps as Record<string, unknown>;
@@ -34,17 +55,23 @@ function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   };
 }
 
-/** v1 `initialize`: also returns the client's advertised `fs` and `elicitation` capabilities. */
+/** v1 `initialize`: also returns the client's advertised `fs`, `elicitation`, and `terminal` capabilities. */
 export function handleInitializeV1(
   params: V1InitializeRequest,
   agentVersion: string
-): { response: V1InitializeResponse; clientFs: ClientFsCapability; clientElicitation: ClientElicitationCapability } {
+): {
+  response: V1InitializeResponse;
+  clientFs: ClientFsCapability;
+  clientElicitation: ClientElicitationCapability;
+  clientTerminal: ClientTerminalCapability;
+} {
   return {
     clientFs: {
       readTextFile: params.clientCapabilities?.fs?.readTextFile ?? false,
       writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
     },
     clientElicitation: parseClientElicitation(params.clientCapabilities),
+    clientTerminal: parseClientTerminal(params.clientCapabilities),
     response: {
       protocolVersion:
         params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
@@ -69,7 +96,8 @@ export function handleInitializeV1(
         auth: {
           logout: {}
         },
-        elicitation: {}
+        elicitation: {},
+        terminal: {}
       } as unknown as v1.AgentCapabilities,
       authMethods: v1AuthMethods(),
       agentInfo: { ...AGENT_INFO, version: agentVersion }
@@ -80,9 +108,14 @@ export function handleInitializeV1(
 export function handleInitializeV2(
   params: V2InitializeRequest,
   agentVersion: string
-): { response: V2InitializeResponse; clientElicitation: ClientElicitationCapability } {
+): {
+  response: V2InitializeResponse;
+  clientElicitation: ClientElicitationCapability;
+  clientTerminal: ClientTerminalCapability;
+} {
   return {
     clientElicitation: parseClientElicitation(params),
+    clientTerminal: parseClientTerminal(params),
     response: {
       protocolVersion:
         params.protocolVersion === v2.PROTOCOL_VERSION ? params.protocolVersion : v2.PROTOCOL_VERSION,
@@ -97,7 +130,8 @@ export function handleInitializeV2(
           additionalDirectories: {}
         },
         auth: {},
-        elicitation: {}
+        elicitation: {},
+        terminal: {}
       } as unknown as v2.AgentCapabilities,
       // Non-empty authMethods commits the agent to auth/login + auth/logout.
       authMethods: v2AuthMethods()

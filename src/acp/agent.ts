@@ -152,6 +152,7 @@ export class AcpAgent {
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
   #clientFs = { readTextFile: false, writeTextFile: false };
   #clientElicitation = { form: false, url: false };
+  #clientTerminal = { create: false };
 
   constructor(options: AcpAgentOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -170,18 +171,24 @@ export class AcpAgent {
     this.loadModelCache();
   }
 
+  get clientTerminal(): { create: boolean } {
+    return this.#clientTerminal;
+  }
+
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
-    const { response, clientFs, clientElicitation } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
+    const { response, clientFs, clientElicitation, clientTerminal } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
     this.#clientFs = clientFs;
     this.#clientElicitation = clientElicitation;
+    this.#clientTerminal = clientTerminal;
     return response;
   }
 
   async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
     await this.ensureAgyReady();
-    const { response, clientElicitation } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
+    const { response, clientElicitation, clientTerminal } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
     this.#clientElicitation = clientElicitation;
+    this.#clientTerminal = clientTerminal;
     return response;
   }
 
