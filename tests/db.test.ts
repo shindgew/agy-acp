@@ -975,6 +975,83 @@ describe("Translator", () => {
     ]);
   });
 
+  it("buffers a growing system-message envelope until it can be classified", () => {
+    const db = createConversationDb(dir, "conv-growing-sys-msg");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-sys-msg")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    updateStepPayload(
+      db,
+      1,
+      encodeStepPayload({
+        agentText: {
+          text: "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished"
+        }
+      })
+    );
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("buffers all whitespace prefixes accepted by the system-message envelope", () => {
+    const db = createConversationDb(dir, "conv-growing-whitespace-sys-msg");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-whitespace-sys-msg")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    updateStepPayload(
+      db,
+      1,
+      encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n[Message] payload" } })
+    );
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("releases a buffered system-message prefix when growing text proves ordinary", () => {
+    const db = createConversationDb(dir, "conv-growing-sys-msg-prose");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-sys-msg-prose")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    const prose = "<SYSTEM_MESSAGE>\n[Messagical text is not an internal notification.";
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: { text: prose } }));
+    expect(translator.translate(conn.readAfter(0))).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: prose }
+      }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
   it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose or at start", () => {
     const db = createConversationDb(dir, "conv-prose-sys-msg");
     const proseText1 = "The error notification contains <SYSTEM_MESSAGE> tag.";
