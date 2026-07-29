@@ -135,6 +135,32 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("uses one message id for consecutive agent-text rows in streaming and replay", () => {
+    const db = createConversationDb(dir, "conv-stream-message-group");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: " world" }) });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toMatchObject([
+      { sessionUpdate: "agent_message_chunk", messageId: "1" },
+      { sessionUpdate: "agent_message_chunk", messageId: "1" }
+    ]);
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toMatchObject([
+      { sessionUpdate: "agent_message_chunk", messageId: "1" }
+    ]);
+  });
+
   it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {

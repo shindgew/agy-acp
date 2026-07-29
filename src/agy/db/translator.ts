@@ -4,8 +4,8 @@
 // stream (step type 15):
 //
 //   - streaming emits the newly-appended slice each poll (text grows in place
-//     at a fixed idx), and re-emits tool steps as `tool_call_update` when their
-//     status/content snapshot changes;
+//     at a fixed idx), keeps consecutive text rows under one message id, and
+//     re-emits tool steps as `tool_call_update` when their status/content snapshot changes;
 //   - replay buffers consecutive agent-text parts and flushes them as one
 //     message at each boundary, applying narration filtering across the group.
 //
@@ -119,19 +119,33 @@ export class Translator {
   /** Translate a batch of rows into ordered ACP updates, advancing state. */
   translate(rows: StepRow[]): SessionUpdate[] {
     const out: SessionUpdate[] = [];
-    for (const row of rows) this.translateRow(row, out);
+    let streamingAgentMessageId: string | null = null;
+    for (const row of rows) {
+      if (this.opts.mode === "stream") {
+        if (row.stepType === 15) {
+          streamingAgentMessageId ??= String(row.idx);
+        } else {
+          streamingAgentMessageId = null;
+        }
+      }
+      this.translateRow(row, out, streamingAgentMessageId);
+    }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
     if (out.length > 0) this._hadUpdates = true;
     return out;
   }
 
-  private translateRow(row: StepRow, out: SessionUpdate[]): void {
+  private translateRow(
+    row: StepRow,
+    out: SessionUpdate[],
+    streamingAgentMessageId: string | null
+  ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out);
+        this.handleAgentText(row, out, streamingAgentMessageId);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -247,14 +261,18 @@ export class Translator {
     this.emitThought(row.idx, thoughtChunk(narration, `title-thought-${row.idx}`), out);
   }
 
-  private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
+  private handleAgentText(
+    row: StepRow,
+    out: SessionUpdate[],
+    streamingAgentMessageId: string | null
+  ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
       this.emitThought(row.idx, thoughtChunk(thought, `agent-thought-${row.idx}`), out);
     }
 
     const text = row.stepPayload.agentText?.text ?? "";
-    const messageId = String(row.idx);
+    const messageId = streamingAgentMessageId ?? String(row.idx);
 
     if (this.opts.mode === "replay") {
       if (text.length > 0) {
