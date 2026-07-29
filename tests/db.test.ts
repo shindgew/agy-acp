@@ -662,6 +662,97 @@ describe("Translator", () => {
     expect(update.locations).toEqual([{ path: absFile }]);
   });
 
+  it("does not emit location for replayed view_file step when file does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-view.txt");
+    const db = createConversationDb(dir, "conv-view-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "view-missing",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: missingFile })
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: `file://${missingFile}`,
+          content: "cached historical content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-view-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
+    const db = createConversationDb(dir, "conv-write-diff-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-rel",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"a.ts"}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "a.ts",
+          content: "export const x = 1;\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-rel",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "a.ts",
+              CodeContent: "export const x = 2;\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-diff-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-rel"
+    ) as {
+      content?: Array<{ type?: string; path?: string; oldText?: string | null; newText?: string }>;
+    };
+    expect(write).toBeTruthy();
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({
+      type: "diff",
+      oldText: "export const x = 1;\n",
+      newText: "export const x = 2;\n"
+    });
+  });
+
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
     const db = createConversationDb(dir, "conv-exec-pending");
     insertStep(db, {

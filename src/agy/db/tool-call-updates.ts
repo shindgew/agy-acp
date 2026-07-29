@@ -333,7 +333,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
     title = shown ? `Read ${shown}` : "Read file";
     if (shown && endLine !== null) title += `:${startLine === 0 ? 1 : startLine}-${endLine}`;
-    if (resolvedFile && !isDirectory(resolvedFile)) locations.push({ path: resolvedFile, line: startLine });
+    if (resolvedFile && isFile(resolvedFile)) locations.push({ path: resolvedFile, line: startLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -349,7 +349,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
           fileSizeOrTotal: asNum(view?.fileSizeOrTotal)
         })
       ) {
-        fileContents.set(path.resolve(filePath), body);
+        fileContents.set(path.resolve(resolvedFile ?? filePath), body);
       }
     }
   }
