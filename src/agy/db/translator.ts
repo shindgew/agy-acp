@@ -16,6 +16,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { filterNarration, isNarration } from "./narration.js";
+import { isSystemMessage } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 import { sessionUpdateFromStep } from "./updates.js";
@@ -126,8 +127,9 @@ export class Translator {
       if (this.opts.mode === "stream") {
         if (row.stepType === 15) {
           const text = row.stepPayload.agentText?.text ?? "";
-          if (text.length > 0) streamingAgentMessageId ??= String(row.idx);
-          const visible = text.length > 0 && !(this.opts.skipNarration && isNarration(text));
+          const isSysMsg = isSystemMessage(text);
+          if (text.length > 0 && !isSysMsg) streamingAgentMessageId ??= String(row.idx);
+          const visible = text.length > 0 && !isSysMsg && !(this.opts.skipNarration && isNarration(text));
           streamingNeedsSeparator = visible && streamingHasVisibleText;
           if (visible) streamingHasVisibleText = true;
         } else {
@@ -281,6 +283,8 @@ export class Translator {
     }
 
     const text = row.stepPayload.agentText?.text ?? "";
+    if (isSystemMessage(text)) return;
+
     const messageId = streamingAgentMessageId ?? String(row.idx);
 
     if (this.opts.mode === "replay") {
