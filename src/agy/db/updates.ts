@@ -18,6 +18,7 @@ import {
   type UpdateContext
 } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
+import { isSystemMessage } from "./system-message.js";
 
 export type { UpdateContext } from "./tool-call-updates.js";
 
@@ -31,9 +32,11 @@ export type { UpdateContext } from "./tool-call-updates.js";
 const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
 
 /** Step type 15 — a chunk of the agent's streamed text message (+ optional thought). */
-function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] {
+function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] | null {
   const text = stepRow.stepPayload.agentText?.text ?? "";
   const thought = stepRow.stepPayload.agentText?.thought;
+
+  const hasText = text.length > 0 && !isSystemMessage(text);
 
   if (thought) {
     const updates: SessionUpdate[] = [
@@ -43,7 +46,7 @@ function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] {
         messageId: `agent-thought-${stepRow.idx}`
       }
     ];
-    if (text) {
+    if (hasText) {
       updates.push({
         sessionUpdate: "agent_message_chunk",
         content: { type: "text", text },
@@ -52,6 +55,8 @@ function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] {
     }
     return updates;
   }
+
+  if (!hasText) return null;
 
   return {
     sessionUpdate: "agent_message_chunk",
