@@ -625,6 +625,43 @@ describe("Translator", () => {
     expect(update.locations).toEqual([{ path: file }]);
   });
 
+  it("resolves relative SearchPath against session cwd for grep_search steps", () => {
+    const relFile = "subfolder/rel-file.txt";
+    const absFolder = path.join(dir, "subfolder");
+    fs.mkdirSync(absFolder, { recursive: true });
+    const absFile = path.join(dir, relFile);
+    fs.writeFileSync(absFile, "relative content");
+
+    const db = createConversationDb(dir, "conv-grep-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-rel",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "relative", SearchPath: relFile })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "relative"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: absFile }]);
+  });
+
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
     const db = createConversationDb(dir, "conv-exec-pending");
     insertStep(db, {

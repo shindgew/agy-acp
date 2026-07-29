@@ -245,6 +245,14 @@ function fsPath(p: string | null | undefined): string | null {
   }
 }
 
+/** Resolve relative or `file://` path against session cwd. */
+function resolvePath(filePath: string | null | undefined, cwd?: string): string | null {
+  const p = fsPath(filePath);
+  if (!p) return null;
+  if (path.isAbsolute(p)) return path.resolve(p);
+  return cwd ? path.resolve(cwd, p) : path.resolve(p);
+}
+
 /** Return true if `filePath` is known to be a directory on disk. */
 function isDirectory(filePath: string | null | undefined): boolean {
   if (!filePath) return false;
@@ -318,13 +326,14 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   } else {
     const filePath =
       fsPath(asStr(pick(rawInput, "AbsolutePath", "absolutePath", "FilePath"))) ?? fsPath(asStr(view?.fileUri));
+    const resolvedFile = resolvePath(filePath, displayCwd);
     const shown = filePath ? toDisplayPath(filePath, displayCwd) : "";
     const startLine = asNum(pick(rawInput, "StartLine", "startLine")) ?? asNum(view?.startLine) ?? 1;
     const endLine = asNum(pick(rawInput, "EndLine", "endLine")) ?? asNum(view?.endLine);
 
     title = shown ? `Read ${shown}` : "Read file";
     if (shown && endLine !== null) title += `:${startLine === 0 ? 1 : startLine}-${endLine}`;
-    if (filePath && !isDirectory(filePath)) locations.push({ path: filePath, line: startLine });
+    if (resolvedFile && !isDirectory(resolvedFile)) locations.push({ path: resolvedFile, line: startLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -376,9 +385,10 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
   if (grep || name === "grep_search" || stepType === 7) {
     const query = asStr(grep?.query) ?? asStr(pick(rawInput, "Query", "query")) ?? "";
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
+    const resolvedPath = resolvePath(searchPath, displayCwd);
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (searchPath && isFile(searchPath)) locations.push({ path: searchPath });
+    if (resolvedPath && isFile(resolvedPath)) locations.push({ path: resolvedPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
@@ -536,6 +546,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const displayCwd = fsPath(cwd) ?? undefined;
 
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
+  const resolvedTarget = resolvePath(targetFile, displayCwd) ?? targetFile;
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update).
@@ -555,11 +566,11 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     if (targetFile) {
       // Prefer prior view_file/write content as oldText when known; otherwise null
       // (new file or prior content never observed in this translator pass).
-      const cacheKey = path.resolve(targetFile);
+      const cacheKey = path.resolve(resolvedTarget);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
-      if (!isDirectory(targetFile)) locations.push({ path: targetFile });
+      if (!isDirectory(resolvedTarget)) locations.push({ path: resolvedTarget });
     }
   } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
@@ -573,9 +584,9 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
       content.push({ type: "diff", path: targetFile, oldText, newText });
 
-      if (!isDirectory(targetFile)) {
+      if (!isDirectory(resolvedTarget)) {
         const line = asNum(pick(chunk, "StartLine", "startLine"));
-        locations.push(line !== null ? { path: targetFile, line } : { path: targetFile });
+        locations.push(line !== null ? { path: resolvedTarget, line } : { path: resolvedTarget });
       }
     }
   }
