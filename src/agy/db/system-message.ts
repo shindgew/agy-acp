@@ -4,9 +4,9 @@
 // assistant response text in ACP clients.
 
 /**
- * True if the text is an internal `<SYSTEM_MESSAGE>` envelope injected by agy
- * (starts with `<SYSTEM_MESSAGE>` at the beginning of the text payload).
+ * True if the text matches an internal agy system message envelope
+ * (starts with `<SYSTEM_MESSAGE>\n[Message]`).
  */
 export function isSystemMessage(text: string): boolean {
-  return /^\s*<SYSTEM_MESSAGE>/i.test(text);
+  return /^\s*<SYSTEM_MESSAGE>\s*\n\[Message\]\s+/i.test(text);
 }

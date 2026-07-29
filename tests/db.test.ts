@@ -975,10 +975,12 @@ describe("Translator", () => {
     ]);
   });
 
-  it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose", () => {
+  it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose or at start", () => {
     const db = createConversationDb(dir, "conv-prose-sys-msg");
-    const proseText = "The error notification contains <SYSTEM_MESSAGE> tag.";
-    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText } }) });
+    const proseText1 = "The error notification contains <SYSTEM_MESSAGE> tag.";
+    const proseText2 = "<SYSTEM_MESSAGE> tag is used by agy for internal task notifications.";
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText1 } }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText2 } }) });
     db.close();
 
     const conn = ConversationDb.open(dir, "conv-prose-sys-msg")!;
@@ -990,8 +992,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: proseText },
-        _meta: { stepIdx: 1 }
+        content: { type: "text", text: `${proseText1}\n${proseText2}` },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
       }
     ]);
   });
