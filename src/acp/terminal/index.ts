@@ -154,5 +154,3 @@ export function terminalUpdateForExecute(
 
   return update as V2SessionUpdate;
 }
-
-export * from "./client.js";
