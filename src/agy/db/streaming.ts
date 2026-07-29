@@ -151,10 +151,13 @@ export class StreamPoller {
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
-    // agent message", so those turns don't hang until the deadline.
+    // agent message", so those turns don't hang until the deadline. Exclude
+    // stepType 14 (user prompt), which is inserted with status 3 as the turn
+    // opens before agy appends any assistant response steps.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
       latest !== undefined &&
+      latest.stepType !== 14 &&
       (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
