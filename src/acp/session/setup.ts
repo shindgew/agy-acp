@@ -179,11 +179,15 @@ export function filterUpdatesForReplayFrom(
   if (type === "message") {
     const targetId = typeof replayFrom.messageId === "string" ? replayFrom.messageId : undefined;
     if (!targetId) return updates;
+    const targetNum = parseInt(targetId, 10);
     const index = updates.findIndex((u) => {
       const rec = u as unknown as Record<string, unknown>;
       if (rec.messageId === targetId) return true;
       const range = getUpdateStepRange(u);
-      return range != null && String(range.stepIdx) === targetId;
+      if (range != null && !isNaN(targetNum)) {
+        return range.stepIdx <= targetNum && targetNum <= range.endStepIdx;
+      }
+      return false;
     });
     return index >= 0 ? updates.slice(index) : [];
   }

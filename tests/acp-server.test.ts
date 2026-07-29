@@ -1729,6 +1729,7 @@ describe("ACP v2 (experimental draft)", () => {
 
     expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "step", stepIdx: 2 })).toEqual(mergedUpdates);
     expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "1" })).toEqual(mergedUpdates);
+    expect(filterUpdatesForReplayFrom(mergedUpdates, { type: "message", messageId: "2" })).toEqual(mergedUpdates);
 
     expect(filterUpdatesForReplayFrom(updates, { type: "tool_call", toolCallId: "call-1" })).toEqual([
       updates[1],
