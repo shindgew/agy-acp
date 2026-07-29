@@ -464,6 +464,100 @@ describe("Translator", () => {
     expect(body).toContain("README.md");
   });
 
+  it("does not emit directory Cwd in locations for run_command steps (regression for issue #16)", () => {
+    const db = createConversationDb(dir, "conv-exec-no-dir-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c-dir",
+            namePrimary: "run_command",
+            rawInputJson: JSON.stringify({ CommandLine: "ls", Cwd: dir })
+          })
+        }),
+        commandResult: encodeCommandResult({
+          cwd: dir,
+          exitCode: 0,
+          output: "ok\n",
+          command: "ls"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-no-dir-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory path in locations for list_dir steps", () => {
+    const db = createConversationDb(dir, "conv-list-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 9,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "l-dir",
+            namePrimary: "list_dir",
+            rawInputJson: JSON.stringify({ DirectoryPath: dir })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-list-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory SearchPath in locations for grep_search steps", () => {
+    const db = createConversationDb(dir, "conv-grep-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-dir",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: dir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${dir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
     const db = createConversationDb(dir, "conv-exec-pending");
     insertStep(db, {
