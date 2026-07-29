@@ -1809,6 +1809,38 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("does not treat stepType 14 (user prompt, status 3) as a turn completion candidate", () => {
+    const db = createConversationDb(dir, "conv-user-prompt-only");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Hello assistant" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-user-prompt-only",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Hello user" })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
