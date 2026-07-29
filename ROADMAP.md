@@ -57,10 +57,11 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] [`tool_call_update`](https://agentclientprotocol.com/protocol/v1/tool-calls): progressive status/content updates
 - [x] [`diff`](https://agentclientprotocol.com/protocol/v1/schema#diff): edit content type; full-file writes use prior content when known
 - [x] [`session_info_update`](https://agentclientprotocol.com/rfds/session-info-update): titles from the conversation DB
-- [x] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): interactive PTY bridge for `run_command` + file tools
+- [x] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): interactive PTY bridge for `run_command`, file tools, and multi-select/multi-question `ask_question`
 - [x] [`fs/read_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client read-through when advertised
 - [x] [`fs/write_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client write-through for editor review UI when advertised
 - [x] [`tool_call`](https://agentclientprotocol.com/protocol/v1/tool-calls): execute tools surface command + captured stdout/stderr (DB field 28)
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ falls back to `session/request_permission`
 - [x] [`plan`](https://agentclientprotocol.com/protocol/v1/agent-plan): classic plan entries from brain markdown (checkbox status only)
 - [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands): curated `mode` / `plan` / `model` / `effort` (config intercept, not agy TUI panels)
 
@@ -68,9 +69,7 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 
 Need interactive agy control plane or client terminal protocol beyond DB polling:
 
-- [ ] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): expand for multi-select / multi-question `ask_question` and remaining status-9 tools (unsupported paths fail closed)
 - [ ] [`terminal/create`](https://agentclientprotocol.com/protocol/v1/terminals): client-executed terminal suite (`output` / `release` / `wait_for_exit` / `kill` too) — blocked while agy owns the shell
-- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ falls back to `session/request_permission`
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor on `session/new`, real `mcpCapabilities`, route `mcp/message` · `mcp/connect` · `mcp/disconnect` when agy can consume external servers
 
 ### Medium priority

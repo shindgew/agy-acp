@@ -44,7 +44,7 @@ body:
       placeholder: |
         - OS: [e.g. macOS 14.5 / Linux / Windows]
         - Node.js Version: [e.g. 22.x]
-        - agy-acp Version: [e.g. 0.3.3]
+        - agy-acp Version: [e.g. 0.4.0]
         - ACP Client / IDE: [e.g. Zed / VS Code / Antigravity CLI]
         - Antigravity CLI Version: [e.g. agy 2.x]
     validations:
