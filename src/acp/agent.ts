@@ -357,7 +357,8 @@ export class AcpAgent {
       notifyCurrentModeUpdate,
       notifyConfigOptionUpdateV1,
       clientFileSystemV1: (client, sessionId) => this.clientFileSystemV1(client, sessionId),
-      clientElicitationV1: () => this.#clientElicitation
+      clientElicitationV1: () => this.#clientElicitation,
+      clientTerminalV1: () => this.#clientTerminal
     };
   }
 
@@ -367,7 +368,8 @@ export class AcpAgent {
       applyConfigOption: (sessionId, configId, value) => this.applyConfigOption(sessionId, configId, value),
       persistSession: (id, session) => this.persistSession(id, session),
       notifyConfigOptionUpdateV2,
-      clientElicitationV2: () => this.#clientElicitation
+      clientElicitationV2: () => this.#clientElicitation,
+      clientTerminalV2: () => this.#clientTerminal
     };
   }
 
