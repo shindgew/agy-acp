@@ -19,6 +19,8 @@ export interface UpdateContext {
   cwd?: string;
   /** Prior file contents for full-file write diffs. */
   fileContents?: FileContentCache;
+  /** Candidate location path -> readability observed while translating. */
+  locationReadability?: Map<string, boolean>;
 }
 
 /** Cap on fetched URL / large tool bodies surfaced in session updates. */
@@ -266,6 +268,13 @@ export function isReadableFile(filePath: string | null | undefined): boolean {
   }
 }
 
+function isReadableLocation(filePath: string | null, ctx?: UpdateContext): boolean {
+  if (!filePath) return false;
+  const readable = isReadableFile(filePath);
+  ctx?.locationReadability?.set(filePath, readable);
+  return readable;
+}
+
 // --- per-tool builders --------------------------------------------------------
 // agy's rawInputJson keys are inconsistently PascalCase/camelCase across tool
 // versions (`TargetFile` vs `targetFile`), so every lookup below tries both.
@@ -327,7 +336,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
     title = shown ? `Read ${shown}` : "Read file";
     if (shown && endLine !== null) title += `:${locationLine}-${endLine}`;
-    if (resolvedFile && isReadableFile(resolvedFile)) locations.push({ path: resolvedFile, line: locationLine });
+    if (isReadableLocation(resolvedFile, ctx)) locations.push({ path: resolvedFile, line: locationLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -382,7 +391,7 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const resolvedPath = resolvePath(searchPath, displayCwd);
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (resolvedPath && isReadableFile(resolvedPath)) locations.push({ path: resolvedPath });
+    if (isReadableLocation(resolvedPath, ctx)) locations.push({ path: resolvedPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
@@ -564,7 +573,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
-      if (isReadableFile(resolvedTarget)) locations.push({ path: resolvedTarget });
+      if (isReadableLocation(resolvedTarget, ctx)) locations.push({ path: resolvedTarget });
     }
   } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
@@ -578,7 +587,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
       content.push({ type: "diff", path: targetFile, oldText, newText });
 
-      if (isReadableFile(resolvedTarget)) {
+      if (isReadableLocation(resolvedTarget, ctx)) {
         const line = asNum(pick(chunk, "StartLine", "startLine"));
         locations.push(line !== null ? { path: resolvedTarget, line } : { path: resolvedTarget });
       }

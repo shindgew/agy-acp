@@ -1677,6 +1677,37 @@ describe("ReplayCache", () => {
     expect(rebuilt?.updates).not.toBe(first?.updates);
   });
 
+  it("rebuilds cached locations when a referenced file is restored", () => {
+    const file = path.join(dir, "restored-location.txt");
+    const db = createConversationDb(dir, "conv-replay-restored-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "restored-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+
+    fs.writeFileSync(file, "content");
+
+    const rebuilt = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+    expect(rebuilt?.updates).not.toBe(first?.updates);
+  });
+
   it("returns null for a missing conversation", () => {
     const cache = new ReplayCache(8);
     expect(cache.get(dir, "missing", { skipNarration: false })).toBeNull();

@@ -93,6 +93,8 @@ export class Translator {
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
+  // Candidate ACP location paths and their readability during the latest translation.
+  readonly locationReadability = new Map<string, boolean>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
   private readonly pendingAgentParts: string[] = [];
   // Replay: message id for the current buffered agent-text group.
@@ -182,7 +184,8 @@ export class Translator {
   private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
-      fileContents: this.fileContents
+      fileContents: this.fileContents,
+      locationReadability: this.locationReadability
     });
     if (Array.isArray(update)) {
       for (const item of update) this.emitProgressive(row.idx, item, out);
