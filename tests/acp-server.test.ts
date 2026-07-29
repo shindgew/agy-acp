@@ -62,6 +62,7 @@ describe("initialize", () => {
       expect(response.agentCapabilities?.promptCapabilities?.image).toBe(true);
       expect(response.agentCapabilities?.sessionCapabilities?.additionalDirectories).toEqual({});
       expect(response.agentCapabilities?.auth?.logout).toEqual({});
+      expect(response.agentCapabilities).not.toHaveProperty("terminal");
       expect(response.authMethods).toEqual([
         expect.objectContaining({ type: "terminal", id: "agy-login", args: ["--login"] })
       ]);
@@ -1234,6 +1235,7 @@ describe("ACP v2 (experimental draft)", () => {
       expect(response.capabilities?.session?.prompt?.image).toEqual({});
       expect(response.capabilities?.session?.prompt?.embeddedContext).toEqual({});
       expect(response.capabilities?.session?.additionalDirectories).toEqual({});
+      expect(response.capabilities).not.toHaveProperty("terminal");
       expect(installSpy).toHaveBeenCalledOnce();
     } finally {
       installSpy.mockRestore();
