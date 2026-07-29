@@ -8,12 +8,18 @@ import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/ex
 
 export type AcpClientContext = V1AgentContext | V2AgentContext;
 
+export interface EnvVariable {
+  name: string;
+  value: string;
+}
+
 export interface CreateTerminalParams {
   sessionId: string;
   command: string;
   args?: string[];
   cwd?: string;
-  env?: Record<string, string>;
+  env?: EnvVariable[] | Record<string, string>;
+  outputByteLimit?: number;
   outputLimit?: number;
 }
 
@@ -52,6 +58,18 @@ export interface TerminalKillParams {
   terminalId: string;
 }
 
+export interface ExecuteClientTerminalParams extends CreateTerminalParams {
+  timeoutMs?: number;
+}
+
+export interface ExecuteClientTerminalResult {
+  terminalId: string;
+  exitCode?: number | null;
+  signal?: string;
+  output: string;
+  truncated?: boolean;
+}
+
 /**
  * ACP `terminal/create` client RPC call:
  * Request the client editor to create a new terminal instance to execute a command.
@@ -60,7 +78,27 @@ export async function createTerminal(
   client: AcpClientContext,
   params: CreateTerminalParams
 ): Promise<CreateTerminalResult> {
-  return await client.request("terminal/create", params as unknown as Record<string, unknown>);
+  const wireParams: Record<string, unknown> = {
+    sessionId: params.sessionId,
+    command: params.command
+  };
+  if (params.args) wireParams.args = params.args;
+  if (params.cwd) wireParams.cwd = params.cwd;
+
+  if (params.env) {
+    if (Array.isArray(params.env)) {
+      wireParams.env = params.env;
+    } else {
+      wireParams.env = Object.entries(params.env).map(([name, value]) => ({ name, value }));
+    }
+  }
+
+  const byteLimit = params.outputByteLimit ?? params.outputLimit;
+  if (typeof byteLimit === "number") {
+    wireParams.outputByteLimit = byteLimit;
+  }
+
+  return await client.request("terminal/create", wireParams);
 }
 
 /**
@@ -105,4 +143,41 @@ export async function killTerminal(
   params: TerminalKillParams
 ): Promise<Record<string, unknown>> {
   return await client.request("terminal/kill", params as unknown as Record<string, unknown>);
+}
+
+/**
+ * Execute a complete client-managed terminal command flow:
+ * 1. `terminal/create`
+ * 2. `terminal/wait_for_exit`
+ * 3. `terminal/output`
+ * 4. `terminal/release`
+ */
+export async function executeClientTerminal(
+  client: AcpClientContext,
+  params: ExecuteClientTerminalParams
+): Promise<ExecuteClientTerminalResult> {
+  const { terminalId } = await createTerminal(client, params);
+  try {
+    const exitStatus = await waitForTerminalExit(client, {
+      sessionId: params.sessionId,
+      terminalId,
+      timeoutMs: params.timeoutMs
+    });
+    const { output, truncated } = await getTerminalOutput(client, {
+      sessionId: params.sessionId,
+      terminalId
+    });
+    return {
+      terminalId,
+      exitCode: exitStatus.exitCode,
+      signal: exitStatus.signal,
+      output,
+      truncated
+    };
+  } finally {
+    await releaseTerminal(client, {
+      sessionId: params.sessionId,
+      terminalId
+    }).catch(() => {});
+  }
 }

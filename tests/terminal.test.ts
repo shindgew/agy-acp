@@ -10,6 +10,7 @@ import {
   releaseTerminal,
   waitForTerminalExit,
   killTerminal,
+  executeClientTerminal,
   type AcpClientContext
 } from "../src/acp/terminal/index.js";
 
@@ -32,7 +33,7 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
       expect(parseClientTerminal({ clientCapabilities: { terminal: { create: false } } })).toEqual({ create: false });
     });
 
-    it("advertises terminal capability in v1 initialize response", () => {
+    it("parses clientTerminal capability in v1 initialize response without polluting agentCapabilities schema", () => {
       const { response, clientTerminal } = handleInitializeV1(
         {
           protocolVersion: 1,
@@ -42,7 +43,7 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
       );
 
       expect(clientTerminal).toEqual({ create: true });
-      expect((response.agentCapabilities as unknown as Record<string, unknown>).terminal).toEqual({});
+      expect((response.agentCapabilities as unknown as Record<string, unknown>).terminal).toBeUndefined();
     });
 
     it("advertises terminal capability in v2 initialize response", () => {
@@ -60,7 +61,7 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
   });
 
   describe("Client terminal RPC callers", () => {
-    it("createTerminal calls terminal/create via client.request", async () => {
+    it("createTerminal calls terminal/create with outputByteLimit and array env wire format", async () => {
       const requestMock = vi.fn().mockResolvedValue({ terminalId: "term-123" });
       const client = { request: requestMock } as unknown as AcpClientContext;
 
@@ -79,8 +80,8 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
         command: "npm",
         args: ["test"],
         cwd: "/app",
-        env: { NODE_ENV: "test" },
-        outputLimit: 4096
+        env: [{ name: "NODE_ENV", value: "test" }],
+        outputByteLimit: 4096
       });
     });
 
@@ -147,6 +148,50 @@ describe("ACP Client Terminal RPC suite (terminal/*)", () => {
       expect(requestMock).toHaveBeenCalledWith("terminal/kill", {
         sessionId: "sess-1",
         terminalId: "term-123"
+      });
+    });
+
+    it("executeClientTerminal orchestrates create -> wait_for_exit -> output -> release lifecycle", async () => {
+      const requestMock = vi.fn().mockImplementation((method: string) => {
+        if (method === "terminal/create") return Promise.resolve({ terminalId: "term-flow-1" });
+        if (method === "terminal/wait_for_exit") return Promise.resolve({ exitCode: 0 });
+        if (method === "terminal/output") return Promise.resolve({ output: "flow success", truncated: false });
+        if (method === "terminal/release") return Promise.resolve({});
+        return Promise.reject(new Error(`Unexpected method: ${method}`));
+      });
+      const client = { request: requestMock } as unknown as AcpClientContext;
+
+      const result = await executeClientTerminal(client, {
+        sessionId: "sess-1",
+        command: "ls",
+        args: ["-la"]
+      });
+
+      expect(result).toEqual({
+        terminalId: "term-flow-1",
+        exitCode: 0,
+        signal: undefined,
+        output: "flow success",
+        truncated: false
+      });
+
+      expect(requestMock).toHaveBeenNthCalledWith(1, "terminal/create", {
+        sessionId: "sess-1",
+        command: "ls",
+        args: ["-la"]
+      });
+      expect(requestMock).toHaveBeenNthCalledWith(2, "terminal/wait_for_exit", {
+        sessionId: "sess-1",
+        terminalId: "term-flow-1",
+        timeoutMs: undefined
+      });
+      expect(requestMock).toHaveBeenNthCalledWith(3, "terminal/output", {
+        sessionId: "sess-1",
+        terminalId: "term-flow-1"
+      });
+      expect(requestMock).toHaveBeenNthCalledWith(4, "terminal/release", {
+        sessionId: "sess-1",
+        terminalId: "term-flow-1"
       });
     });
   });

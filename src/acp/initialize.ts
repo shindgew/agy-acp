@@ -96,8 +96,7 @@ export function handleInitializeV1(
         auth: {
           logout: {}
         },
-        elicitation: {},
-        terminal: {}
+        elicitation: {}
       } as unknown as v1.AgentCapabilities,
       authMethods: v1AuthMethods(),
       agentInfo: { ...AGENT_INFO, version: agentVersion }
