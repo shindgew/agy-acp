@@ -695,6 +695,35 @@ describe("Translator", () => {
     expect(update.locations).toBeUndefined();
   });
 
+  it("decodes Windows file URIs with drive letters in view_file fallback", () => {
+    const winFile = path.join(dir, "win.txt");
+    fs.writeFileSync(winFile, "content");
+    const fileUri = `file:///${winFile.replace(/\\/g, "/")}`;
+    const db = createConversationDb(dir, "conv-win-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri,
+          startLine: 1,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-win-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: winFile, line: 1 }]);
+  });
+
   it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
     const db = createConversationDb(dir, "conv-write-diff-rel");
     insertStep(db, {

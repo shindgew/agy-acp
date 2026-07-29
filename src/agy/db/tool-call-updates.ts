@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
 import { isPlanFile, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
@@ -239,9 +240,9 @@ function fsPath(p: string | null | undefined): string | null {
   if (!p) return null;
   if (!p.startsWith("file://")) return p;
   try {
-    return decodeURIComponent(new URL(p).pathname);
+    return fileURLToPath(p);
   } catch {
-    return p.slice("file://".length);
+    return decodeURIComponent(p.slice("file://".length));
   }
 }
 
