@@ -1618,6 +1618,33 @@ describe("ACP v2 (experimental draft)", () => {
     expect(res2[3]).toMatchObject({ sessionUpdate: "tool_call_update", status: "completed" });
   });
 
+  it("uses a terminal output snapshot when new output does not extend the previous snapshot", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+    const update = (output: string) => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "rewritten-output",
+      title: "build",
+      kind: "execute",
+      status: "in_progress",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { output }
+    } as unknown as SessionUpdate);
+
+    expandSessionUpdateToV2(update("abc"), termTracker, toolTracker);
+    const replaced = expandSessionUpdateToV2(
+      update("XYZ12"),
+      termTracker,
+      toolTracker
+    ) as Array<Record<string, unknown>>;
+
+    expect(replaced.some((item) => item.sessionUpdate === "terminal_output_chunk")).toBe(false);
+    expect(replaced[0]).toMatchObject({
+      sessionUpdate: "terminal_update",
+      output: { data: Buffer.from("XYZ12", "utf8").toString("base64") }
+    });
+  });
+
   it("emits tool_call_content_chunk when new content items are appended to a previously empty tool call", () => {
     const termTracker = createTerminalOutputTracker();
     const toolTracker = createToolCallContentTracker();

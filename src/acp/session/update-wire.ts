@@ -121,13 +121,13 @@ function cleanContentItem(item: unknown): unknown {
   return item;
 }
 
-export type TerminalOutputTracker = Map<string, number>;
+export type TerminalOutputTracker = Map<string, string>;
 export type ToolCallContentTracker = Map<string, number>;
 
 const MAX_TERMINAL_TRACKER_SIZE = 500;
 
 export function createTerminalOutputTracker(): TerminalOutputTracker {
-  return new Map<string, number>();
+  return new Map<string, string>();
 }
 
 export function createToolCallContentTracker(): ToolCallContentTracker {
@@ -144,10 +144,10 @@ export function resetTerminalOutputTracker(): void {
   defaultToolCallContentTracker.clear();
 }
 
-function setTrackedOutputLength(
+function setTrackedOutput(
   tracker: TerminalOutputTracker,
   terminalId: string,
-  length: number
+  output: string
 ): void {
   if (!tracker.has(terminalId) && tracker.size >= MAX_TERMINAL_TRACKER_SIZE) {
     const oldestKey = tracker.keys().next().value;
@@ -155,7 +155,7 @@ function setTrackedOutputLength(
       tracker.delete(oldestKey);
     }
   }
-  tracker.set(terminalId, length);
+  tracker.set(terminalId, output);
 }
 
 function setTrackedToolContentCount(
@@ -199,15 +199,15 @@ export function sessionUpdateToV1(
         };
         metaObj.terminal_info = { terminal_id: meta.terminalId };
         if (meta.output != null && meta.output.length > 0) {
-          const prevLen = tracker.get(meta.terminalId) ?? 0;
-          if (meta.output.length > prevLen) {
-            const newChunk = meta.output.slice(prevLen);
+          const previousOutput = tracker.get(meta.terminalId) ?? "";
+          if (meta.output.startsWith(previousOutput) && meta.output.length > previousOutput.length) {
+            const newChunk = meta.output.slice(previousOutput.length);
             metaObj.terminal_output = { data: Buffer.from(newChunk, "utf8").toString("base64") };
-            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
-          } else if (meta.output.length < prevLen) {
+            setTrackedOutput(tracker, meta.terminalId, meta.output);
+          } else if (meta.output !== previousOutput) {
             // terminal_output in ACP v1 is append-only. Do not append a reset snapshot
-            // to an existing terminal stream; update tracked length for future chunks.
-            setTrackedOutputLength(tracker, meta.terminalId, meta.output.length);
+            // to an existing terminal stream; track the replacement for future chunks.
+            setTrackedOutput(tracker, meta.terminalId, meta.output);
           }
         }
         const finished =
@@ -344,18 +344,22 @@ export function expandSessionUpdateToV2(
     return processV2ToolContentChunks(v2Update, toolContentTracker);
   }
 
-  const prevLen = terminalTracker.get(meta.terminalId) ?? 0;
+  const previousOutput = terminalTracker.get(meta.terminalId) ?? "";
   let terminalChunk: V2SessionUpdate | null = null;
-  if (meta.output != null && meta.output.length > prevLen) {
-    const newChunk = meta.output.slice(prevLen);
-    setTrackedOutputLength(terminalTracker, meta.terminalId, meta.output.length);
+  if (
+    meta.output != null &&
+    meta.output.startsWith(previousOutput) &&
+    meta.output.length > previousOutput.length
+  ) {
+    const newChunk = meta.output.slice(previousOutput.length);
+    setTrackedOutput(terminalTracker, meta.terminalId, meta.output);
     terminalChunk = {
       sessionUpdate: "terminal_output_chunk",
       terminalId: meta.terminalId,
       data: Buffer.from(newChunk, "utf8").toString("base64")
     } as V2SessionUpdate;
-  } else if (meta.output != null && meta.output.length < prevLen) {
-    setTrackedOutputLength(terminalTracker, meta.terminalId, meta.output.length);
+  } else if (meta.output != null && meta.output !== previousOutput) {
+    setTrackedOutput(terminalTracker, meta.terminalId, meta.output);
   }
 
   const finished =
@@ -452,4 +456,3 @@ function processV2ToolContentChunks(
   updates.push(v2Update);
   return updates;
 }
-
