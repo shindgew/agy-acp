@@ -401,12 +401,12 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     "Command Execution";
 
   const content: Record<string, unknown>[] = [];
-  // Prefer decoded field-28 output over empty; fall back to showing the command line.
+  if (command?.trim()) {
+    content.push(codeBlock(command.trim()));
+  }
   const output = commandResult?.output ?? "";
   if (output.trim()) {
     content.push(outputCodeBlock(output));
-  } else if (command?.trim()) {
-    content.push(codeBlock(command.trim()));
   }
 
   // Prefer explicit Cwd from args; fall back to command-result cwd.
