@@ -135,6 +135,83 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("uses one message id for consecutive agent-text rows in streaming and replay", () => {
+    const db = createConversationDb(dir, "conv-stream-message-group");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "world" }) });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\nworld" }
+      }
+    ]);
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-message-group")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\nworld" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
+  });
+
+  it("starts a streaming message group at the first row containing answer text", () => {
+    const db = createConversationDb(dir, "conv-stream-thought-first");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: { thought: "Thinking" } })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      stepPayload: encodeStepPayload({ agentText: "Answer" })
+    });
+    db.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const streamUpdates = new Translator({ mode: "stream", skipNarration: false }).translate(
+      streamConn.readAfter(-1)
+    );
+    streamConn.close();
+    expect(streamUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" }
+    });
+
+    const replayConn = ConversationDb.open(dir, "conv-stream-thought-first")!;
+    const replayUpdates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      replayConn.readAfter(-1)
+    );
+    replayConn.close();
+    expect(replayUpdates).toContainEqual({
+      sessionUpdate: "agent_message_chunk",
+      messageId: "2",
+      content: { type: "text", text: "Answer" },
+      _meta: { stepIdx: 2 }
+    });
+  });
+
   it("dedupes unchanged tool-call steps across repeated polls in stream mode", () => {
     const db = createConversationDb(dir, "conv-3");
     insertStep(db, {
@@ -221,6 +298,29 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("maps active step status 1 to in_progress tool status", () => {
+    const db = createConversationDb(dir, "conv-status-1");
+    const call = encodeToolCall({ callId: "active-1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo active"}' });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 1, // active
+      stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call }) })
+    });
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-status-1")!;
+    const res = translator.translate(conn.readAfter(0));
+    expect(res).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "active-1",
+        status: "in_progress"
+      }
+    ]);
+    conn.close();
+    db.close();
+  });
+
   it("maps permission-pending status 9 and dedupes its transition", () => {
     const db = createConversationDb(dir, "conv-pending");
     const payload = encodeStepPayload({ toolRun: encodeToolRun({ call: encodeToolCall({ callId: "p1", namePrimary: "run_command", rawInputJson: "{}" }) }) });
@@ -252,11 +352,12 @@ describe("Translator", () => {
     conn.close();
 
     expect(updates).toEqual([
-      { sessionUpdate: "session_info_update", title: "My session" },
+      { sessionUpdate: "session_info_update", title: "My session", _meta: { stepIdx: 1 } },
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "title-thought-1",
-        content: { type: "text", text: "I will inspect the repo structure first." }
+        content: { type: "text", text: "I will inspect the repo structure first." },
+        _meta: { stepIdx: 1 }
       }
     ]);
 
@@ -287,7 +388,8 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
@@ -306,12 +408,14 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_thought_chunk",
         messageId: "agent-thought-1",
-        content: { type: "text", text: "Thinking deeply..." }
+        content: { type: "text", text: "Thinking deeply..." },
+        _meta: { stepIdx: 1 }
       },
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Final output" }
+        content: { type: "text", text: "Final output" },
+        _meta: { stepIdx: 1 }
       }
     ]);
   });
@@ -357,7 +461,425 @@ describe("Translator", () => {
     expect(update.kind).toBe("execute");
     expect(update.rawOutput).toMatchObject({ exitCode: 0 });
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("ls");
     expect(body).toContain("README.md");
+  });
+
+  it("does not emit directory Cwd in locations for run_command steps (regression for issue #16)", () => {
+    const db = createConversationDb(dir, "conv-exec-no-dir-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c-dir",
+            namePrimary: "run_command",
+            rawInputJson: JSON.stringify({ CommandLine: "ls", Cwd: dir })
+          })
+        }),
+        commandResult: encodeCommandResult({
+          cwd: dir,
+          exitCode: 0,
+          output: "ok\n",
+          command: "ls"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-no-dir-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory path in locations for list_dir steps", () => {
+    const db = createConversationDb(dir, "conv-list-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 9,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "l-dir",
+            namePrimary: "list_dir",
+            rawInputJson: JSON.stringify({ DirectoryPath: dir })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-list-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory SearchPath in locations for grep_search steps", () => {
+    const db = createConversationDb(dir, "conv-grep-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-dir",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: dir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${dir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit non-existent or deleted SearchPath in locations for grep_search steps", () => {
+    const deletedDir = path.join(dir, "non-existent-folder");
+    const db = createConversationDb(dir, "conv-grep-deleted-dir");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-deleted",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: deletedDir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${deletedDir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-deleted-dir")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("emits SearchPath in locations for grep_search steps when SearchPath is a file", () => {
+    const file = path.join(dir, "test.txt");
+    fs.writeFileSync(file, "hello world");
+    const db = createConversationDb(dir, "conv-grep-file");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-file",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "hello", SearchPath: file })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "hello",
+          cwdUri: `file://${file}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-file")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: file }]);
+  });
+
+  it("resolves relative SearchPath against session cwd for grep_search steps", () => {
+    const relFile = "subfolder/rel-file.txt";
+    const absFolder = path.join(dir, "subfolder");
+    fs.mkdirSync(absFolder, { recursive: true });
+    const absFile = path.join(dir, relFile);
+    fs.writeFileSync(absFile, "relative content");
+
+    const db = createConversationDb(dir, "conv-grep-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-rel",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "relative", SearchPath: relFile })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "relative"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: absFile }]);
+  });
+
+  it("does not emit location for replayed view_file step when file does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-view.txt");
+    const db = createConversationDb(dir, "conv-view-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "view-missing",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: missingFile })
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: `file://${missingFile}`,
+          content: "cached historical content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-view-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit locations for replayed edits when the target does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-edit.txt");
+    const db = createConversationDb(dir, "conv-edit-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-missing",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: missingFile, CodeContent: "new content\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "replace-missing",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: missingFile,
+              TargetContent: "old content",
+              ReplacementContent: "new content",
+              StartLine: 3
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-edit-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    for (const update of updates as Array<{ locations?: unknown[] }>) {
+      expect(update.locations).toBeUndefined();
+    }
+  });
+
+  it("decodes Windows file URIs with drive letters in view_file fallback", () => {
+    const winFile = path.join(dir, "win.txt");
+    fs.writeFileSync(winFile, "content");
+    const fileUri = `file:///${winFile.replace(/\\/g, "/")}`;
+    const db = createConversationDb(dir, "conv-win-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri,
+          startLine: 1,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-win-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: winFile, line: 1 }]);
+  });
+
+  it("handles malformed percent-encoded file URIs without throwing URIError", () => {
+    const db = createConversationDb(dir, "conv-malformed-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///tmp/foo%bar",
+          content: "malformed URI test content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-malformed-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    expect(() => translator.translate(conn.readAfter(-1))).not.toThrow();
+    conn.close();
+  });
+
+  it("does not reinterpret an encoded path separator in a malformed file URI", () => {
+    const nestedDir = path.join(dir, "encoded");
+    const nestedFile = path.join(nestedDir, "path.txt");
+    fs.mkdirSync(nestedDir);
+    fs.writeFileSync(nestedFile, "content");
+    const malformedUri = `file://${path.join(dir, "encoded%2Fpath.txt")}`;
+    const db = createConversationDb(dir, "conv-encoded-separator-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: malformedUri,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-encoded-separator-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    expect((updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+  });
+
+  it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
+    const db = createConversationDb(dir, "conv-write-diff-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-rel",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"a.ts"}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "a.ts",
+          content: "export const x = 1;\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-rel",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "a.ts",
+              CodeContent: "export const x = 2;\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-diff-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-rel"
+    ) as {
+      content?: Array<{ type?: string; path?: string; oldText?: string | null; newText?: string }>;
+    };
+    expect(write).toBeTruthy();
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({
+      type: "diff",
+      oldText: "export const x = 1;\n",
+      newText: "export const x = 2;\n"
+    });
   });
 
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
@@ -785,7 +1307,255 @@ describe("Translator", () => {
       {
         sessionUpdate: "agent_message_chunk",
         messageId: "1",
-        content: { type: "text", text: "Hello\n world" }
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
+  });
+
+  it("stamps _meta.stepIdx on title, thought, and agent text updates", () => {
+    const db = createConversationDb(dir, "conv-stamped");
+    insertStep(db, { idx: 10, stepType: 23, stepPayload: encodeStepPayload({ titleUpdate: "My Title\n\nTitle narration" }) });
+    insertStep(db, { idx: 11, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Done", thought: "Thinking..." } }) });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-stamped")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "session_info_update",
+        title: "My Title",
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "title-thought-10",
+        content: { type: "text", text: "Title narration" },
+        _meta: { stepIdx: 10 }
+      },
+      {
+        sessionUpdate: "agent_thought_chunk",
+        messageId: "agent-thought-11",
+        content: { type: "text", text: "Thinking..." },
+        _meta: { stepIdx: 11 }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "11",
+        content: { type: "text", text: "Done" },
+        _meta: { stepIdx: 11 }
+      }
+    ]);
+  });
+
+  it("suppresses <SYSTEM_MESSAGE> task outputs in stepType 15 during replay and streaming", () => {
+    const db = createConversationDb(dir, "conv-sys-msg");
+    const sysMsgText = "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished";
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Hello" } }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: sysMsgText } }) });
+    insertStep(db, { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "World" } }) });
+    db.close();
+
+    const connReplay = ConversationDb.open(dir, "conv-sys-msg")!;
+    const replayTranslator = new Translator({ mode: "replay", skipNarration: false });
+    const replayUpdates = replayTranslator.translate(connReplay.readAfter(-1));
+    connReplay.close();
+
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\nWorld" },
+        _meta: { stepIdx: 1, endStepIdx: 3 }
+      }
+    ]);
+
+    const connStream = ConversationDb.open(dir, "conv-sys-msg")!;
+    const streamTranslator = new Translator({ mode: "stream", skipNarration: false });
+    const streamUpdates = streamTranslator.translate(connStream.readAfter(-1));
+    connStream.close();
+
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\nWorld" }
+      }
+    ]);
+  });
+
+  it("buffers a growing system-message envelope until it can be classified", () => {
+    const db = createConversationDb(dir, "conv-growing-sys-msg");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-sys-msg")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    updateStep(
+      db,
+      1,
+      {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: {
+            text: "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished"
+          }
+        })
+      }
+    );
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("buffers all whitespace prefixes accepted by the system-message envelope", () => {
+    const db = createConversationDb(dir, "conv-growing-whitespace-sys-msg");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-whitespace-sys-msg")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    updateStep(
+      db,
+      1,
+      {
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n[Message] payload" } })
+      }
+    );
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("releases a buffered system-message prefix when growing text proves ordinary", () => {
+    const db = createConversationDb(dir, "conv-growing-sys-msg-prose");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-sys-msg-prose")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    const prose = "<SYSTEM_MESSAGE>\n[Messagical text is not an internal notification.";
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: { text: prose } }));
+    expect(translator.translate(conn.readAfter(0))).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: prose }
+      }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("releases an ambiguous system-message prefix when its row is terminal", () => {
+    const db = createConversationDb(dir, "conv-terminal-sys-msg-prefix");
+    const text = "<SYSTEM_MESSAGE>\n[Messag";
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: { text } })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-terminal-sys-msg-prefix")!;
+    const updates = new Translator({ mode: "stream", skipNarration: false }).translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text }
+      }
+    ]);
+  });
+
+  it("releases an ambiguous system-message prefix at a later step boundary", () => {
+    const db = createConversationDb(dir, "conv-bounded-sys-msg-prefix");
+    const text = "<SYSTEM_MESSAGE>\n[Messag";
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: { text } })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: { text: "done" } })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-bounded-sys-msg-prefix")!;
+    const updates = new Translator({ mode: "stream", skipNarration: false }).translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\ndone" }
+      }
+    ]);
+  });
+
+  it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose or at start", () => {
+    const db = createConversationDb(dir, "conv-prose-sys-msg");
+    const proseText1 = "The error notification contains <SYSTEM_MESSAGE> tag.";
+    const proseText2 = "<SYSTEM_MESSAGE> tag is used by agy for internal task notifications.";
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText1 } }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText2 } }) });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-prose-sys-msg")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: `${proseText1}\n${proseText2}` },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
       }
     ]);
   });
@@ -1039,10 +1809,42 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("does not treat stepType 14 (user prompt, status 3) as a turn completion candidate", () => {
+    const db = createConversationDb(dir, "conv-user-prompt-only");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Hello assistant" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-user-prompt-only",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Hello user" })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
-  it("serves a cache hit without re-reading the file, and appends only the new tail on growth", () => {
+  it("serves unchanged cache hits and rebuilds grouped messages after growth", () => {
     const db = createConversationDb(dir, "conv-5");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
 
@@ -1057,8 +1859,95 @@ describe("ReplayCache", () => {
     db.close();
 
     const grown = cache.get(dir, "conv-5", { skipNarration: false });
-    expect(grown?.updates).toHaveLength(2);
+    expect(grown?.updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
     expect(grown?.maxIdx).toBe(2);
+  });
+
+  it("rebuilds cached replay after an in-place step update", () => {
+    const db = createConversationDb(dir, "conv-replay-mutation");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "partial" }) });
+
+    const cache = new ReplayCache(8);
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "partial" } }
+    ]);
+
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "complete result" }));
+    db.close();
+
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "complete result" } }
+    ]);
+  });
+
+  it("rebuilds cached locations when a referenced file is deleted", () => {
+    const file = path.join(dir, "cached-location.txt");
+    fs.writeFileSync(file, "content");
+    const db = createConversationDb(dir, "conv-replay-deleted-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cached-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+
+    fs.rmSync(file);
+
+    const rebuilt = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+    expect(rebuilt?.updates).not.toBe(first?.updates);
+  });
+
+  it("rebuilds cached locations when a referenced file is restored", () => {
+    const file = path.join(dir, "restored-location.txt");
+    const db = createConversationDb(dir, "conv-replay-restored-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "restored-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+
+    fs.writeFileSync(file, "content");
+
+    const rebuilt = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+    expect(rebuilt?.updates).not.toBe(first?.updates);
   });
 
   it("returns null for a missing conversation", () => {

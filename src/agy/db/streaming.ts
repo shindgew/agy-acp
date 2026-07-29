@@ -49,6 +49,7 @@ export class StreamPoller {
   private failedDataVersionAttempts = 0;
   private rowSnapshot = "";
   private readonly activePending = new Map<string, PendingInteraction>();
+  private readonly observedUserStepIdxs = new Set<number>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -69,6 +70,11 @@ export class StreamPoller {
 
   get hadUpdates(): boolean {
     return this.translator.hadUpdates;
+  }
+
+  /** User-prompt rows observed during this prompt-scoped polling session. */
+  get userStepIdxs(): number[] {
+    return [...this.observedUserStepIdxs];
   }
 
   /** Newly observed status-9 tool calls from the most recent poll. */
@@ -110,6 +116,9 @@ export class StreamPoller {
     if (this.dataVersion === dataVersion) return [];
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
+    for (const row of rows) {
+      if (row.stepType === 14) this.observedUserStepIdxs.add(row.idx);
+    }
     if (!rows.hasDecodeError) {
       this.dataVersion = dataVersion;
       this.failedDataVersion = null;
@@ -142,10 +151,13 @@ export class StreamPoller {
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
-    // agent message", so those turns don't hang until the deadline.
+    // agent message", so those turns don't hang until the deadline. Exclude
+    // stepType 14 (user prompt), which is inserted with status 3 as the turn
+    // opens before agy appends any assistant response steps.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
       latest !== undefined &&
+      latest.stepType !== 14 &&
       (latest.status === 3 || latest.status === 6 || latest.status === 7);
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));

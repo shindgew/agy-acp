@@ -14,6 +14,8 @@ export interface SessionState {
   selectedBaseModel: string;
   selectedReasoningEffort: string;
   activePrompt: boolean;
+  /** Stable v2 user-message IDs keyed by their persisted agy step index. */
+  v2UserMessageIdsByStep: Record<string, string>;
   /** Active v2 prompt-turn abort controller, if any. */
   promptAbort?: AbortController;
 }

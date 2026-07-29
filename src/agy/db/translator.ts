@@ -4,8 +4,8 @@
 // stream (step type 15):
 //
 //   - streaming emits the newly-appended slice each poll (text grows in place
-//     at a fixed idx), and re-emits tool steps as `tool_call_update` when their
-//     status/content snapshot changes;
+//     at a fixed idx), keeps consecutive text rows under one message id, and
+//     re-emits tool steps as `tool_call_update` when their status/content snapshot changes;
 //   - replay buffers consecutive agent-text parts and flushes them as one
 //     message at each boundary, applying narration filtering across the group.
 //
@@ -16,6 +16,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { filterNarration, isNarration } from "./narration.js";
+import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 import { sessionUpdateFromStep } from "./updates.js";
@@ -67,6 +68,16 @@ function updateSnapshot(update: SessionUpdate): string {
   });
 }
 
+function withStepMeta(update: SessionUpdate, stepIdx: number): SessionUpdate {
+  const raw = update as unknown as Record<string, unknown>;
+  const meta = (raw._meta as Record<string, unknown> | undefined) ?? {};
+  if (meta.stepIdx === stepIdx) return update;
+  return {
+    ...raw,
+    _meta: { ...meta, stepIdx }
+  } as unknown as SessionUpdate;
+}
+
 function asToolCallUpdate(update: SessionUpdate): SessionUpdate {
   return {
     ...(update as object),
@@ -83,10 +94,14 @@ export class Translator {
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
+  // Candidate ACP location paths and their readability during the latest translation.
+  readonly locationReadability = new Map<string, boolean>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
   private readonly pendingAgentParts: string[] = [];
   // Replay: message id for the current buffered agent-text group.
   private pendingAgentMessageId: string | null = null;
+  private pendingAgentStartStepIdx: number | null = null;
+  private pendingAgentEndStepIdx: number | null = null;
 
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
@@ -107,19 +122,46 @@ export class Translator {
   /** Translate a batch of rows into ordered ACP updates, advancing state. */
   translate(rows: StepRow[]): SessionUpdate[] {
     const out: SessionUpdate[] = [];
-    for (const row of rows) this.translateRow(row, out);
+    let streamingAgentMessageId: string | null = null;
+    let streamingHasVisibleText = false;
+    for (const [rowIndex, row] of rows.entries()) {
+      let streamingNeedsSeparator = false;
+      const canGrow = rowIndex === rows.length - 1 && row.status !== 3 && row.status !== 6 && row.status !== 7;
+      if (this.opts.mode === "stream") {
+        if (row.stepType === 15) {
+          const text = row.stepPayload.agentText?.text ?? "";
+          const isSysMsg = isSystemMessage(text);
+          const isSysMsgPrefix = canGrow && isSystemMessagePrefix(text);
+          if (text.length > 0 && !isSysMsg && !isSysMsgPrefix) streamingAgentMessageId ??= String(row.idx);
+          const visible =
+            text.length > 0 && !isSysMsg && !isSysMsgPrefix && !(this.opts.skipNarration && isNarration(text));
+          streamingNeedsSeparator = visible && streamingHasVisibleText;
+          if (visible) streamingHasVisibleText = true;
+        } else {
+          streamingAgentMessageId = null;
+          streamingHasVisibleText = false;
+        }
+      }
+      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
+    }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
     if (out.length > 0) this._hadUpdates = true;
     return out;
   }
 
-  private translateRow(row: StepRow, out: SessionUpdate[]): void {
+  private translateRow(
+    row: StepRow,
+    out: SessionUpdate[],
+    streamingAgentMessageId: string | null,
+    streamingNeedsSeparator: boolean,
+    canGrow: boolean
+  ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out);
+        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -148,7 +190,8 @@ export class Translator {
   private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
-      fileContents: this.fileContents
+      fileContents: this.fileContents,
+      locationReadability: this.locationReadability
     });
     if (Array.isArray(update)) {
       for (const item of update) this.emitProgressive(row.idx, item, out);
@@ -167,42 +210,44 @@ export class Translator {
     const kind = raw.sessionUpdate;
 
     if (kind === "agent_thought_chunk") {
-      this.emitThought(update, out);
+      this.emitThought(stepIdx, update, out);
       return;
     }
 
+    const stamped = withStepMeta(update, stepIdx);
+
     if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
-      const snapshot = updateSnapshot(update);
+      const snapshot = updateSnapshot(stamped);
       const key = typeof raw.planId === "string" && raw.planId ? `plan:${raw.planId}` : `plan:${stepIdx}`;
       const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
       this.toolSnapshots.set(key, snapshot);
-      out.push(update);
+      out.push(stamped);
       return;
     }
 
     if (kind !== "tool_call" && kind !== "tool_call_update") {
-      out.push(update);
+      out.push(stamped);
       return;
     }
 
-    const snapshot = updateSnapshot(update);
+    const snapshot = updateSnapshot(stamped);
     const toolId = typeof raw.toolCallId === "string" && raw.toolCallId.trim() ? raw.toolCallId.trim() : undefined;
     const key = toolId ? `tool:${toolId}` : `step:${stepIdx}`;
     const previous = this.toolSnapshots.get(key);
     if (previous === undefined) {
       this.toolSnapshots.set(key, snapshot);
       // First sight always uses create shape; v2 boundary may rewrite to upsert.
-      out.push({ ...raw, sessionUpdate: "tool_call" } as SessionUpdate);
+      out.push({ ...(stamped as object), sessionUpdate: "tool_call" } as SessionUpdate);
       return;
     }
     if (previous === snapshot) return;
 
     this.toolSnapshots.set(key, snapshot);
-    out.push(asToolCallUpdate(update));
+    out.push(asToolCallUpdate(stamped));
   }
 
-  private emitThought(update: SessionUpdate, out: SessionUpdate[]): void {
+  private emitThought(stepIdx: number, update: SessionUpdate, out: SessionUpdate[]): void {
     const raw = update as unknown as Record<string, unknown>;
     const content = raw.content as { type?: string; text?: string } | undefined;
     const text = typeof content?.text === "string" ? content.text : "";
@@ -214,7 +259,7 @@ export class Translator {
     if (text.length <= emitted) return;
     this.thoughtTextLengths.set(messageId, text.length);
     const delta = text.slice(emitted);
-    if (delta.length > 0) out.push(thoughtChunk(delta, messageId));
+    if (delta.length > 0) out.push(withStepMeta(thoughtChunk(delta, messageId), stepIdx));
   }
 
   private handleTitle(row: StepRow, out: SessionUpdate[]): void {
@@ -223,30 +268,41 @@ export class Translator {
     const currentTitle = blocks?.shift() || null;
     if (currentTitle !== this._lastTitle) {
       this._lastTitle = currentTitle;
-      out.push({ sessionUpdate: "session_info_update", title: currentTitle });
+      out.push(withStepMeta({ sessionUpdate: "session_info_update", title: currentTitle } as SessionUpdate, row.idx));
     }
 
     const narration = blocks?.filter((b) => b.trim().length > 0).join("\n\n") ?? "";
     if (!narration) return;
 
     // Title-attached "Think" narration is real agent thought, not a tool card.
-    this.emitThought(thoughtChunk(narration, `title-thought-${row.idx}`), out);
+    this.emitThought(row.idx, thoughtChunk(narration, `title-thought-${row.idx}`), out);
   }
 
-  private handleAgentText(row: StepRow, out: SessionUpdate[]): void {
+  private handleAgentText(
+    row: StepRow,
+    out: SessionUpdate[],
+    streamingAgentMessageId: string | null,
+    streamingNeedsSeparator: boolean,
+    canGrow: boolean
+  ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
-      this.emitThought(thoughtChunk(thought, `agent-thought-${row.idx}`), out);
+      this.emitThought(row.idx, thoughtChunk(thought, `agent-thought-${row.idx}`), out);
     }
 
     const text = row.stepPayload.agentText?.text ?? "";
-    const messageId = String(row.idx);
+    if (isSystemMessage(text)) return;
+    if (this.opts.mode === "stream" && canGrow && isSystemMessagePrefix(text)) return;
+
+    const messageId = streamingAgentMessageId ?? String(row.idx);
 
     if (this.opts.mode === "replay") {
       if (text.length > 0) {
         if (this.pendingAgentMessageId === null) {
           this.pendingAgentMessageId = messageId;
+          this.pendingAgentStartStepIdx = row.idx;
         }
+        this.pendingAgentEndStepIdx = row.idx;
         this.pendingAgentParts.push(text);
       }
       return;
@@ -259,7 +315,9 @@ export class Translator {
     this.agentTextLengths.set(row.idx, text.length);
     if (this.opts.skipNarration && isNarration(text)) return;
     const delta = text.slice(emitted);
-    if (delta.length > 0) out.push(agentChunk(delta, messageId));
+    if (delta.length > 0) {
+      out.push(agentChunk(emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta, messageId));
+    }
   }
 
   private flushAgentBuffer(out: SessionUpdate[]): void {
@@ -268,8 +326,23 @@ export class Translator {
       ? filterNarration(this.pendingAgentParts)
       : this.pendingAgentParts.join("\n");
     const messageId = this.pendingAgentMessageId ?? "agent";
+    const startStepIdx = this.pendingAgentStartStepIdx;
+    const endStepIdx = this.pendingAgentEndStepIdx;
     this.pendingAgentParts.length = 0;
     this.pendingAgentMessageId = null;
-    if (text && text.length > 0) out.push(agentChunk(text, messageId));
+    this.pendingAgentStartStepIdx = null;
+    this.pendingAgentEndStepIdx = null;
+    if (text && text.length > 0) {
+      const chunk = agentChunk(text, messageId);
+      if (startStepIdx != null) {
+        const stamped = withStepMeta(chunk, startStepIdx);
+        if (endStepIdx != null && endStepIdx > startStepIdx) {
+          ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+        }
+        out.push(stamped);
+      } else {
+        out.push(chunk);
+      }
+    }
   }
 }

@@ -57,10 +57,11 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] [`tool_call_update`](https://agentclientprotocol.com/protocol/v1/tool-calls): progressive status/content updates
 - [x] [`diff`](https://agentclientprotocol.com/protocol/v1/schema#diff): edit content type; full-file writes use prior content when known
 - [x] [`session_info_update`](https://agentclientprotocol.com/rfds/session-info-update): titles from the conversation DB
-- [x] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): interactive PTY bridge for `run_command` + file tools
+- [x] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): interactive PTY bridge for `run_command`, file tools, and multi-select/multi-question `ask_question`
 - [x] [`fs/read_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client read-through when advertised
 - [x] [`fs/write_text_file`](https://agentclientprotocol.com/protocol/v1/file-system): client write-through for editor review UI when advertised
 - [x] [`tool_call`](https://agentclientprotocol.com/protocol/v1/tool-calls): execute tools surface command + captured stdout/stderr (DB field 28)
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ falls back to `session/request_permission`
 - [x] [`plan`](https://agentclientprotocol.com/protocol/v1/agent-plan): classic plan entries from brain markdown (checkbox status only)
 - [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v1/slash-commands#advertising-commands): curated `mode` / `plan` / `model` / `effort` (config intercept, not agy TUI panels)
 
@@ -68,9 +69,7 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 
 Need interactive agy control plane or client terminal protocol beyond DB polling:
 
-- [ ] [`session/request_permission`](https://agentclientprotocol.com/protocol/v1/tool-calls#requesting-permission): expand for multi-select / multi-question `ask_question` and remaining status-9 tools (unsupported paths fail closed)
 - [ ] [`terminal/create`](https://agentclientprotocol.com/protocol/v1/terminals): client-executed terminal suite (`output` / `release` / `wait_for_exit` / `kill` too) — blocked while agy owns the shell
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): free-text / multi-select `ask_question` (+ `elicitation/complete`); single-select MCQ already uses `session/request_permission`
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor on `session/new`, real `mcpCapabilities`, route `mcp/message` · `mcp/connect` · `mcp/disconnect` when agy can consume external servers
 
 ### Medium priority
@@ -129,18 +128,18 @@ differs or is incomplete.
 - [x] [`tool_call_update`](https://agentclientprotocol.com/rfds/v2/tool-call-updates): upsert shape (first-sight collapsed from v1 `tool_call`); `cancelled` preserved
 - [x] [`diff`](https://agentclientprotocol.com/rfds/v2/diff-file-states): `changes[]` + optional `git_patch` (`add` / `modify`, `fileType: "text"`)
 - [x] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): `subject: { type: "tool_call", … }` + `title`
+- [x] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text / single-select `ask_question` (+ `elicitation/complete`)
 - [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): prompt caps `image`, `embeddedContext`
 - [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): capability advertised
 - [x] [`terminal_update`](https://agentclientprotocol.com/rfds/v2/terminal-output): agent-owned execute terminals + `type: "terminal"` embeds (DB snapshots)
 - [x] [`plan_update`](https://agentclientprotocol.com/protocol/v2/agent-plan): brain plans ([`markdown`](https://agentclientprotocol.com/rfds/v2/plan-variants) preferred, else `items`); no `plan_removed`
 - [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands): same curated list + config intercept as v1
+- [x] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is actively running
+- [x] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool call output and content updates
+- [x] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): replay cursors (`start`, `message`, `step`, `tool_call`)
 
 ### High priority
 
-- [ ] [`replayFrom`](https://agentclientprotocol.com/rfds/v2/session-resume-replay): richer cursors beyond `{ "type": "start" }` when the draft stabilizes incremental replay
-- [ ] [`elicitation/create`](https://agentclientprotocol.com/rfds/elicitation): multi-select / free-text `ask_question` (+ `elicitation/complete`; today: fail closed)
-- [ ] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is still running (today: full snapshot when field 28 is present)
-- [ ] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool content while a call is running (today: only on `tool_call_update` snapshots)
 - [ ] [`mcpServers`](https://agentclientprotocol.com/rfds/mcp-over-acp): honor session servers, advertise `capabilities.session.mcp`, route `mcp/*` when agy can consume them
 - [ ] [`session/request_permission`](https://agentclientprotocol.com/rfds/v2/permission-requests): expand bridge to remaining agy menus once TUI channels are verified
 

@@ -19,7 +19,7 @@ import { sessionConfigOptionsV1, sessionConfigOptionsV2 } from "./config-options
 import { sessionModeState } from "./modes.js";
 import type { StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
-import { expandSessionUpdateToV2 } from "./update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2 } from "./update-wire.js";
 
 export interface ResumeSessionDeps {
   requireAuthenticated(cwd?: string): Promise<void>;
@@ -32,7 +32,9 @@ export interface ResumeSessionDeps {
     session: SessionState,
     conversationId: string,
     cwd: string,
-    emit: (update: v1.SessionUpdate) => Promise<void>
+    emit: (update: v1.SessionUpdate) => Promise<void>,
+    replayFrom?: unknown,
+    v2UserMessageIdsByStep?: Record<string, string>
   ): Promise<void>;
 }
 
@@ -56,7 +58,7 @@ export async function handleResumeSessionV1(
 }
 
 /**
- * v2 `session/resume`: optional `replayFrom: { type: "start" }` replaces v1
+ * v2 `session/resume`: optional `replayFrom` cursor replaces v1
  * `session/load`. Omitting `replayFrom` reattaches without history.
  */
 export async function handleResumeSessionV2(
@@ -75,18 +77,24 @@ export async function handleResumeSessionV2(
 
   const replayFrom = params.replayFrom ?? null;
   if (replayFrom != null) {
-    if (replayFrom.type !== "start") {
-      throw new Error(`Unsupported replay cursor: ${String((replayFrom as { type?: string }).type)}`);
-    }
     if (stored.conversationId) {
-      await deps.replayConversation(session, stored.conversationId, cwd, async (update) => {
-        for (const v2Update of expandSessionUpdateToV2(update)) {
-          await client.notify(v2.methods.client.session.update, {
-            sessionId: params.sessionId,
-            update: v2Update
-          });
-        }
-      });
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
+      await deps.replayConversation(
+        session,
+        stored.conversationId,
+        cwd,
+        async (update) => {
+          for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
+            await client.notify(v2.methods.client.session.update, {
+              sessionId: params.sessionId,
+              update: v2Update
+            });
+          }
+        },
+        replayFrom,
+        session.v2UserMessageIdsByStep
+      );
     }
   }
 

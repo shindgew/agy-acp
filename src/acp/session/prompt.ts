@@ -14,6 +14,7 @@ import type {
   PromptRequest as V2PromptRequest,
   PromptResponse as V2PromptResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
+import type { ClientElicitationCapability } from "../tool-calls/elicitation.js";
 import type { SessionModeId } from "../../agy/cli.js";
 import { contentBlocksToPrompt } from "../content/index.js";
 import type { ClientFileSystem } from "../../agy/edit/bridge.js";
@@ -22,7 +23,7 @@ import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
 import type { SessionState } from "./types.js";
-import { createTerminalOutputTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
+import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface PromptTurnDeps {
   requireSession(sessionId: string): SessionState;
@@ -34,10 +35,12 @@ export interface PromptV1Deps extends PromptTurnDeps {
   notifyCurrentModeUpdate(client: V1AgentContext, sessionId: string, mode: SessionModeId): Promise<void>;
   notifyConfigOptionUpdateV1(client: V1AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined;
+  clientElicitationV1?(client: V1AgentContext): ClientElicitationCapability | undefined;
 }
 
 export interface PromptV2Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV2(client: V2AgentContext, sessionId: string, session: SessionState): Promise<void>;
+  clientElicitationV2?(client: V2AgentContext): ClientElicitationCapability | undefined;
 }
 
 /**
@@ -139,9 +142,10 @@ export async function handlePromptV1(
         sessionId: params.sessionId,
         update: sessionUpdateToV1(update, tracker)
       });
-    }, async (toolCall, { toolName }) => {
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal);
-    }, deps.clientFileSystemV1(client, params.sessionId));
+    }, async (toolCall, { toolName, questionIndex }) => {
+      const elicitationCap = deps.clientElicitationV1?.(client);
+      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+    }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
     await deps.persistSession(params.sessionId, session);
     return {
       stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
@@ -214,7 +218,12 @@ async function runV2PromptTurn(
     });
   };
 
-  const userMessageId = randomUUID();
+  const parsedSlash = parseSlashCommand(promptText);
+  const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
+  const userMessageId =
+    slashResult && slashResult.kind !== "pass"
+      ? `slash-${randomUUID()}`
+      : `user-${randomUUID()}`;
   try {
     signal.throwIfAborted();
 
@@ -254,13 +263,28 @@ async function runV2PromptTurn(
     signal.addEventListener("abort", cancelPrompt, { once: true });
 
     try {
-      const outcome = await session.agy.prompt(promptText, async (update) => {
-        for (const v2Update of expandSessionUpdateToV2(update)) {
-          await notify(v2Update);
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
+      const outcome = await (async () => {
+        try {
+          return await session.agy.prompt(promptText, async (update) => {
+            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
+              await notify(v2Update);
+            }
+          }, async (toolCall, { toolName, questionIndex }) => {
+            const elicitationCap = deps.clientElicitationV2?.(client);
+            return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+          }, undefined, deps.clientElicitationV2?.(client));
+        } finally {
+          const userStepIdxs = session.agy.lastPromptUserStepIdxs;
+          if (userStepIdxs.length > 1) {
+            throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
+          }
+          if (userStepIdxs.length === 1) {
+            session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
+          }
         }
-      }, async (toolCall, { toolName }) => {
-        return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal);
-      });
+      })();
       await deps.persistSession(params.sessionId, session);
 
       const stopReason =

@@ -34,6 +34,8 @@ export interface StoredSession {
   reasoningEffort: string;
   /** Matches ACP config option `mode` (`default` | `accept-edits` | `plan`). Absent on older store files. */
   mode?: string;
+  /** Stable v2 user-message IDs keyed by their persisted agy step index. */
+  v2UserMessageIdsByStep: Record<string, string>;
   updatedAt: string;
 }
 
@@ -151,8 +153,18 @@ function normalizeStoredSession(raw: LegacyStoredSession): StoredSession {
     model: raw.model ?? raw.modelId ?? "",
     reasoningEffort: raw.reasoningEffort ?? raw.reasoningEffect ?? "",
     mode: raw.mode,
+    v2UserMessageIdsByStep: normalizeMessageIdMap(raw.v2UserMessageIdsByStep),
     updatedAt: raw.updatedAt ?? new Date(0).toISOString()
   };
+}
+
+function normalizeMessageIdMap(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      ([stepIdx, messageId]) => /^\d+$/.test(stepIdx) && typeof messageId === "string" && messageId.length > 0
+    )
+  ) as Record<string, string>;
 }
 
 function optional(value: string | undefined): string | undefined {

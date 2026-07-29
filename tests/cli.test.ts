@@ -26,6 +26,7 @@ import {
   permissionKeys,
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
+import { requestPermissionV1 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
@@ -160,6 +161,127 @@ describe("permission bridge", () => {
     expect(interactionKeys("agy-q-1", "ask_question", askCall)).toBe("\x1b[B\r");
     expect(interactionKeys("agy-q-2", "ask_question", askCall)).toBe("\x1b[B\x1b[B\r");
     expect(interactionKeys("agy-q-skip", "ask_question", askCall)).toBe("\x1b");
+
+    const multiAskCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q2",
+      title: "Pick multiple",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [{
+          question: "Which features?",
+          options: ["Auth", "DB", "Analytics"],
+          is_multi_select: true
+        }]
+      }
+    };
+    expect(canBridgeInteraction("ask_question", multiAskCall)).toBe(true);
+    expect(permissionOptions(multiAskCall, "ask_question")).toEqual([
+      { optionId: "agy-q-0", kind: "allow_once", name: "Auth" },
+      { optionId: "agy-q-1", kind: "allow_once", name: "DB" },
+      { optionId: "agy-q-0,1", kind: "allow_once", name: "Auth + DB" },
+      { optionId: "agy-q-2", kind: "allow_once", name: "Analytics" },
+      { optionId: "agy-q-0,2", kind: "allow_once", name: "Auth + Analytics" },
+      { optionId: "agy-q-1,2", kind: "allow_once", name: "DB + Analytics" },
+      { optionId: "agy-q-all", kind: "allow_once", name: "Select All (Auth + DB + Analytics)" },
+      { optionId: "agy-q-none", kind: "allow_once", name: "Submit (None selected)" },
+      { optionId: "agy-q-skip", kind: "reject_once", name: "Skip" }
+    ]);
+    expect(interactionKeys("agy-q-0,2", "ask_question", multiAskCall)).toBe(" \x1b[B\x1b[B \r");
+    expect(interactionKeys("agy-q-all", "ask_question", multiAskCall)).toBe(" \x1b[B \x1b[B \r");
+    expect(interactionKeys("agy-q-none", "ask_question", multiAskCall)).toBe("\r");
+    expect(interactionKeys("agy-q-skip", "ask_question", multiAskCall)).toBe("\x1b");
+
+    const multiQuestionCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q3",
+      title: "Wizard",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [
+          { question: "Env?", options: ["Dev", "Prod"], is_multi_select: false },
+          { question: "Features?", options: ["Auth", "Logging"], is_multi_select: true }
+        ]
+      }
+    };
+    expect(canBridgeInteraction("ask_question", multiQuestionCall)).toBe(true);
+    expect(permissionOptions(multiQuestionCall, "ask_question", 0)).toEqual([
+      { optionId: "agy-q-q0-0", kind: "allow_once", name: "Dev" },
+      { optionId: "agy-q-q0-1", kind: "allow_once", name: "Prod" },
+      { optionId: "agy-q-q0-skip", kind: "reject_once", name: "Skip" }
+    ]);
+    expect(permissionOptions(multiQuestionCall, "ask_question", 1)).toEqual([
+      { optionId: "agy-q-q1-0", kind: "allow_once", name: "Auth" },
+      { optionId: "agy-q-q1-1", kind: "allow_once", name: "Logging" },
+      { optionId: "agy-q-q1-all", kind: "allow_once", name: "Select All (Auth + Logging)" },
+      { optionId: "agy-q-q1-none", kind: "allow_once", name: "Submit (None selected)" },
+      { optionId: "agy-q-q1-skip", kind: "reject_once", name: "Skip" }
+    ]);
+    expect(interactionKeys("agy-q-q0-1", "ask_question", multiQuestionCall, 0)).toBe("\x1b[B\r");
+    expect(interactionKeys("agy-q-q1-0,1", "ask_question", multiQuestionCall, 1)).toBe(" \x1b[B \r");
+
+    const fiveOptionCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q5",
+      title: "Five option question",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [{
+          question: "Select items",
+          options: ["A", "B", "C", "D", "E"],
+          is_multi_select: true
+        }]
+      }
+    };
+    const fiveOpts = permissionOptions(fiveOptionCall, "ask_question");
+    expect(fiveOpts).toContainEqual({ optionId: "agy-q-0,2,4", kind: "allow_once", name: "A + C + E" });
+    expect(interactionKeys("agy-q-0,2,4", "ask_question", fiveOptionCall)).toBe(" \x1b[B\x1b[B \x1b[B\x1b[B \r");
+
+    const sevenOptionCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q7",
+      title: "7 option question",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [{
+          question: "Select items",
+          options: Array.from({ length: 7 }, (_, i) => `Opt${i}`),
+          is_multi_select: true
+        }]
+      }
+    };
+    expect(canBridgeInteraction("ask_question", sevenOptionCall)).toBe(false);
+  });
+
+  it("labels each v1 requestPermission toolCall title with the active question", async () => {
+    let capturedTitle: string | undefined;
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        capturedTitle = params.toolCall.title;
+        return { outcome: { outcome: "selected", optionId: "agy-q-q1-0" } };
+      })
+    };
+
+    const multiQCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "q-multi",
+      title: "Initial question title",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        questions: [
+          { question: "First Question?", options: ["Opt1", "Opt2"] },
+          { question: "Second Question?", options: ["Opt3", "Opt4"] }
+        ]
+      }
+    };
+
+    await requestPermissionV1(mockClient as any, "s1", multiQCall, "ask_question", undefined, 1);
+    expect(capturedTitle).toBe("[Question 2/2] Second Question?");
   });
 
   it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
@@ -514,12 +636,12 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("fails closed for multi-select ask_question without writing keys", async () => {
+  it("bridges multi-select ask_question via PTY option keys", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const askInput = JSON.stringify({
       questions: [{
         question: "Pick many",
-        options: ["A", "B"],
+        options: ["A", "B", "C"],
         is_multi_select: true
       }]
     });
@@ -529,8 +651,53 @@ describe("permission bridge", () => {
       db.close();
     });
     const session = interactiveSession(dir, pty);
-    await expect(session.prompt("go", async () => {}, async () => "agy-q-0")).rejects.toThrow(/multi-select ask_question/);
-    expect(pty.writes).toEqual([]);
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "ask-multi.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-q-0,2";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual([" \x1b[B\x1b[B \r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("bridges multi-question ask_question sequences via PTY option keys", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const askInput = JSON.stringify({
+      questions: [
+        { question: "Q1", options: ["X", "Y"], is_multi_select: false },
+        { question: "Q2", options: ["M", "N"], is_multi_select: true }
+      ]
+    });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "ask-seq");
+      insertStep(db, pendingToolRow("ask_question", askInput, 138));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const choices = ["agy-q-q0-1", "agy-q-q1-0,1"];
+    let qCount = 0;
+    const result = session.prompt("go", async () => {}, async (_call, context) => {
+      expect(context.questionIndex).toBe(qCount);
+      const choice = choices[qCount++];
+      if (qCount === 2) {
+        setTimeout(async () => {
+          const db = new (await import("better-sqlite3")).default(path.join(dir, "ask-seq.db"));
+          updateStep(db, 1, { status: 3 });
+          insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+          db.close();
+          pty.emitData("? for shortcuts");
+        }, 100);
+      }
+      return choice;
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\x1b[B\r", " \x1b[B \r"]);
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

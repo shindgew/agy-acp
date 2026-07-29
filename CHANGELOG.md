@@ -9,6 +9,28 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-07-29
+
+ACP elicitation support (`elicitation/*`), expanded interactive permission bridging for multi-select and multi-question forms, progressive streaming & history replay cursors for ACP v2, system message filtering, and execute tool content improvements.
+
+### Added
+
+- Support ACP elicitation protocol (`elicitation/create` and `elicitation/complete`) for free-text, single-select, and multi-select `ask_question` forms. (#40)
+- Progressive streaming and history replay updates for ACP v2: support `terminal_output_chunk`, `tool_call_content_chunk`, and `replayFrom` cursors (`start`, `message`, `step`, `tool_call`) on `session/resume`. (#41)
+- Expanded interactive permission bridge to handle multi-select and multi-question `ask_question` dialogs via sequential permission loops and subset options for forms with 5+ choices. (#42)
+- Include command code block alongside terminal output in `execute` tool call content. (#45)
+
+### Changed
+
+- Restrict ACP tool call location annotations to verified files only, omitting directory paths. (#44, #45)
+- Decode percent-encoded file URIs (`fileURLToPath`) and resolve relative paths against session working directory before location stat checks. (#44)
+
+### Fixed
+
+- Ignore user prompts as turn completion candidates to prevent prompt turns from stopping prematurely while `agy` continues executing in the background. (#49)
+- Suppress internal `agy` system message task envelopes (step type 15 background outputs) in live streaming and history replay, preventing internal envelopes from rendering as normal agent responses. (#47)
+- Maintain stable agent message IDs between live streaming and replay, and keep `user_message` IDs unique across non-DB or failed prompts. (#41)
+
 ## [0.3.4] - 2026-07-28
 
 ### Added

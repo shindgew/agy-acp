@@ -151,6 +151,7 @@ export class AcpAgent {
   #ensureAgyPromise: Promise<string | null> | undefined;
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
   #clientFs = { readTextFile: false, writeTextFile: false };
+  #clientElicitation = { form: false, url: false };
 
   constructor(options: AcpAgentOptions = {}) {
     this.#env = options.env ?? process.env;
@@ -171,14 +172,17 @@ export class AcpAgent {
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
-    const { response, clientFs } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
+    const { response, clientFs, clientElicitation } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
     this.#clientFs = clientFs;
+    this.#clientElicitation = clientElicitation;
     return response;
   }
 
   async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
     await this.ensureAgyReady();
-    return handleInitializeV2(params, packageJson.version ?? "0.0.0");
+    const { response, clientElicitation } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
+    this.#clientElicitation = clientElicitation;
+    return response;
   }
 
   private ensureAgyReady(): Promise<string | null> {
@@ -277,8 +281,10 @@ export class AcpAgent {
         session: SessionState,
         conversationId: string,
         cwd: string,
-        emit: (update: v1.SessionUpdate) => Promise<void>
-      ) => this.replayConversation(session, conversationId, cwd, emit)
+        emit: (update: v1.SessionUpdate) => Promise<void>,
+        replayFrom?: unknown,
+        v2UserMessageIdsByStep?: Record<string, string>
+      ) => this.replayConversation(session, conversationId, cwd, emit, replayFrom, v2UserMessageIdsByStep)
     };
   }
 
@@ -343,7 +349,8 @@ export class AcpAgent {
       persistSession: (id, session) => this.persistSession(id, session),
       notifyCurrentModeUpdate,
       notifyConfigOptionUpdateV1,
-      clientFileSystemV1: (client, sessionId) => this.clientFileSystemV1(client, sessionId)
+      clientFileSystemV1: (client, sessionId) => this.clientFileSystemV1(client, sessionId),
+      clientElicitationV1: () => this.#clientElicitation
     };
   }
 
@@ -352,7 +359,8 @@ export class AcpAgent {
       requireSession: (id) => this.requireSession(id),
       applyConfigOption: (sessionId, configId, value) => this.applyConfigOption(sessionId, configId, value),
       persistSession: (id, session) => this.persistSession(id, session),
-      notifyConfigOptionUpdateV2
+      notifyConfigOptionUpdateV2,
+      clientElicitationV2: () => this.#clientElicitation
     };
   }
 
@@ -410,9 +418,19 @@ export class AcpAgent {
     session: SessionState,
     conversationId: string,
     cwd: string,
-    emit: (update: v1.SessionUpdate) => Promise<void>
+    emit: (update: v1.SessionUpdate) => Promise<void>,
+    replayFrom?: unknown,
+    v2UserMessageIdsByStep?: Record<string, string>
   ): Promise<void> {
-    return replayConversation(this.#replayCache, session, conversationId, cwd, emit);
+    return replayConversation(
+      this.#replayCache,
+      session,
+      conversationId,
+      cwd,
+      emit,
+      replayFrom,
+      v2UserMessageIdsByStep
+    );
   }
 
   private requireSession(sessionId: string): SessionState {
