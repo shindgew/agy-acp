@@ -933,6 +933,47 @@ describe("Translator", () => {
       }
     ]);
   });
+
+  it("suppresses <SYSTEM_MESSAGE> task outputs in stepType 15 during replay and streaming", () => {
+    const db = createConversationDb(dir, "conv-sys-msg");
+    const sysMsgText = "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished";
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "Hello" } }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: sysMsgText } }) });
+    insertStep(db, { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: "World" } }) });
+    db.close();
+
+    const connReplay = ConversationDb.open(dir, "conv-sys-msg")!;
+    const replayTranslator = new Translator({ mode: "replay", skipNarration: false });
+    const replayUpdates = replayTranslator.translate(connReplay.readAfter(-1));
+    connReplay.close();
+
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\nWorld" },
+        _meta: { stepIdx: 1, endStepIdx: 3 }
+      }
+    ]);
+
+    const connStream = ConversationDb.open(dir, "conv-sys-msg")!;
+    const streamTranslator = new Translator({ mode: "stream", skipNarration: false });
+    const streamUpdates = streamTranslator.translate(connStream.readAfter(-1));
+    connStream.close();
+
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\nWorld" }
+      }
+    ]);
+  });
 });
 
 describe("StreamPoller", () => {
