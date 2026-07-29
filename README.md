@@ -1,47 +1,44 @@
-# agy-acp
+<div align="center">
 
-ACP adapter for Google Antigravity CLI.
+<h1>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/header-image-dark.png">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/header-image-light.png">
+    <img alt="agy-acp" src="docs/assets/header-image-light.png">
+  </picture>
+  <br>
+  agy-acp
+</h1>
+
+[ACP](https://agentclientprotocol.com) adapter for [Google Antigravity CLI](https://antigravity.google/product/antigravity-cli)
+
+</div>
+
 
 ## Usage
 
-If `agy` is missing from `PATH`, `agy-acp` installs it during `initialize` from
-[google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli/releases/latest)
-into `~/.local/bin/agy` (checksum-verified when GitHub publishes a digest). Or install yourself:
+`agy-acp` automatically uses an installed `agy` binary if it exists and no binary is explicitly specified. If no existing binary is detected or specified, it installs the latest version during `initialize` from the official [google-antigravity/antigravity-cli](https://github.com/google-antigravity/antigravity-cli/releases/latest) GitHub repository into `~/.local/bin/agy` (checksum-verified when a digest is published).
+
+Or install `agy` yourself using the official installer script or Homebrew:
 
 ```sh
+# Official script
 curl -fsSL https://antigravity.google/cli/install.sh | bash
+
+# Homebrew
+brew install antigravity-cli
 ```
 
-```sh
-npx agy-acp                 # stable (0.3.3)
-npx agy-acp@alpha           # draft ACP v2 channel
-npx agy-acp@1.0.0-alpha.0   # pin a pre-release
-```
+### Zed Configuration
 
-Zed custom agent (stable):
+Add `agy-acp` as a custom agent in Zed:
 
 ```json
 {
   "agent_servers": {
     "Google Antigravity": {
       "command": "npx",
-      "args": ["-y", "agy-acp"],
-      "env": {
-        "PATH": "/path/to/agy/bin"
-      }
-    }
-  }
-}
-```
-
-Alpha (draft ACP v2):
-
-```json
-{
-  "agent_servers": {
-    "Google Antigravity (alpha)": {
-      "command": "npx",
-      "args": ["-y", "agy-acp@alpha"]
+      "args": ["agy-acp"]
     }
   }
 }
@@ -97,13 +94,11 @@ See [ROADMAP.md](./ROADMAP.md) for ACP coverage and planned work.
 
 ## Disclaimer
 
-**Unofficial community adapter.** Bridges the official
-[Google Antigravity CLI](https://antigravity.google/product/antigravity-cli) with
-[ACP](https://agentclientprotocol.com). **Use at your own risk.**
-
 Google's FAQ states that third-party tools to access Antigravity violate their
-[Terms of Service](https://antigravity.google/terms) and may lead to account suspension.
+[Terms of Service](https://antigravity.google/terms) and may lead to account suspension.  
 Prefer Vertex / AI Studio API keys for lower-risk use. Use this only on test/secondary
-accounts.
+accounts.  
 
-Provided as-is, no warranty. By using `agy-acp` you accept this notice and Google's ToS.
+Provided as-is, no warranty. By using `agy-acp` you accept this notice and Google's ToS.  
+
+**Use at your own risk.**
