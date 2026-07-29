@@ -1134,7 +1134,7 @@ describe("StreamPoller", () => {
 });
 
 describe("ReplayCache", () => {
-  it("serves a cache hit without re-reading the file, and appends only the new tail on growth", () => {
+  it("serves unchanged cache hits and rebuilds grouped messages after growth", () => {
     const db = createConversationDb(dir, "conv-5");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
 
@@ -1149,8 +1149,32 @@ describe("ReplayCache", () => {
     db.close();
 
     const grown = cache.get(dir, "conv-5", { skipNarration: false });
-    expect(grown?.updates).toHaveLength(2);
+    expect(grown?.updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\n world" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
+    ]);
     expect(grown?.maxIdx).toBe(2);
+  });
+
+  it("rebuilds cached replay after an in-place step update", () => {
+    const db = createConversationDb(dir, "conv-replay-mutation");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "partial" }) });
+
+    const cache = new ReplayCache(8);
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "partial" } }
+    ]);
+
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "complete result" }));
+    db.close();
+
+    expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
+      { content: { text: "complete result" } }
+    ]);
   });
 
   it("returns null for a missing conversation", () => {
