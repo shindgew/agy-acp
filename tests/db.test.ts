@@ -558,6 +558,73 @@ describe("Translator", () => {
     expect(update.locations).toBeUndefined();
   });
 
+  it("does not emit non-existent or deleted SearchPath in locations for grep_search steps", () => {
+    const deletedDir = path.join(dir, "non-existent-folder");
+    const db = createConversationDb(dir, "conv-grep-deleted-dir");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-deleted",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: deletedDir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${deletedDir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-deleted-dir")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("emits SearchPath in locations for grep_search steps when SearchPath is a file", () => {
+    const file = path.join(dir, "test.txt");
+    fs.writeFileSync(file, "hello world");
+    const db = createConversationDb(dir, "conv-grep-file");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-file",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "hello", SearchPath: file })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "hello",
+          cwdUri: `file://${file}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-file")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: file }]);
+  });
+
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
     const db = createConversationDb(dir, "conv-exec-pending");
     insertStep(db, {

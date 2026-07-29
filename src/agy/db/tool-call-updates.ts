@@ -255,6 +255,16 @@ function isDirectory(filePath: string | null | undefined): boolean {
   }
 }
 
+/** Return true if `filePath` is positively known to be a file on disk. */
+function isFile(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  try {
+    return fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 // --- per-tool builders --------------------------------------------------------
 // agy's rawInputJson keys are inconsistently PascalCase/camelCase across tool
 // versions (`TargetFile` vs `targetFile`), so every lookup below tries both.
@@ -368,7 +378,7 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (searchPath && !isDirectory(searchPath)) locations.push({ path: searchPath });
+    if (searchPath && isFile(searchPath)) locations.push({ path: searchPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
