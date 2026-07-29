@@ -980,6 +980,7 @@ describe("Translator", () => {
     insertStep(db, {
       idx: 1,
       stepType: 15,
+      status: 1,
       stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
     });
 
@@ -987,14 +988,17 @@ describe("Translator", () => {
     const translator = new Translator({ mode: "stream", skipNarration: false });
     expect(translator.translate(conn.readAfter(0))).toEqual([]);
 
-    updateStepPayload(
+    updateStep(
       db,
       1,
-      encodeStepPayload({
-        agentText: {
-          text: "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished"
-        }
-      })
+      {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: {
+            text: "<SYSTEM_MESSAGE>\n[Message] timestamp=2026-07-28T10:07:08Z content=Task id task-175 finished"
+          }
+        })
+      }
     );
     expect(translator.translate(conn.readAfter(0))).toEqual([]);
     expect(translator.translate(conn.readAfter(0))).toEqual([]);
@@ -1008,6 +1012,7 @@ describe("Translator", () => {
     insertStep(db, {
       idx: 1,
       stepType: 15,
+      status: 1,
       stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n" } })
     });
 
@@ -1015,10 +1020,13 @@ describe("Translator", () => {
     const translator = new Translator({ mode: "stream", skipNarration: false });
     expect(translator.translate(conn.readAfter(0))).toEqual([]);
 
-    updateStepPayload(
+    updateStep(
       db,
       1,
-      encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n[Message] payload" } })
+      {
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n\n[Message] payload" } })
+      }
     );
     expect(translator.translate(conn.readAfter(0))).toEqual([]);
 
@@ -1031,6 +1039,7 @@ describe("Translator", () => {
     insertStep(db, {
       idx: 1,
       stepType: 15,
+      status: 1,
       stepPayload: encodeStepPayload({ agentText: { text: "<SYSTEM_MESSAGE>\n[Messag" } })
     });
 
@@ -1050,6 +1059,65 @@ describe("Translator", () => {
 
     conn.close();
     db.close();
+  });
+
+  it("releases an ambiguous system-message prefix when its row is terminal", () => {
+    const db = createConversationDb(dir, "conv-terminal-sys-msg-prefix");
+    const text = "<SYSTEM_MESSAGE>\n[Messag";
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: { text } })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-terminal-sys-msg-prefix")!;
+    const updates = new Translator({ mode: "stream", skipNarration: false }).translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text }
+      }
+    ]);
+  });
+
+  it("releases an ambiguous system-message prefix at a later step boundary", () => {
+    const db = createConversationDb(dir, "conv-bounded-sys-msg-prefix");
+    const text = "<SYSTEM_MESSAGE>\n[Messag";
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: { text } })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: { text: "done" } })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-bounded-sys-msg-prefix")!;
+    const updates = new Translator({ mode: "stream", skipNarration: false }).translate(conn.readAfter(0));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\ndone" }
+      }
+    ]);
   });
 
   it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose or at start", () => {

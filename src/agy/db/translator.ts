@@ -122,13 +122,14 @@ export class Translator {
     const out: SessionUpdate[] = [];
     let streamingAgentMessageId: string | null = null;
     let streamingHasVisibleText = false;
-    for (const row of rows) {
+    for (const [rowIndex, row] of rows.entries()) {
       let streamingNeedsSeparator = false;
+      const canGrow = rowIndex === rows.length - 1 && row.status !== 3 && row.status !== 6 && row.status !== 7;
       if (this.opts.mode === "stream") {
         if (row.stepType === 15) {
           const text = row.stepPayload.agentText?.text ?? "";
           const isSysMsg = isSystemMessage(text);
-          const isSysMsgPrefix = isSystemMessagePrefix(text);
+          const isSysMsgPrefix = canGrow && isSystemMessagePrefix(text);
           if (text.length > 0 && !isSysMsg && !isSysMsgPrefix) streamingAgentMessageId ??= String(row.idx);
           const visible =
             text.length > 0 && !isSysMsg && !isSysMsgPrefix && !(this.opts.skipNarration && isNarration(text));
@@ -139,7 +140,7 @@ export class Translator {
           streamingHasVisibleText = false;
         }
       }
-      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator);
+      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
     }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
@@ -151,13 +152,14 @@ export class Translator {
     row: StepRow,
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
-    streamingNeedsSeparator: boolean
+    streamingNeedsSeparator: boolean,
+    canGrow: boolean
   ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator);
+        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -277,7 +279,8 @@ export class Translator {
     row: StepRow,
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
-    streamingNeedsSeparator: boolean
+    streamingNeedsSeparator: boolean,
+    canGrow: boolean
   ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
@@ -286,7 +289,7 @@ export class Translator {
 
     const text = row.stepPayload.agentText?.text ?? "";
     if (isSystemMessage(text)) return;
-    if (this.opts.mode === "stream" && isSystemMessagePrefix(text)) return;
+    if (this.opts.mode === "stream" && canGrow && isSystemMessagePrefix(text)) return;
 
     const messageId = streamingAgentMessageId ?? String(row.idx);
 
