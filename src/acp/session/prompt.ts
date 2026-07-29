@@ -218,9 +218,12 @@ async function runV2PromptTurn(
     });
   };
 
-  const userMsgIdx = Math.max(session.agy.lastStepIdx + 1, (session.lastUserMsgIdx ?? -1) + 1);
-  session.lastUserMsgIdx = userMsgIdx;
-  const userMessageId = String(userMsgIdx);
+  const parsedSlash = parseSlashCommand(promptText);
+  const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
+  const userMessageId =
+    slashResult && slashResult.kind !== "pass"
+      ? `slash-${randomUUID()}`
+      : String(Math.max(0, session.agy.lastStepIdx + 1));
   try {
     signal.throwIfAborted();
 

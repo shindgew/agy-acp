@@ -1302,6 +1302,55 @@ describe("ACP v2 (experimental draft)", () => {
     });
   });
 
+  it("keeps curated slash command IDs out of the DB step namespace", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: Array<Record<string, unknown>> = [];
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-slash-id", [
+            { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) }
+          ])
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/plan" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const slashMessage = updates.find((u) => u.sessionUpdate === "user_message");
+        expect(slashMessage?.messageId).toMatch(/^slash-[0-9a-f-]{36}$/);
+
+        updates.length = 0;
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
+        await waitFor(() => updates.some((u) => u.sessionUpdate === "state_update" && u.state === "idle"));
+        const ordinaryMessage = updates.find((u) => u.sessionUpdate === "user_message");
+        expect(ordinaryMessage?.messageId).toBe("0");
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   it("replays history on session/resume with replayFrom start", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {

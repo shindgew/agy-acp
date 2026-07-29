@@ -16,6 +16,4 @@ export interface SessionState {
   activePrompt: boolean;
   /** Active v2 prompt-turn abort controller, if any. */
   promptAbort?: AbortController;
-  /** Last assigned user message index in this session. */
-  lastUserMsgIdx?: number;
 }
