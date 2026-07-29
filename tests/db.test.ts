@@ -461,6 +461,7 @@ describe("Translator", () => {
     expect(update.kind).toBe("execute");
     expect(update.rawOutput).toMatchObject({ exitCode: 0 });
     const body = (update.content ?? []).map((c) => c.content?.text ?? "").join("\n");
+    expect(body).toContain("ls");
     expect(body).toContain("README.md");
   });
 
