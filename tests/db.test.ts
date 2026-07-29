@@ -465,6 +465,423 @@ describe("Translator", () => {
     expect(body).toContain("README.md");
   });
 
+  it("does not emit directory Cwd in locations for run_command steps (regression for issue #16)", () => {
+    const db = createConversationDb(dir, "conv-exec-no-dir-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c-dir",
+            namePrimary: "run_command",
+            rawInputJson: JSON.stringify({ CommandLine: "ls", Cwd: dir })
+          })
+        }),
+        commandResult: encodeCommandResult({
+          cwd: dir,
+          exitCode: 0,
+          output: "ok\n",
+          command: "ls"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-exec-no-dir-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory path in locations for list_dir steps", () => {
+    const db = createConversationDb(dir, "conv-list-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 9,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "l-dir",
+            namePrimary: "list_dir",
+            rawInputJson: JSON.stringify({ DirectoryPath: dir })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-list-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit directory SearchPath in locations for grep_search steps", () => {
+    const db = createConversationDb(dir, "conv-grep-dir-no-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-dir",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: dir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${dir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-dir-no-location")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit non-existent or deleted SearchPath in locations for grep_search steps", () => {
+    const deletedDir = path.join(dir, "non-existent-folder");
+    const db = createConversationDb(dir, "conv-grep-deleted-dir");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-deleted",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "foo", SearchPath: deletedDir })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "foo",
+          cwdUri: `file://${deletedDir}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-deleted-dir")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("emits SearchPath in locations for grep_search steps when SearchPath is a file", () => {
+    const file = path.join(dir, "test.txt");
+    fs.writeFileSync(file, "hello world");
+    const db = createConversationDb(dir, "conv-grep-file");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-file",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "hello", SearchPath: file })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "hello",
+          cwdUri: `file://${file}`
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-file")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: file }]);
+  });
+
+  it("resolves relative SearchPath against session cwd for grep_search steps", () => {
+    const relFile = "subfolder/rel-file.txt";
+    const absFolder = path.join(dir, "subfolder");
+    fs.mkdirSync(absFolder, { recursive: true });
+    const absFile = path.join(dir, relFile);
+    fs.writeFileSync(absFile, "relative content");
+
+    const db = createConversationDb(dir, "conv-grep-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 7,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "g-rel",
+            namePrimary: "grep_search",
+            rawInputJson: JSON.stringify({ Query: "relative", SearchPath: relFile })
+          })
+        }),
+        grepSearch: encodeGrepSearchResult({
+          query: "relative"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-grep-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: absFile }]);
+  });
+
+  it("does not emit location for replayed view_file step when file does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-view.txt");
+    const db = createConversationDb(dir, "conv-view-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "view-missing",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: missingFile })
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: `file://${missingFile}`,
+          content: "cached historical content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-view-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: unknown[] };
+    expect(update.locations).toBeUndefined();
+  });
+
+  it("does not emit locations for replayed edits when the target does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-edit.txt");
+    const db = createConversationDb(dir, "conv-edit-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-missing",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: missingFile, CodeContent: "new content\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "replace-missing",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: missingFile,
+              TargetContent: "old content",
+              ReplacementContent: "new content",
+              StartLine: 3
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-edit-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    for (const update of updates as Array<{ locations?: unknown[] }>) {
+      expect(update.locations).toBeUndefined();
+    }
+  });
+
+  it("decodes Windows file URIs with drive letters in view_file fallback", () => {
+    const winFile = path.join(dir, "win.txt");
+    fs.writeFileSync(winFile, "content");
+    const fileUri = `file:///${winFile.replace(/\\/g, "/")}`;
+    const db = createConversationDb(dir, "conv-win-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri,
+          startLine: 1,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-win-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    const update = updates[0] as { locations?: Array<{ path: string }> };
+    expect(update.locations).toEqual([{ path: winFile, line: 1 }]);
+  });
+
+  it("handles malformed percent-encoded file URIs without throwing URIError", () => {
+    const db = createConversationDb(dir, "conv-malformed-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: "file:///tmp/foo%bar",
+          content: "malformed URI test content\n"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-malformed-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    expect(() => translator.translate(conn.readAfter(-1))).not.toThrow();
+    conn.close();
+  });
+
+  it("does not reinterpret an encoded path separator in a malformed file URI", () => {
+    const nestedDir = path.join(dir, "encoded");
+    const nestedFile = path.join(nestedDir, "path.txt");
+    fs.mkdirSync(nestedDir);
+    fs.writeFileSync(nestedFile, "content");
+    const malformedUri = `file://${path.join(dir, "encoded%2Fpath.txt")}`;
+    const db = createConversationDb(dir, "conv-encoded-separator-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: malformedUri,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-encoded-separator-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    expect((updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+  });
+
+  it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
+    const db = createConversationDb(dir, "conv-write-diff-rel");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "read-rel",
+            namePrimary: "view_file",
+            rawInputJson: '{"AbsolutePath":"a.ts"}'
+          })
+        }),
+        viewFile: encodeViewFileResult({
+          fileUri: "a.ts",
+          content: "export const x = 1;\n"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-rel",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: "a.ts",
+              CodeContent: "export const x = 2;\n"
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-write-diff-rel")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    const write = updates.find(
+      (u) => (u as { toolCallId?: string }).toolCallId === "write-rel"
+    ) as {
+      content?: Array<{ type?: string; path?: string; oldText?: string | null; newText?: string }>;
+    };
+    expect(write).toBeTruthy();
+    const diff = (write.content ?? []).find((c) => c.type === "diff");
+    expect(diff).toMatchObject({
+      type: "diff",
+      oldText: "export const x = 1;\n",
+      newText: "export const x = 2;\n"
+    });
+  });
+
   it("does not attach exitCode in rawOutput for pending run_command steps", () => {
     const db = createConversationDb(dir, "conv-exec-pending");
     insertStep(db, {
@@ -1227,6 +1644,69 @@ describe("ReplayCache", () => {
     expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
       { content: { text: "complete result" } }
     ]);
+  });
+
+  it("rebuilds cached locations when a referenced file is deleted", () => {
+    const file = path.join(dir, "cached-location.txt");
+    fs.writeFileSync(file, "content");
+    const db = createConversationDb(dir, "conv-replay-deleted-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cached-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+
+    fs.rmSync(file);
+
+    const rebuilt = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+    expect(rebuilt?.updates).not.toBe(first?.updates);
+  });
+
+  it("rebuilds cached locations when a referenced file is restored", () => {
+    const file = path.join(dir, "restored-location.txt");
+    const db = createConversationDb(dir, "conv-replay-restored-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "restored-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+
+    fs.writeFileSync(file, "content");
+
+    const rebuilt = cache.get(dir, "conv-replay-restored-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+    expect(rebuilt?.updates).not.toBe(first?.updates);
   });
 
   it("returns null for a missing conversation", () => {

@@ -8,6 +8,7 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb, type DbStat, statConversation } from "./database.js";
 import { Lru } from "./lru.js";
+import { isReadableFile } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 
 export interface ReplayOptions {
@@ -25,16 +26,25 @@ interface CacheEntry extends ReplayResult {
   stat: DbStat;
   skipNarration: boolean;
   cwd: string | undefined;
+  locationReadability: Map<string, boolean>;
+}
+
+interface BuiltReplay extends ReplayResult {
+  locationReadability: Map<string, boolean>;
 }
 
 /** Translate an entire conversation from scratch. Returns null if unreadable. */
-function buildReplay(dir: string, id: string, opts: ReplayOptions): ReplayResult | null {
+function buildReplay(dir: string, id: string, opts: ReplayOptions): BuiltReplay | null {
   const conn = ConversationDb.open(dir, id);
   if (!conn) return null;
   try {
     const translator = new Translator({ mode: "replay", ...opts });
     const updates = translator.translate(conn.readAfter(-1));
-    return { updates, maxIdx: translator.lastStepIdx };
+    return {
+      updates,
+      maxIdx: translator.lastStepIdx,
+      locationReadability: translator.locationReadability
+    };
   } finally {
     conn.close();
   }
@@ -61,7 +71,10 @@ export class ReplayCache {
 
     if (entry && sameOptions) {
       // Fast path: file identical to what we cached.
-      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size) {
+      const locationStateUnchanged = [...entry.locationReadability].every(
+        ([filePath, wasReadable]) => isReadableFile(filePath) === wasReadable
+      );
+      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size && locationStateUnchanged) {
         return { updates: entry.updates, maxIdx: entry.maxIdx };
       }
     }
@@ -69,11 +82,7 @@ export class ReplayCache {
     // Full (re)build.
     const built = buildReplay(dir, id, opts);
     if (!built) return null;
-    this.store(id, built, stat, opts);
-    return built;
-  }
-
-  private store(id: string, result: ReplayResult, stat: DbStat, opts: ReplayOptions): void {
-    this.cache.set(id, { ...result, stat, skipNarration: opts.skipNarration, cwd: opts.cwd });
+    this.cache.set(id, { ...built, stat, skipNarration: opts.skipNarration, cwd: opts.cwd });
+    return { updates: built.updates, maxIdx: built.maxIdx };
   }
 }

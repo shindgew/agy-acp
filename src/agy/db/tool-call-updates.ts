@@ -2,7 +2,9 @@
 // result variants) into ACP `tool_call` updates. Shared helpers first, then one
 // builder per tool family, grouped by the ACP `ToolKind` they map to.
 
+import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
 import { isPlanFile, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
@@ -17,6 +19,8 @@ export interface UpdateContext {
   cwd?: string;
   /** Prior file contents for full-file write diffs. */
   fileContents?: FileContentCache;
+  /** Candidate location path -> readability observed while translating. */
+  locationReadability?: Map<string, boolean>;
 }
 
 /** Cap on fetched URL / large tool bodies surfaced in session updates. */
@@ -233,15 +237,42 @@ function asNum(v: unknown): number | null {
   return null;
 }
 
-/** Strip a `file://` scheme so the value can be resolved/displayed as a path. */
+/** Convert a valid `file://` URL to a path; reject malformed URLs without throwing. */
 function fsPath(p: string | null | undefined): string | null {
   if (!p) return null;
   if (!p.startsWith("file://")) return p;
   try {
-    return decodeURIComponent(new URL(p).pathname);
+    return fileURLToPath(p);
   } catch {
-    return p.slice("file://".length);
+    return null;
   }
+}
+
+/** Resolve relative or `file://` path against session cwd. */
+function resolvePath(filePath: string | null | undefined, cwd?: string): string | null {
+  const p = fsPath(filePath);
+  if (!p) return null;
+  if (path.isAbsolute(p)) return path.resolve(p);
+  return cwd ? path.resolve(cwd, p) : path.resolve(p);
+}
+
+/** Return true if `filePath` is positively known to be a readable file. */
+export function isReadableFile(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  try {
+    if (!fs.statSync(filePath).isFile()) return false;
+    fs.accessSync(filePath, fs.constants.R_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isReadableLocation(filePath: string | null, ctx?: UpdateContext): boolean {
+  if (!filePath) return false;
+  const readable = isReadableFile(filePath);
+  ctx?.locationReadability?.set(filePath, readable);
+  return readable;
 }
 
 // --- per-tool builders --------------------------------------------------------
@@ -289,7 +320,6 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     const dir = fsPath(asStr(list?.dirUri)) ?? fsPath(asStr(pick(rawInput, "DirectoryPath", "directoryPath")));
     const shown = dir ? toDisplayPath(dir, displayCwd) : "";
     title = shown ? `Read ${shown}` : "Read directory";
-    if (dir) locations.push({ path: dir });
 
     const entries = (list?.entries ?? []).filter((e) => e.name.trim().length > 0);
     if (entries.length > 0) {
@@ -298,13 +328,15 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   } else {
     const filePath =
       fsPath(asStr(pick(rawInput, "AbsolutePath", "absolutePath", "FilePath"))) ?? fsPath(asStr(view?.fileUri));
+    const resolvedFile = resolvePath(filePath, displayCwd);
     const shown = filePath ? toDisplayPath(filePath, displayCwd) : "";
     const startLine = asNum(pick(rawInput, "StartLine", "startLine")) ?? asNum(view?.startLine) ?? 1;
     const endLine = asNum(pick(rawInput, "EndLine", "endLine")) ?? asNum(view?.endLine);
+    const locationLine = startLine === 0 ? 1 : startLine;
 
     title = shown ? `Read ${shown}` : "Read file";
-    if (shown && endLine !== null) title += `:${startLine === 0 ? 1 : startLine}-${endLine}`;
-    if (filePath) locations.push({ path: filePath, line: startLine });
+    if (shown && endLine !== null) title += `:${locationLine}-${endLine}`;
+    if (isReadableLocation(resolvedFile, ctx)) locations.push({ path: resolvedFile, line: locationLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -320,7 +352,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
           fileSizeOrTotal: asNum(view?.fileSizeOrTotal)
         })
       ) {
-        fileContents.set(path.resolve(filePath), body);
+        fileContents.set(path.resolve(resolvedFile ?? filePath), body);
       }
     }
   }
@@ -356,9 +388,10 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
   if (grep || name === "grep_search" || stepType === 7) {
     const query = asStr(grep?.query) ?? asStr(pick(rawInput, "Query", "query")) ?? "";
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
+    const resolvedPath = resolvePath(searchPath, displayCwd);
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (searchPath) locations.push({ path: searchPath });
+    if (isReadableLocation(resolvedPath, ctx)) locations.push({ path: resolvedPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
@@ -413,7 +446,7 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const commandCwd =
     fsPath(asStr(pick(rawInput, "Cwd", "cwd"))) ??
     fsPath(commandResult?.cwd?.trim() ? commandResult.cwd : null);
-  const locations = commandCwd ? [{ path: commandCwd }] : [];
+  const locations: Record<string, unknown>[] = [];
 
   const update = toolCallUpdate({
     stepRow,
@@ -516,6 +549,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const displayCwd = fsPath(cwd) ?? undefined;
 
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
+  const resolvedTarget = resolvePath(targetFile, displayCwd) ?? targetFile;
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update).
@@ -535,11 +569,11 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     if (targetFile) {
       // Prefer prior view_file/write content as oldText when known; otherwise null
       // (new file or prior content never observed in this translator pass).
-      const cacheKey = path.resolve(targetFile);
+      const cacheKey = path.resolve(resolvedTarget);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
-      locations.push({ path: targetFile });
+      if (isReadableLocation(resolvedTarget, ctx)) locations.push({ path: resolvedTarget });
     }
   } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
@@ -553,8 +587,10 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
       content.push({ type: "diff", path: targetFile, oldText, newText });
 
-      const line = asNum(pick(chunk, "StartLine", "startLine"));
-      locations.push(line !== null ? { path: targetFile, line } : { path: targetFile });
+      if (isReadableLocation(resolvedTarget, ctx)) {
+        const line = asNum(pick(chunk, "StartLine", "startLine"));
+        locations.push(line !== null ? { path: resolvedTarget, line } : { path: resolvedTarget });
+      }
     }
   }
 
