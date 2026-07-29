@@ -3,7 +3,10 @@
 // suppressed so background notifications and command outputs do not render as regular
 // assistant response text in ACP clients.
 
-/** True if the text contains an internal `<SYSTEM_MESSAGE>` payload. */
+/**
+ * True if the text is an internal `<SYSTEM_MESSAGE>` envelope injected by agy
+ * (starts with `<SYSTEM_MESSAGE>` at the beginning of the text payload).
+ */
 export function isSystemMessage(text: string): boolean {
-  return text.includes("<SYSTEM_MESSAGE>");
+  return /^\s*<SYSTEM_MESSAGE>/i.test(text);
 }

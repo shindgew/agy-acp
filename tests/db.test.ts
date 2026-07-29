@@ -974,6 +974,27 @@ describe("Translator", () => {
       }
     ]);
   });
+
+  it("preserves assistant messages that mention <SYSTEM_MESSAGE> in prose", () => {
+    const db = createConversationDb(dir, "conv-prose-sys-msg");
+    const proseText = "The error notification contains <SYSTEM_MESSAGE> tag.";
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: { text: proseText } }) });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-prose-sys-msg")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: proseText },
+        _meta: { stepIdx: 1 }
+      }
+    ]);
+  });
 });
 
 describe("StreamPoller", () => {
