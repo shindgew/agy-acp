@@ -138,7 +138,7 @@ describe("Translator", () => {
   it("uses one message id for consecutive agent-text rows in streaming and replay", () => {
     const db = createConversationDb(dir, "conv-stream-message-group");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
-    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: " world" }) });
+    insertStep(db, { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "world" }) });
     db.close();
 
     const streamConn = ConversationDb.open(dir, "conv-stream-message-group")!;
@@ -146,9 +146,17 @@ describe("Translator", () => {
       streamConn.readAfter(-1)
     );
     streamConn.close();
-    expect(streamUpdates).toMatchObject([
-      { sessionUpdate: "agent_message_chunk", messageId: "1" },
-      { sessionUpdate: "agent_message_chunk", messageId: "1" }
+    expect(streamUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello" }
+      },
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "\nworld" }
+      }
     ]);
 
     const replayConn = ConversationDb.open(dir, "conv-stream-message-group")!;
@@ -156,8 +164,13 @@ describe("Translator", () => {
       replayConn.readAfter(-1)
     );
     replayConn.close();
-    expect(replayUpdates).toMatchObject([
-      { sessionUpdate: "agent_message_chunk", messageId: "1" }
+    expect(replayUpdates).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "1",
+        content: { type: "text", text: "Hello\nworld" },
+        _meta: { stepIdx: 1, endStepIdx: 2 }
+      }
     ]);
   });
 

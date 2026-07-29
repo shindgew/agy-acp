@@ -120,16 +120,22 @@ export class Translator {
   translate(rows: StepRow[]): SessionUpdate[] {
     const out: SessionUpdate[] = [];
     let streamingAgentMessageId: string | null = null;
+    let streamingHasVisibleText = false;
     for (const row of rows) {
+      let streamingNeedsSeparator = false;
       if (this.opts.mode === "stream") {
         if (row.stepType === 15) {
           const text = row.stepPayload.agentText?.text ?? "";
           if (text.length > 0) streamingAgentMessageId ??= String(row.idx);
+          const visible = text.length > 0 && !(this.opts.skipNarration && isNarration(text));
+          streamingNeedsSeparator = visible && streamingHasVisibleText;
+          if (visible) streamingHasVisibleText = true;
         } else {
           streamingAgentMessageId = null;
+          streamingHasVisibleText = false;
         }
       }
-      this.translateRow(row, out, streamingAgentMessageId);
+      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator);
     }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
@@ -140,13 +146,14 @@ export class Translator {
   private translateRow(
     row: StepRow,
     out: SessionUpdate[],
-    streamingAgentMessageId: string | null
+    streamingAgentMessageId: string | null,
+    streamingNeedsSeparator: boolean
   ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out, streamingAgentMessageId);
+        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -265,7 +272,8 @@ export class Translator {
   private handleAgentText(
     row: StepRow,
     out: SessionUpdate[],
-    streamingAgentMessageId: string | null
+    streamingAgentMessageId: string | null,
+    streamingNeedsSeparator: boolean
   ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
@@ -294,7 +302,9 @@ export class Translator {
     this.agentTextLengths.set(row.idx, text.length);
     if (this.opts.skipNarration && isNarration(text)) return;
     const delta = text.slice(emitted);
-    if (delta.length > 0) out.push(agentChunk(delta, messageId));
+    if (delta.length > 0) {
+      out.push(agentChunk(emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta, messageId));
+    }
   }
 
   private flushAgentBuffer(out: SessionUpdate[]): void {
