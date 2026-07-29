@@ -64,6 +64,12 @@ export interface AskQuestionPayloadFull {
   questionCount: number;
 }
 
+function sanitizePtyText(value: unknown): string {
+  return String(value)
+    .replace(/[\r\n\t]+/g, " ")
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+}
+
 function toolRawInput(toolCall: SessionUpdate): Record<string, unknown> {
   const raw = toolCall as unknown as Record<string, unknown>;
   return raw.rawInput && typeof raw.rawInput === "object" && !Array.isArray(raw.rawInput)
@@ -211,7 +217,7 @@ export function encodeElicitationKeys(
   if (val == null) return "\x1b";
 
   if (item.options.length > 0 && !item.multiSelect) {
-    const strVal = String(val).trim();
+    const strVal = sanitizePtyText(val).trim();
     let index = item.options.findIndex((opt) => opt === strVal);
     if (index === -1) {
       const num = Number(strVal);
@@ -255,7 +261,7 @@ export function encodeElicitationKeys(
       return keys;
     }
   } else {
-    const textVal = String(val);
+    const textVal = sanitizePtyText(val);
     return `${textVal}\r`;
   }
 }

@@ -243,6 +243,9 @@ describe("Encoding Elicitation Responses to PTY Keypresses", () => {
     } as any;
 
     expect(encodeElicitationKeys(textCall, { q0: "my_function_name" })).toBe("my_function_name\r");
+    expect(
+      encodeElicitationKeys(textCall, { q0: "first\nsecond\r\x1b[2J\tthird\x00" })
+    ).toBe("first second [2J third\r");
   });
 
   it("returns escape key on cancel or decline", () => {
