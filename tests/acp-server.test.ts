@@ -1722,6 +1722,33 @@ describe("ACP v2 (experimental draft)", () => {
     });
   });
 
+  it("retains terminal output progress when a completed row grows after first sight", () => {
+    const termTracker = createTerminalOutputTracker();
+    const toolTracker = createToolCallContentTracker();
+    const update = (output: string) => ({
+      sessionUpdate: "tool_call_update",
+      toolCallId: "late-completed-output",
+      title: "build",
+      kind: "execute",
+      status: "completed",
+      rawInput: { CommandLine: "make" },
+      rawOutput: { exitCode: 0, output }
+    } as unknown as SessionUpdate);
+
+    expandSessionUpdateToV2(update("abc"), termTracker, toolTracker);
+    const grown = expandSessionUpdateToV2(
+      update("abcdef"),
+      termTracker,
+      toolTracker
+    ) as Array<Record<string, unknown>>;
+
+    expect(grown[1]).toEqual({
+      sessionUpdate: "terminal_output_chunk",
+      terminalId: terminalIdForToolCall("late-completed-output"),
+      data: Buffer.from("def", "utf8").toString("base64")
+    });
+  });
+
   it("emits tool_call_content_chunk when new content items are appended to a previously empty tool call", () => {
     const termTracker = createTerminalOutputTracker();
     const toolTracker = createToolCallContentTracker();

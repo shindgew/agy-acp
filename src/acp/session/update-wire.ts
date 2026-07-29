@@ -366,9 +366,6 @@ export function expandSessionUpdateToV2(
     meta.status === "completed" ||
     meta.status === "failed" ||
     meta.status === "cancelled";
-  if (finished) {
-    terminalTracker.delete(meta.terminalId);
-  }
 
   const tool = sessionUpdateToV2(update) as unknown as Record<string, unknown>;
   tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
