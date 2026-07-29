@@ -2,6 +2,7 @@
 // result variants) into ACP `tool_call` updates. Shared helpers first, then one
 // builder per tool family, grouped by the ACP `ToolKind` they map to.
 
+import fs from "node:fs";
 import path from "node:path";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
@@ -244,6 +245,16 @@ function fsPath(p: string | null | undefined): string | null {
   }
 }
 
+/** Return true if `filePath` is known to be a directory on disk. */
+function isDirectory(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  try {
+    return fs.statSync(filePath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 // --- per-tool builders --------------------------------------------------------
 // agy's rawInputJson keys are inconsistently PascalCase/camelCase across tool
 // versions (`TargetFile` vs `targetFile`), so every lookup below tries both.
@@ -289,7 +300,6 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     const dir = fsPath(asStr(list?.dirUri)) ?? fsPath(asStr(pick(rawInput, "DirectoryPath", "directoryPath")));
     const shown = dir ? toDisplayPath(dir, displayCwd) : "";
     title = shown ? `Read ${shown}` : "Read directory";
-    if (dir) locations.push({ path: dir });
 
     const entries = (list?.entries ?? []).filter((e) => e.name.trim().length > 0);
     if (entries.length > 0) {
@@ -304,7 +314,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
     title = shown ? `Read ${shown}` : "Read file";
     if (shown && endLine !== null) title += `:${startLine === 0 ? 1 : startLine}-${endLine}`;
-    if (filePath) locations.push({ path: filePath, line: startLine });
+    if (filePath && !isDirectory(filePath)) locations.push({ path: filePath, line: startLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -358,7 +368,7 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (searchPath) locations.push({ path: searchPath });
+    if (searchPath && !isDirectory(searchPath)) locations.push({ path: searchPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
@@ -413,7 +423,7 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const commandCwd =
     fsPath(asStr(pick(rawInput, "Cwd", "cwd"))) ??
     fsPath(commandResult?.cwd?.trim() ? commandResult.cwd : null);
-  const locations = commandCwd ? [{ path: commandCwd }] : [];
+  const locations: Record<string, unknown>[] = [];
 
   const update = toolCallUpdate({
     stepRow,
@@ -539,7 +549,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
-      locations.push({ path: targetFile });
+      if (!isDirectory(targetFile)) locations.push({ path: targetFile });
     }
   } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
@@ -553,8 +563,10 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
       content.push({ type: "diff", path: targetFile, oldText, newText });
 
-      const line = asNum(pick(chunk, "StartLine", "startLine"));
-      locations.push(line !== null ? { path: targetFile, line } : { path: targetFile });
+      if (!isDirectory(targetFile)) {
+        const line = asNum(pick(chunk, "StartLine", "startLine"));
+        locations.push(line !== null ? { path: targetFile, line } : { path: targetFile });
+      }
     }
   }
 
