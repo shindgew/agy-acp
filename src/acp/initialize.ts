@@ -72,9 +72,8 @@ export function handleInitializeV1(
         },
         auth: {
           logout: {}
-        },
-        elicitation: {}
-      } as unknown as v1.AgentCapabilities,
+        }
+      },
       authMethods: v1AuthMethods(),
       agentInfo: { ...AGENT_INFO, version: agentVersion }
     }
@@ -103,9 +102,8 @@ export function handleInitializeV2(
           },
           additionalDirectories: {}
         },
-        auth: {},
-        elicitation: {}
-      } as unknown as v2.AgentCapabilities,
+        auth: {}
+      },
       // Non-empty authMethods commits the agent to auth/login + auth/logout.
       authMethods: v2AuthMethods()
     }

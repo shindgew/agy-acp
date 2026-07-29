@@ -9,7 +9,7 @@ import { canBridgeInteraction } from "../src/acp/tool-calls/permissions.js";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
 describe("ACP Elicitation Capabilities", () => {
-  it("advertises elicitation in agent capabilities for v1 initialize", () => {
+  it("reads v1 client elicitation support without advertising an agent capability", () => {
     const { response, clientElicitation } = handleInitializeV1(
       {
         protocolVersion: 1,
@@ -20,11 +20,11 @@ describe("ACP Elicitation Capabilities", () => {
       "1.0.0"
     );
 
-    expect(response.agentCapabilities).toHaveProperty("elicitation", {});
+    expect(response.agentCapabilities).not.toHaveProperty("elicitation");
     expect(clientElicitation).toEqual({ form: true, url: true });
   });
 
-  it("advertises elicitation in agent capabilities for v2 initialize", () => {
+  it("reads v2 client elicitation support without advertising an agent capability", () => {
     const { response, clientElicitation } = handleInitializeV2(
       {
         protocolVersion: 2,
@@ -35,7 +35,7 @@ describe("ACP Elicitation Capabilities", () => {
       "1.0.0"
     );
 
-    expect(response.capabilities).toHaveProperty("elicitation", {});
+    expect(response.capabilities).not.toHaveProperty("elicitation");
     expect(clientElicitation).toEqual({ form: true, url: false });
   });
 });
