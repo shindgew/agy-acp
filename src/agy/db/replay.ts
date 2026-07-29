@@ -8,6 +8,7 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb, type DbStat, statConversation } from "./database.js";
 import { Lru } from "./lru.js";
+import { isReadableFile } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 
 export interface ReplayOptions {
@@ -61,7 +62,11 @@ export class ReplayCache {
 
     if (entry && sameOptions) {
       // Fast path: file identical to what we cached.
-      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size) {
+      const locationsStillReadable = entry.updates.every((update) => {
+        const locations = (update as SessionUpdate & { locations?: Array<{ path?: unknown }> }).locations ?? [];
+        return locations.every((location) => typeof location.path === "string" && isReadableFile(location.path));
+      });
+      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size && locationsStillReadable) {
         return { updates: entry.updates, maxIdx: entry.maxIdx };
       }
     }

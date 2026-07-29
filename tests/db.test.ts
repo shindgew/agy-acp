@@ -695,6 +695,55 @@ describe("Translator", () => {
     expect(update.locations).toBeUndefined();
   });
 
+  it("does not emit locations for replayed edits when the target does not exist on disk", () => {
+    const missingFile = path.join(dir, "non-existent-edit.txt");
+    const db = createConversationDb(dir, "conv-edit-missing");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-missing",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: missingFile, CodeContent: "new content\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "replace-missing",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: missingFile,
+              TargetContent: "old content",
+              ReplacementContent: "new content",
+              StartLine: 3
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-edit-missing")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    for (const update of updates as Array<{ locations?: unknown[] }>) {
+      expect(update.locations).toBeUndefined();
+    }
+  });
+
   it("decodes Windows file URIs with drive letters in view_file fallback", () => {
     const winFile = path.join(dir, "win.txt");
     fs.writeFileSync(winFile, "content");
@@ -743,6 +792,35 @@ describe("Translator", () => {
     const translator = new Translator({ mode: "replay", skipNarration: false });
     expect(() => translator.translate(conn.readAfter(-1))).not.toThrow();
     conn.close();
+  });
+
+  it("does not reinterpret an encoded path separator in a malformed file URI", () => {
+    const nestedDir = path.join(dir, "encoded");
+    const nestedFile = path.join(nestedDir, "path.txt");
+    fs.mkdirSync(nestedDir);
+    fs.writeFileSync(nestedFile, "content");
+    const malformedUri = `file://${path.join(dir, "encoded%2Fpath.txt")}`;
+    const db = createConversationDb(dir, "conv-encoded-separator-uri");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        viewFile: encodeViewFileResult({
+          fileUri: malformedUri,
+          content: "content"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-encoded-separator-uri")!;
+    const translator = new Translator({ mode: "replay", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    expect((updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
   });
 
   it("uses resolved session path for view_file cache keys on full-file writes with relative paths", () => {
@@ -1565,6 +1643,38 @@ describe("ReplayCache", () => {
     expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
       { content: { text: "complete result" } }
     ]);
+  });
+
+  it("rebuilds cached locations when a referenced file is deleted", () => {
+    const file = path.join(dir, "cached-location.txt");
+    fs.writeFileSync(file, "content");
+    const db = createConversationDb(dir, "conv-replay-deleted-location");
+    insertStep(db, {
+      idx: 1,
+      stepType: 8,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "cached-view",
+            namePrimary: "view_file",
+            rawInputJson: JSON.stringify({ AbsolutePath: file })
+          })
+        }),
+        viewFile: encodeViewFileResult({ fileUri: `file://${file}`, content: "content" })
+      })
+    });
+    db.close();
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((first?.updates[0] as { locations?: unknown[] }).locations).toEqual([{ path: file, line: 1 }]);
+
+    fs.rmSync(file);
+
+    const rebuilt = cache.get(dir, "conv-replay-deleted-location", { skipNarration: false });
+    expect((rebuilt?.updates[0] as { locations?: unknown[] }).locations).toBeUndefined();
+    expect(rebuilt?.updates).not.toBe(first?.updates);
   });
 
   it("returns null for a missing conversation", () => {

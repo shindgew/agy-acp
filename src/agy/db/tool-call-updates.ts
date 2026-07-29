@@ -235,19 +235,14 @@ function asNum(v: unknown): number | null {
   return null;
 }
 
-/** Strip a `file://` scheme so the value can be resolved/displayed as a path. */
+/** Convert a valid `file://` URL to a path; reject malformed URLs without throwing. */
 function fsPath(p: string | null | undefined): string | null {
   if (!p) return null;
   if (!p.startsWith("file://")) return p;
   try {
     return fileURLToPath(p);
   } catch {
-    const raw = p.slice("file://".length);
-    try {
-      return decodeURIComponent(raw);
-    } catch {
-      return raw;
-    }
+    return null;
   }
 }
 
@@ -259,21 +254,13 @@ function resolvePath(filePath: string | null | undefined, cwd?: string): string 
   return cwd ? path.resolve(cwd, p) : path.resolve(p);
 }
 
-/** Return true if `filePath` is known to be a directory on disk. */
-function isDirectory(filePath: string | null | undefined): boolean {
+/** Return true if `filePath` is positively known to be a readable file. */
+export function isReadableFile(filePath: string | null | undefined): boolean {
   if (!filePath) return false;
   try {
-    return fs.statSync(filePath).isDirectory();
-  } catch {
-    return false;
-  }
-}
-
-/** Return true if `filePath` is positively known to be a file on disk. */
-function isFile(filePath: string | null | undefined): boolean {
-  if (!filePath) return false;
-  try {
-    return fs.statSync(filePath).isFile();
+    if (!fs.statSync(filePath).isFile()) return false;
+    fs.accessSync(filePath, fs.constants.R_OK);
+    return true;
   } catch {
     return false;
   }
@@ -336,10 +323,11 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     const shown = filePath ? toDisplayPath(filePath, displayCwd) : "";
     const startLine = asNum(pick(rawInput, "StartLine", "startLine")) ?? asNum(view?.startLine) ?? 1;
     const endLine = asNum(pick(rawInput, "EndLine", "endLine")) ?? asNum(view?.endLine);
+    const locationLine = startLine === 0 ? 1 : startLine;
 
     title = shown ? `Read ${shown}` : "Read file";
-    if (shown && endLine !== null) title += `:${startLine === 0 ? 1 : startLine}-${endLine}`;
-    if (resolvedFile && isFile(resolvedFile)) locations.push({ path: resolvedFile, line: startLine });
+    if (shown && endLine !== null) title += `:${locationLine}-${endLine}`;
+    if (resolvedFile && isReadableFile(resolvedFile)) locations.push({ path: resolvedFile, line: locationLine });
 
     const body = asStr(view?.content);
     if (body) {
@@ -394,7 +382,7 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const resolvedPath = resolvePath(searchPath, displayCwd);
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
     title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
-    if (resolvedPath && isFile(resolvedPath)) locations.push({ path: resolvedPath });
+    if (resolvedPath && isReadableFile(resolvedPath)) locations.push({ path: resolvedPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
@@ -576,7 +564,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
       fileContents?.set(cacheKey, fullContent);
-      if (!isDirectory(resolvedTarget)) locations.push({ path: resolvedTarget });
+      if (isReadableFile(resolvedTarget)) locations.push({ path: resolvedTarget });
     }
   } else {
     // replace_file_content (one inline chunk) or multi_replace_file_content
@@ -590,7 +578,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
       content.push({ type: "diff", path: targetFile, oldText, newText });
 
-      if (!isDirectory(resolvedTarget)) {
+      if (isReadableFile(resolvedTarget)) {
         const line = asNum(pick(chunk, "StartLine", "startLine"));
         locations.push(line !== null ? { path: resolvedTarget, line } : { path: resolvedTarget });
       }
