@@ -23,6 +23,55 @@ export interface ClientFsCapability {
   writeTextFile: boolean;
 }
 
+export interface ClientTerminalCapability {
+  create: boolean;
+}
+
+export interface ClientToolCallNameCapability {
+  name: boolean;
+}
+
+export function parseClientTerminal(rawCaps: unknown): ClientTerminalCapability {
+  if (!rawCaps || typeof rawCaps !== "object") return { create: false };
+  const caps = rawCaps as Record<string, unknown>;
+  const terminal =
+    caps.terminal ??
+    (caps.clientCapabilities as Record<string, unknown> | undefined)?.terminal ??
+    (caps.capabilities as Record<string, unknown> | undefined)?.terminal;
+  if (!terminal) return { create: false };
+  if (typeof terminal === "boolean") return { create: terminal };
+  if (typeof terminal === "object") {
+    const createObj = (terminal as Record<string, unknown>).create;
+    const create = createObj != null ? Boolean(createObj) : true;
+    return { create };
+  }
+  return { create: false };
+}
+
+export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false): ClientToolCallNameCapability {
+  if (!rawCaps || typeof rawCaps !== "object") return { name: defaultEnabled };
+  const caps = rawCaps as Record<string, unknown>;
+  const clientCaps =
+    (caps.clientCapabilities as Record<string, unknown> | undefined) ??
+    (caps.capabilities as Record<string, unknown> | undefined) ??
+    caps;
+
+  const toolCallName =
+    clientCaps.toolCallName ??
+    clientCaps.tool_call_name ??
+    (clientCaps.toolCall as Record<string, unknown> | undefined)?.name ??
+    (clientCaps.tool_call as Record<string, unknown> | undefined)?.name ??
+    clientCaps.unstable_toolCallName ??
+    clientCaps.unstable_tool_call_name ??
+    (clientCaps.unstable as Record<string, unknown> | undefined)?.toolCallName ??
+    (clientCaps.unstable as Record<string, unknown> | undefined)?.tool_call_name;
+
+  if (typeof toolCallName === "boolean") return { name: toolCallName };
+  if (toolCallName && typeof toolCallName === "object") {
+    return { name: Boolean((toolCallName as Record<string, unknown>).name ?? true) };
+  }
+  return { name: defaultEnabled };
+}
 function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   if (!rawCaps || typeof rawCaps !== "object") return { form: false, url: false };
   const caps = rawCaps as Record<string, unknown>;
@@ -34,7 +83,7 @@ function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   };
 }
 
-/** v1 `initialize`: also returns the client's advertised `fs` and `elicitation` capabilities. */
+/** v1 `initialize`: also returns the client's advertised `fs`, `elicitation`, `terminal`, and `toolCallName` capabilities. */
 export function handleInitializeV1(
   params: V1InitializeRequest,
   agentVersion: string
@@ -42,6 +91,8 @@ export function handleInitializeV1(
   response: V1InitializeResponse;
   clientFs: ClientFsCapability;
   clientElicitation: ClientElicitationCapability;
+  clientTerminal: ClientTerminalCapability;
+  clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
     clientFs: {
@@ -49,6 +100,8 @@ export function handleInitializeV1(
       writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
     },
     clientElicitation: parseClientElicitation(params.clientCapabilities),
+    clientTerminal: parseClientTerminal(params.clientCapabilities),
+    clientToolCallName: parseClientToolCallName(params.clientCapabilities, false),
     response: {
       protocolVersion:
         params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
@@ -72,8 +125,9 @@ export function handleInitializeV1(
         },
         auth: {
           logout: {}
-        }
-      },
+        },
+        toolCallName: {}
+      } as unknown as v1.AgentCapabilities,
       authMethods: v1AuthMethods(),
       agentInfo: { ...AGENT_INFO, version: agentVersion }
     }
@@ -86,9 +140,13 @@ export function handleInitializeV2(
 ): {
   response: V2InitializeResponse;
   clientElicitation: ClientElicitationCapability;
+  clientTerminal: ClientTerminalCapability;
+  clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
     clientElicitation: parseClientElicitation(params),
+    clientTerminal: parseClientTerminal(params),
+    clientToolCallName: parseClientToolCallName(params, true),
     response: {
       protocolVersion:
         params.protocolVersion === v2.PROTOCOL_VERSION ? params.protocolVersion : v2.PROTOCOL_VERSION,
@@ -102,8 +160,13 @@ export function handleInitializeV2(
           },
           additionalDirectories: {}
         },
-        auth: {}
-      },
+        auth: {},
+        terminal: {},
+        toolCallName: {},
+        _meta: {
+          toolCallName: {}
+        }
+      } as unknown as v2.AgentCapabilities,
       // Non-empty authMethods commits the agent to auth/login + auth/logout.
       authMethods: v2AuthMethods()
     }
