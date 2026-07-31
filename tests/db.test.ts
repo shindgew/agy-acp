@@ -1730,6 +1730,91 @@ describe("Translator", () => {
     });
   });
 
+  it("does not apply speculative plan updates for incomplete nonempty replaces", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-speculative", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n";
+    const next = "- [x] Keep me\n";
+    fs.writeFileSync(planPath, prior);
+
+    const replacePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-replace-speculative",
+          namePrimary: "replace_file_content",
+          rawInputJson: JSON.stringify({
+            TargetFile: planPath,
+            TargetContent: prior,
+            ReplacementContent: next
+          })
+        })
+      })
+    });
+
+    const db = createConversationDb(dir, "conv-plan-replace-speculative");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed-speculative",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    // Permission-pending replace that would mark the task completed if applied.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 9,
+      stepPayload: replacePayload
+    });
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-speculative")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+
+    const pending = translator.translate(conn.readAfter(-1));
+    expect(pending).toHaveLength(2);
+    expect(pending[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((pending[0] as { entries: Array<{ content: string; status: string }> }).entries).toMatchObject([
+      { content: "Keep me", status: "pending" }
+    ]);
+    expect(pending[1]).toMatchObject({
+      sessionUpdate: "tool_call",
+      name: "replace_file_content",
+      status: "pending"
+    });
+
+    // Denial/failure must not rewrite the plan or poison the content cache.
+    updateStep(db, 2, { status: 7, stepPayload: replacePayload });
+    const failed = translator.translate(conn.readAfter(-1));
+    expect(failed).toMatchObject([
+      { sessionUpdate: "tool_call_update", name: "replace_file_content", status: "failed" }
+    ]);
+    expect(failed.some((u) => (u as { sessionUpdate: string }).sessionUpdate === "plan")).toBe(false);
+
+    // A later successful replace still derives from the original cached plan body.
+    updateStep(db, 2, { status: 3, stepPayload: replacePayload });
+    fs.writeFileSync(planPath, next);
+    const completed = translator.translate(conn.readAfter(-1));
+    expect(completed).toMatchObject([
+      {
+        sessionUpdate: "plan",
+        entries: [{ content: "Keep me", status: "completed" }]
+      }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
