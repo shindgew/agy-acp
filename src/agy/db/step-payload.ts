@@ -127,6 +127,24 @@ export interface UrlContentResult {
   contentPath: string;
 }
 
+/**
+ * Step-payload field 24 — model/provider error wrapper.
+ *
+ * Observed layout in real conversation DBs:
+ *   24 → 3 → {
+ *     2: provider summary,
+ *     3: HTTP / stack diagnostic,
+ *     5: structured response JSON,
+ *     9: retry or final user-facing message
+ *   }
+ */
+export interface ModelProviderError {
+  summary: string;
+  diagnostic: string;
+  responseJson: string;
+  userMessage: string;
+}
+
 /** The blob in the `task_details` column. */
 export interface TaskDetails {
   taskId: string;
@@ -149,6 +167,7 @@ export interface StepPayload {
   commandResult: CommandResult | undefined;
   webSearch: WebSearchResult | undefined;
   urlContent: UrlContentResult | undefined;
+  modelProviderError: ModelProviderError | undefined;
 }
 
 function decodeToolCall(bytes: Uint8Array): ToolCall {
@@ -398,6 +417,27 @@ function decodeUrlContentResult(bytes: Uint8Array): UrlContentResult {
   );
 }
 
+function decodeModelProviderErrorDetails(bytes: Uint8Array): ModelProviderError {
+  return readMessage(
+    bytes,
+    { summary: "", diagnostic: "", responseJson: "", userMessage: "" },
+    {
+      2: (m, r) => (m.summary = r.string()),
+      3: (m, r) => (m.diagnostic = r.string()),
+      5: (m, r) => (m.responseJson = r.string()),
+      9: (m, r) => (m.userMessage = r.string())
+    }
+  );
+}
+
+function decodeModelProviderError(bytes: Uint8Array): ModelProviderError | undefined {
+  let details: ModelProviderError | undefined;
+  readMessage(bytes, {}, {
+    3: (_m, r) => (details = readSubmessage(r, decodeModelProviderErrorDetails))
+  });
+  return details;
+}
+
 export function decodeTaskDetails(bytes: Uint8Array): TaskDetails {
   return readMessage(bytes, { taskId: "", logUri: "", description: "" }, {
     1: (m, r) => (m.taskId = r.string()),
@@ -421,7 +461,8 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       titleUpdate: undefined,
       commandResult: undefined,
       webSearch: undefined,
-      urlContent: undefined
+      urlContent: undefined,
+      modelProviderError: undefined
     },
     {
       1: (m, r) => (m.validityCheck = readInt(r)),
@@ -432,6 +473,7 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       15: (m, r) => (m.listDirectory = readSubmessage(r, decodeListDirectoryResult)),
       19: (m, r) => (m.userPrompt = readSubmessage(r, decodeUserPrompt)),
       20: (m, r) => (m.agentText = readSubmessage(r, decodeAgentText)),
+      24: (m, r) => (m.modelProviderError = readSubmessage(r, decodeModelProviderError)),
       28: (m, r) => (m.commandResult = readSubmessage(r, decodeCommandResult)),
       30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate)),
       40: (m, r) => (m.urlContent = readSubmessage(r, decodeUrlContentResult)),
