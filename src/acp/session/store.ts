@@ -26,6 +26,7 @@ export interface StoredSession {
   cwd: string;
   /** ACP `additionalDirectories` (does not include `cwd`). */
   additionalDirectories: string[];
+  mcpServers?: unknown;
   conversationId: string | null;
   lastStepIdx: number;
   /** Matches ACP config option `model` (base slug for agy --model). */
@@ -148,6 +149,7 @@ function normalizeStoredSession(raw: LegacyStoredSession): StoredSession {
   return {
     cwd,
     additionalDirectories,
+    mcpServers: raw.mcpServers,
     conversationId: raw.conversationId ?? null,
     lastStepIdx: raw.lastStepIdx ?? -1,
     model: raw.model ?? raw.modelId ?? "",
