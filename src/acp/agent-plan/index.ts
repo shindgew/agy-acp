@@ -115,9 +115,66 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
   ];
 }
 
+/**
+ * Reconcile freshly parsed entries against the previous snapshot of the same
+ * plan so entry IDs preserve task identity across successive list edits.
+ * Occurrence-based IDs alone reshuffle when a duplicate task is inserted
+ * before an existing one (the new row steals the old row's ID, and an ID-keyed
+ * client reads that as reverting the old task and appending a new one).
+ *
+ * Matching runs most-specific first:
+ *   1. same content AND same status — a status-stable duplicate keeps its ID
+ *      even when an identical task is inserted before it;
+ *   2. same content, any status — a checkbox flip keeps the entry's ID.
+ * Rows with no previous counterpart get a fresh content-hash ID, bumped until
+ * unique against every ID already claimed in this snapshot.
+ */
+export function reconcilePlanEntryIds(
+  previous: readonly PlanEntry[] | undefined,
+  next: PlanEntry[]
+): PlanEntry[] {
+  if (!previous || previous.length === 0) return next;
+
+  const remaining = previous.filter((p) => typeof p.id === "string" && p.id.length > 0);
+  const unmatched = new Set(next);
+
+  const claim = (entry: PlanEntry, withStatus: boolean): void => {
+    const idx = remaining.findIndex(
+      (p) => p.content === entry.content && (!withStatus || p.status === entry.status)
+    );
+    if (idx === -1) return;
+    const [matched] = remaining.splice(idx, 1);
+    entry.id = matched.id;
+    unmatched.delete(entry);
+  };
+
+  for (const entry of [...unmatched]) claim(entry, true);
+  for (const entry of [...unmatched]) claim(entry, false);
+
+  // Fresh rows: re-derive IDs so a claimed duplicate's original occurrence
+  // hash cannot collide with a new row's.
+  const used = new Set(next.filter((e) => !unmatched.has(e)).map((e) => e.id as string));
+  for (const entry of next) {
+    if (!unmatched.has(entry)) continue;
+    let occurrence = 0;
+    let id = entryIdFromContent(entry.content, occurrence);
+    while (used.has(id)) {
+      occurrence += 1;
+      id = entryIdFromContent(entry.content, occurrence);
+    }
+    entry.id = id;
+    used.add(id);
+  }
+  return next;
+}
+
 /** Build a classic ACP v1 `plan` session update from plan markdown. */
-export function planUpdateFromMarkdown(targetFile: string, markdown: string): SessionUpdate {
-  const entries = parsePlanEntries(markdown);
+export function planUpdateFromMarkdown(
+  targetFile: string,
+  markdown: string,
+  previous?: readonly PlanEntry[]
+): SessionUpdate {
+  const entries = reconcilePlanEntryIds(previous, parsePlanEntries(markdown));
   // Stash path for v2 planId mapping / progressive snapshot keys without
   // inventing a non-schema field on the wire — clients ignore unknown keys? 
   // Actually ACP forbids assumptions on unknown keys but _meta is reserved.

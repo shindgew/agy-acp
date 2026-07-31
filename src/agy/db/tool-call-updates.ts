@@ -7,7 +7,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
-import { isPlanFile, planRemovedFromPath, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
+import {
+  isPlanFile,
+  planIdForPath,
+  planRemovedFromPath,
+  planUpdateFromMarkdown,
+  type PlanEntry
+} from "../../acp/agent-plan/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -19,6 +25,8 @@ export interface UpdateContext {
   cwd?: string;
   /** Prior file contents for full-file write diffs. */
   fileContents?: FileContentCache;
+  /** Plan id -> entries of the previous plan snapshot (stable entry-id reconciliation). */
+  planEntries?: Map<string, PlanEntry[]>;
   /** Candidate location path -> readability observed while translating. */
   locationReadability?: Map<string, boolean>;
 }
@@ -644,9 +652,12 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     }
 
     if (planBody !== null) {
+      const planId = planIdForPath(targetFile);
       if (planBody.trim().length === 0) {
         if (status === "completed") {
           fileContents?.set(path.resolve(resolvedTarget), planBody);
+          // Removal ends the plan's entry-id lineage; a re-created plan starts fresh.
+          ctx?.planEntries?.delete(planId);
           return planRemovedFromPath(targetFile);
         }
         // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
@@ -655,7 +666,11 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
         if (status === "completed") {
           fileContents?.set(path.resolve(resolvedTarget), planBody);
         }
-        return planUpdateFromMarkdown(targetFile, planBody);
+        // Reconcile entry ids against the previous snapshot so duplicate-row
+        // inserts/reorders do not reshuffle ids of surviving tasks.
+        const update = planUpdateFromMarkdown(targetFile, planBody, ctx?.planEntries?.get(planId));
+        ctx?.planEntries?.set(planId, (update as unknown as { entries: PlanEntry[] }).entries);
+        return update;
       }
       // Incomplete/failed replace with a nonempty speculative body: keep tool lifecycle.
     }

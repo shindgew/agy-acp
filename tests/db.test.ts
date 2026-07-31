@@ -1526,6 +1526,74 @@ describe("Translator", () => {
     }
   });
 
+  it("keeps plan entry ids stable when a duplicate task is inserted before an existing one", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan-dup-insert");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-dup-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "- [x] Deploy\n"
+            })
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-plan-dup-insert")!;
+
+    const first = translator.translate(conn.readAfter(0));
+    expect(first).toHaveLength(1);
+    const firstEntries = (first[0] as { entries: Array<{ id?: string; status: string }> }).entries;
+    expect(firstEntries).toHaveLength(1);
+    const deployId = firstEntries[0].id;
+    expect(deployId).toBeDefined();
+
+    // Next poll: an identical pending task is inserted before the completed row.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-dup-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "- [ ] Deploy\n- [x] Deploy\n"
+            })
+          })
+        })
+      })
+    });
+
+    const second = translator.translate(conn.readAfter(1));
+    conn.close();
+    db.close();
+
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ sessionUpdate: "plan" });
+    const entries = (second[0] as { entries: Array<{ id?: string; status: string }> }).entries;
+    expect(entries).toHaveLength(2);
+    // The existing completed row keeps its original id; the inserted pending
+    // row gets a fresh, distinct id (not the old row's occurrence hash).
+    expect(entries[0].status).toBe("pending");
+    expect(entries[0].id).toBeDefined();
+    expect(entries[0].id).not.toBe(deployId);
+    expect(entries[1].status).toBe("completed");
+    expect(entries[1].id).toBe(deployId);
+  });
+
   it("emits plan_removed session update when brain plan file is cleared", () => {
     const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty", "plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });

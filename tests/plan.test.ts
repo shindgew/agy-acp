@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { isPlanFile, parsePlanEntries, planIdForPath, planRemovedFromPath, planUpdateFromMarkdown } from "../src/acp/agent-plan/index.js";
+import {
+  isPlanFile,
+  parsePlanEntries,
+  planIdForPath,
+  planRemovedFromPath,
+  planUpdateFromMarkdown,
+  reconcilePlanEntryIds,
+  type PlanEntry
+} from "../src/acp/agent-plan/index.js";
 
 describe("isPlanFile", () => {
   it("matches agy brain markdown paths", () => {
@@ -87,6 +95,50 @@ describe("parsePlanEntries", () => {
   });
 });
 
+describe("reconcilePlanEntryIds", () => {
+  const idOf = (e: PlanEntry) => e.id as string;
+
+  it("keeps a completed duplicate's id when an identical task is inserted before it", () => {
+    // Regression: occurrence-only ids reassigned the old row's id to the new row.
+    const before = parsePlanEntries("- [x] Deploy\n");
+    const after = reconcilePlanEntryIds(before, parsePlanEntries("- [ ] Deploy\n- [x] Deploy\n"));
+    expect(after).toMatchObject([
+      { content: "Deploy", status: "pending" },
+      { content: "Deploy", status: "completed" }
+    ]);
+    // The existing completed row keeps its id; the inserted pending row is fresh.
+    expect(idOf(after[1])).toBe(idOf(before[0]));
+    expect(idOf(after[0])).not.toBe(idOf(before[0]));
+    expect(new Set(after.map(idOf)).size).toBe(2);
+  });
+
+  it("keeps entry ids when a checkbox flips", () => {
+    const before = parsePlanEntries("- [ ] alpha\n- [ ] beta\n");
+    const after = reconcilePlanEntryIds(before, parsePlanEntries("- [x] alpha\n- [ ] beta\n"));
+    expect(after.map(idOf)).toEqual(before.map(idOf));
+    expect(after[0].status).toBe("completed");
+  });
+
+  it("keeps the surviving duplicate's id when one copy is removed", () => {
+    const before = parsePlanEntries("- [ ] A\n- [ ] A\n");
+    const after = reconcilePlanEntryIds(before, parsePlanEntries("- [ ] A\n"));
+    expect(idOf(after[0])).toBe(idOf(before[0]));
+  });
+
+  it("keeps all ids unique when fresh duplicates join claimed rows", () => {
+    const before = parsePlanEntries("- [ ] A\n- [ ] A\n");
+    const after = reconcilePlanEntryIds(before, parsePlanEntries("- [ ] A\n- [ ] A\n- [ ] A\n"));
+    expect(after.slice(0, 2).map(idOf)).toEqual(before.map(idOf));
+    expect(new Set(after.map(idOf)).size).toBe(3);
+  });
+
+  it("matches a fresh parse when there is no previous snapshot", () => {
+    const md = "- [ ] A\n- [ ] A\n- [x] B\n";
+    const reconciled = reconcilePlanEntryIds(undefined, parsePlanEntries(md));
+    expect(reconciled.map(idOf)).toEqual(parsePlanEntries(md).map(idOf));
+  });
+});
+
 describe("planUpdateFromMarkdown & planRemovedFromPath", () => {
   it("builds a classic plan update with stable meta and entry ids", () => {
     const path = "/Users/me/.gemini/antigravity-cli/brain/c/plan.md";
@@ -100,6 +152,17 @@ describe("planUpdateFromMarkdown & planRemovedFromPath", () => {
     expect(update.entries).toHaveLength(2);
     expect(update._meta?.["agy-acp/planId"]).toBe(planIdForPath(path));
     expect(update._meta?.["agy-acp/planMarkdown"]).toBe(md);
+  });
+
+  it("reconciles entry ids against a previous snapshot when given one", () => {
+    const path = "/Users/me/.gemini/antigravity-cli/brain/c/plan.md";
+    const first = planUpdateFromMarkdown(path, "- [x] Deploy\n") as unknown as { entries: PlanEntry[] };
+    const second = planUpdateFromMarkdown(path, "- [ ] Deploy\n- [x] Deploy\n", first.entries) as unknown as {
+      entries: PlanEntry[];
+    };
+    // Inserted pending duplicate gets a fresh id; the completed row keeps its own.
+    expect(second.entries[1].id).toBe(first.entries[0].id);
+    expect(second.entries[0].id).not.toBe(first.entries[0].id);
   });
 
   it("builds a plan_removed update for empty/deleted plans", () => {

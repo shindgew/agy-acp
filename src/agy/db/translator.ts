@@ -15,6 +15,7 @@
 // inside it.
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { PlanEntry } from "../../acp/agent-plan/index.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
@@ -97,6 +98,8 @@ export class Translator {
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
+  // Stream + replay: previous plan entries keyed by plan id (stable entry-id reconciliation).
+  private readonly planEntries: Map<string, PlanEntry[]> = new Map();
   // Candidate ACP location paths and their readability during the latest translation.
   readonly locationReadability = new Map<string, boolean>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
@@ -194,6 +197,7 @@ export class Translator {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
       fileContents: this.fileContents,
+      planEntries: this.planEntries,
       locationReadability: this.locationReadability
     });
     if (Array.isArray(update)) {
