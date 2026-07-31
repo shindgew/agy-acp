@@ -27,8 +27,7 @@ export async function buildSession(
   cwd: string,
   additionalDirectories: string[],
   stored: StoredSession | null,
-  deps: SessionBuildDeps,
-  mcpServers?: unknown
+  deps: SessionBuildDeps
 ): Promise<SessionState> {
   const config = configFromEnv({ cwd, additionalDirectories, env: deps.env, argv: deps.argv });
   const modelOptions = await deps.getModelOptions(config);
@@ -51,7 +50,6 @@ export async function buildSession(
     sessionId: "", // set by the caller once the ACP session id is known
     cwd,
     additionalDirectories,
-    mcpServers,
     agy,
     catalog,
     selectedBaseModel: selection.baseModel,
@@ -96,13 +94,12 @@ export async function createSession(
     sessions: Map<string, SessionState>;
     maxActiveSessions: number;
     persistSession(sessionId: string, session: SessionState): Promise<void>;
-  },
-  mcpServers?: unknown
+  }
 ): Promise<SessionState> {
   const cwd = requestedCwd || process.cwd();
   const additionalDirectories = dedupe(requestedDirs ?? []);
   const sessionId = randomUUID();
-  const session = await buildSession(cwd, additionalDirectories, null, deps, mcpServers);
+  const session = await buildSession(cwd, additionalDirectories, null, deps);
   session.sessionId = sessionId;
   await registerSession(sessionId, session, deps.sessions, deps.maxActiveSessions);
   await deps.persistSession(sessionId, session);
