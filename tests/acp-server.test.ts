@@ -1600,20 +1600,42 @@ describe("ACP v2 (experimental draft)", () => {
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update.sessionUpdate).toBe("plan_update");
-    const plan = v2Update.plan as Record<string, unknown>;
-    expect(plan.type).toBe("markdown");
-    expect(plan.planId).toBe("file:/tmp/brain/plan.md");
-    expect(plan.content).toBe(markdown);
-    // Entries with IDs are included alongside markdown for incremental reconciliation
-    expect(plan.entries).toEqual([
-      { content: "One", priority: "high", status: "pending" },
-      { content: "Two", priority: "high", status: "completed" }
-    ]);
+    expect(v2Update.plan).toEqual({
+      type: "items",
+      planId: "file:/tmp/brain/plan.md",
+      entries: [
+        { content: "One", priority: "high", status: "pending" },
+        { content: "Two", priority: "high", status: "completed" }
+      ]
+    });
 
     const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
     expect(v1Wire.sessionUpdate).toBe("plan");
     expect(v1Wire.entries).toHaveLength(2);
     expect(v1Wire._meta).toBeUndefined();
+  });
+
+  it("maps classic plan to v2 plan_update markdown when entries is empty", () => {
+    const markdown = "# Plan\n\nNo items\n";
+    const update = {
+      sessionUpdate: "plan",
+      entries: [],
+      _meta: {
+        "agy-acp/planId": "file:/tmp/brain/plan.md",
+        "agy-acp/planPath": "/tmp/brain/plan.md",
+        "agy-acp/planMarkdown": markdown
+      }
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "markdown",
+        planId: "file:/tmp/brain/plan.md",
+        content: markdown
+      }
+    });
   });
 
   it("maps classic plan to v2 plan_update items without markdown meta", () => {

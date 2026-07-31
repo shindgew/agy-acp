@@ -341,17 +341,27 @@ function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
     typeof meta?.["agy-acp/planMarkdown"] === "string" ? meta["agy-acp/planMarkdown"] : null;
   const entries = Array.isArray(raw.entries) ? raw.entries : [];
 
-  // Prefer markdown when available (full fidelity of the brain artifact);
-  // also include entries with stable IDs so clients that want incremental
-  // reconciliation can use them.
+  // When structured entries with IDs are available, emit the schema-defined
+  // `items` variant so v2 clients receive entry IDs.
+  if (entries.length > 0) {
+    return {
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "items",
+        planId,
+        entries
+      }
+    } as V2SessionUpdate;
+  }
+
+  // Fall back to markdown variant when no structured entries exist.
   if (markdown !== null && markdown.length > 0) {
     return {
       sessionUpdate: "plan_update",
       plan: {
         type: "markdown",
         planId,
-        content: markdown,
-        entries
+        content: markdown
       }
     } as V2SessionUpdate;
   }
