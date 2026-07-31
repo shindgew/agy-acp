@@ -569,6 +569,41 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("times out while waiting for background completion when no DB progress arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-timeout");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "sleep 999 &", output: "Task task-t launched" })
+        }),
+        task: encodeTaskDetails({ taskId: "task-t", logUri: "", description: "Background task" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "Preserving context while waiting for background command output..."
+        })
+      });
+      db.close();
+      // Idle markers arrive, but no completion row — deadline must still expire.
+      setTimeout(() => pty.emitData("? for shortcuts"), 20);
+    });
+
+    const session = interactiveSession(dir, pty, "250ms");
+    await expect(
+      session.prompt("run bg", async () => {}, async () => "agy-allow-once")
+    ).rejects.toThrow(/timed out after 250ms/);
+    expect(pty.writes).toEqual([]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("maintains turn execution while background tasks are active until completed (gh#68)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
     const pty = new FakePty(() => {
@@ -1440,6 +1475,48 @@ describe("cancel", () => {
     expect(fake.killedWith).toBe("SIGINT");
     expect(session.wasCancelled).toBe(true);
     expect((await pending).stopReason).toBe("cancelled");
+  });
+
+  it("cancels print-mode background drain after the child has already exited", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-bg-cancel-"));
+    try {
+      const session = new AgyCliSession(
+        { ...defaultConfig(), conversationsDir: dir, printTimeout: "5s" },
+        (command, args, options) => {
+          // Child exits immediately, but background task rows remain incomplete.
+          const db = createConversationDb(dir, "print-bg-cancel");
+          insertStep(db, {
+            idx: 1,
+            stepType: 21,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              commandResult: encodeCommandResult({ command: "sleep 999 &", output: "Task task-c launched" })
+            }),
+            task: encodeTaskDetails({ taskId: "task-c", logUri: "", description: "Background task" })
+          });
+          insertStep(db, {
+            idx: 2,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              agentText: "Preserving context while waiting for background command output..."
+            })
+          });
+          db.close();
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      const pending = collectUpdates(session, "run bg");
+      // Let the child exit and enter the post-exit background drain loop.
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      await session.cancel();
+
+      expect(session.wasCancelled).toBe(true);
+      expect((await pending).stopReason).toBe("cancelled");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

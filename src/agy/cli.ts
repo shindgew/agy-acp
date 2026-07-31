@@ -558,8 +558,9 @@ export class AgyCliSession {
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
+          // Do not re-arm deadline here: only poller revision progress (above)
+          // refreshes the timeout, so a missing completion cannot hang forever.
           if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
-            deadline = Date.now() + timeoutMs;
             const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
             if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
             continue;
@@ -801,11 +802,14 @@ export class AgyCliSession {
       await this.stopPty();
       return;
     }
+    // Always mark cancelled first: print-mode may still be draining background
+    // task rows after the child has already exited, and that loop only checks
+    // `#cancelled` (the process handle alone is no longer enough to interrupt).
+    this.#cancelled = true;
     const child = this.#process;
     if (!child || child.exitCode !== null) {
       return;
     }
-    this.#cancelled = true;
     const exitPromise = once(child, "exit");
     // SIGINT (rather than SIGTERM) gives agy a chance to flush its last
     // conversation-database write before exiting. Windows has no real SIGINT,
