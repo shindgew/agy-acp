@@ -9,11 +9,10 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [0.4.1] - 2026-07-31
 
-Support for Model Context Protocol (MCP) server configuration and RPC routing over ACP (`mcpServers`), programmatic tool call `name` field in ACP v2, bridge for `manage_task` permission requests, and clean formatting for upstream 402 quota limit errors.
+Support for the programmatic tool call `name` field in ACP v2, a bridge for `manage_task` permission requests, and clean formatting for upstream 402 quota limit errors.
 
 ### Added
 
-- Support Model Context Protocol (MCP) over ACP: accept `mcpServers` session configuration, advertise MCP capabilities, and route MCP RPC messages (`mcp/list_tools`, `mcp/call_tool`) to configured servers. (#65)
 - Support programmatic tool-call `name` field alongside title/kind in ACP v2 (`toolCallName` capability, propagation, and wire protocol gating). (#66)
 - Bridge `manage_task` status-9 interaction requests directly to the ACP permission UI. (#63)
 
