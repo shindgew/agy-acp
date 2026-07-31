@@ -155,7 +155,14 @@ export class StreamPoller {
         this._launchedTaskIds.add(row.task.taskId);
       }
       const text = row.stepPayload.agentText?.text ?? "";
-      if (text && /waiting for.*background|preserving context/i.test(text)) {
+      // Only enter the background-wait path with corroborating task evidence.
+      // A bare prose mention of "preserving context" must not pin the turn open
+      // (and eventually time out) when no background task was launched.
+      if (
+        this._launchedTaskIds.size > 0 &&
+        text &&
+        isBackgroundWaitAgentText(text)
+      ) {
         this._hasBackgroundWaiting = true;
       }
       if (row.stepType === 101 || isSystemMessage(text)) {
@@ -250,4 +257,15 @@ export class StreamPoller {
     this.db?.close();
     this.db = null;
   }
+}
+
+/** agy's known lifecycle prose when it parks a turn on a background task. */
+const BACKGROUND_WAIT_SENTINEL =
+  "Preserving context while waiting for background command output...";
+
+function isBackgroundWaitAgentText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === BACKGROUND_WAIT_SENTINEL) return true;
+  // Slight variants still seen with task_details present.
+  return /waiting for.*background|preserving context while waiting/i.test(trimmed);
 }

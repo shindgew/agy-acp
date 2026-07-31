@@ -2122,6 +2122,31 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("does not treat prose about preserving context as a background wait without a task", () => {
+    const db = createConversationDb(dir, "conv-bg-prose-only");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-prose-only",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
   it("clears background wait on stop_hook type 101 even without task id in text", () => {
     const db = createConversationDb(dir, "conv-bg-stop-hook");
     insertStep(db, {
