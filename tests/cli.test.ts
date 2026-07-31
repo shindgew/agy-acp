@@ -1296,6 +1296,20 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it.each([
+    ["colon", `{\\"unfinished\\":`],
+    ["comma", `{\\"unfinished\\":true,`],
+    ["array opener", `{\\"unfinished\\":[`],
+    ["string", `{\\"unfinished\\":\\"partial`]
+  ])("resynchronizes independently after a truncated %s state", (_state, prefix) => {
+    for (const separator of ["\n", " "]) {
+      const raw = `${prefix}${separator}{\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402}`;
+      expect(parseAgyUsageLimitError(raw)).toBe(
+        "Quota exhausted; try again later"
+      );
+    }
+  });
+
   it("keeps valid nested objects inside an outer 402 payload", () => {
     const raw = `{"metadata":
       {"kind":"quota"},

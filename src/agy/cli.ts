@@ -178,106 +178,117 @@ function decodeEscapedChar(
 
 function findJsonCandidates(str: string): JsonCandidate[] {
   const results: JsonCandidate[] = [];
+  const seen = new Set<string>();
 
   for (const kind of ["plain", "escaped"] as const) {
-    let start = -1;
-    let depth = 0;
-    let inString = false;
-    let escape = false;
-    let decoded: string[] = [];
-    let lastSignificantChar = "";
+    // The whole-input pass handles multiline JSON. The line-record and latest-
+    // object passes independently recover a later object when earlier terminal
+    // output was truncated in any parser state.
+    for (const mode of ["whole", "line", "latest"] as const) {
+      let start = -1;
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      let decoded: string[] = [];
 
-    for (let i = 0; i < str.length;) {
-      if (start === -1) {
-        if (str[i] === "{" && objectStartKind(str, i) === kind) {
+      for (let i = 0; i < str.length;) {
+        if (mode === "line" && (str[i] === "\n" || str[i] === "\r")) {
+          start = -1;
+          depth = 0;
+          inString = false;
+          escape = false;
+          decoded = [];
+          i++;
+          continue;
+        }
+
+        if (start === -1) {
+          if (str[i] === "{" && objectStartKind(str, i) === kind) {
+            start = i;
+            depth = 1;
+            inString = false;
+            escape = false;
+            decoded = ["{"];
+          }
+          i++;
+          continue;
+        }
+
+        // An explicit upstream marker is safe to resynchronize even when it
+        // shares a line with incomplete prior output.
+        if (
+          str[i] === "{" &&
+          objectStartKind(str, i) === kind &&
+          (
+            hasAuthenticated402Envelope(str, i) ||
+            mode === "latest"
+          )
+        ) {
           start = i;
           depth = 1;
           inString = false;
           escape = false;
           decoded = ["{"];
-          lastSignificantChar = "{";
+          i++;
+          continue;
         }
-        i++;
-        continue;
-      }
 
-      // A rolling PTY buffer can begin inside a truncated object. Start a new
-      // record when agy authenticates it as a 402, or when an object appears
-      // somewhere an object value cannot legally begin in the current JSON.
-      if (
-        str[i] === "{" &&
-        objectStartKind(str, i) === kind &&
-        (
-          hasAuthenticated402Envelope(str, i) ||
-          (
-            !inString &&
-            lastSignificantChar !== ":" &&
-            lastSignificantChar !== "[" &&
-            lastSignificantChar !== ","
-          )
-        )
-      ) {
-        start = i;
-        depth = 1;
-        inString = false;
-        escape = false;
-        decoded = ["{"];
-        lastSignificantChar = "{";
-        i++;
-        continue;
-      }
+        const decodedChar = kind === "escaped"
+          ? decodeEscapedChar(str, i)
+          : { char: str[i], nextIndex: i + 1 };
+        if (!decodedChar) {
+          start = -1;
+          depth = 0;
+          decoded = [];
+          i++;
+          continue;
+        }
 
-      const decodedChar = kind === "escaped"
-        ? decodeEscapedChar(str, i)
-        : { char: str[i], nextIndex: i + 1 };
-      if (!decodedChar) {
+        const { char } = decodedChar;
+        decoded.push(char);
+        i = decodedChar.nextIndex;
+
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === "\\") {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (inString) continue;
+
+        if (char === "{") {
+          depth++;
+          continue;
+        }
+        if (char !== "}") continue;
+
+        depth--;
+        if (depth !== 0) continue;
+
+        try {
+          const parsed = JSON.parse(decoded.join(""));
+          const key = `${kind}:${start}`;
+          if (
+            parsed &&
+            typeof parsed === "object" &&
+            !Array.isArray(parsed) &&
+            !seen.has(key)
+          ) {
+            seen.add(key);
+            results.push({ value: parsed as Record<string, unknown>, start });
+          }
+        } catch {
+          // Ignore malformed candidates and continue scanning later output.
+        }
         start = -1;
-        depth = 0;
         decoded = [];
-        lastSignificantChar = "";
-        i++;
-        continue;
       }
-
-      const { char } = decodedChar;
-      decoded.push(char);
-      if (!/\s/.test(char)) lastSignificantChar = char;
-      i = decodedChar.nextIndex;
-
-      if (escape) {
-        escape = false;
-        continue;
-      }
-      if (char === "\\") {
-        escape = true;
-        continue;
-      }
-      if (char === '"') {
-        inString = !inString;
-        continue;
-      }
-      if (inString) continue;
-
-      if (char === "{") {
-        depth++;
-        continue;
-      }
-      if (char !== "}") continue;
-
-      depth--;
-      if (depth !== 0) continue;
-
-      try {
-        const parsed = JSON.parse(decoded.join(""));
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          results.push({ value: parsed as Record<string, unknown>, start });
-        }
-      } catch {
-        // Ignore malformed candidates and continue scanning later output.
-      }
-      start = -1;
-      decoded = [];
-      lastSignificantChar = "";
     }
   }
 
