@@ -95,6 +95,12 @@ export class StreamPoller {
     return this._latestSystemMessageStepIdx > this._lastUserStepIdx && this._latestSystemMessageStepIdx !== -1;
   }
 
+  /**
+   * True while this user turn should stay open for background work.
+   * Prefer explicit task_details launch/completion tracking; fall back to the
+   * "preserving context / waiting for background" agent text plus a later
+   * system/lifecycle message. Never requires injecting a synthetic prompt.
+   */
   get hasActiveBackgroundTasks(): boolean {
     if (this._launchedTaskIds.size > this._completedTaskIds.size) return true;
     return this._hasBackgroundWaiting && !this.hasUnansweredSystemMessage;
@@ -154,8 +160,18 @@ export class StreamPoller {
       }
       if (row.stepType === 101 || isSystemMessage(text)) {
         this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        let matchedTask = false;
         for (const taskId of this._launchedTaskIds) {
-          if (text.includes(taskId)) {
+          if (taskId && text.includes(taskId)) {
+            this._completedTaskIds.add(taskId);
+            matchedTask = true;
+          }
+        }
+        // Lifecycle/system wake without an embedded task id (common for stop_hook
+        // type 101): close every still-pending launch so the turn cannot hang
+        // forever waiting for a match that never arrives.
+        if (!matchedTask) {
+          for (const taskId of this._launchedTaskIds) {
             this._completedTaskIds.add(taskId);
           }
         }

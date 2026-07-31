@@ -2121,6 +2121,49 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("clears background wait on stop_hook type 101 even without task id in text", () => {
+    const db = createConversationDb(dir, "conv-bg-stop-hook");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 1 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-42", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-stop-hook",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({})
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
