@@ -1611,6 +1611,125 @@ describe("Translator", () => {
     }
   });
 
+  it("emits plan_removed when a completed replace clears the plan file", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-clear", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n- [x] Done\n";
+    fs.writeFileSync(planPath, prior);
+
+    const db = createConversationDb(dir, "conv-plan-replace-clear");
+    // Seed cache via an earlier full write of the plan.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    // Completed replace that deletes the entire plan body.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-replace-clear",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              TargetContent: prior,
+              ReplacementContent: ""
+            })
+          })
+        })
+      })
+    });
+    // Mirror agy applying the edit on disk.
+    fs.writeFileSync(planPath, "");
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-clear")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${planPath}`
+    });
+  });
+
+  it("does not emit plan_removed for incomplete replace that would clear the plan", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-pending", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n";
+    fs.writeFileSync(planPath, prior);
+
+    const db = createConversationDb(dir, "conv-plan-replace-pending");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed-pending",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 9,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-replace-pending",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              TargetContent: prior,
+              ReplacementContent: ""
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-pending")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "tool_call",
+      name: "replace_file_content",
+      status: "pending"
+    });
+  });
+
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
