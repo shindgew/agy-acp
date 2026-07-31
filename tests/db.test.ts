@@ -2596,3 +2596,46 @@ describe("tool call name support (gh#52)", () => {
     expect(routedUpdate).toMatchObject({ name: "run_command", kind: "execute" });
   });
 });
+
+describe("user prompt envelope replay", () => {
+  function promptUpdates(id: string, text: string): Array<Record<string, unknown>> {
+    const db = createConversationDb(dir, id);
+    insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: text }) });
+    db.close();
+    const conn = ConversationDb.open(dir, id);
+    const rows = conn!.readAfter(-1);
+    conn!.close();
+    return sessionUpdateFromStep(rows[0]) as unknown as Array<Record<string, unknown>>;
+  }
+
+  it("unwraps a fully-tagged legacy envelope row", () => {
+    const updates = promptUpdates(
+      "conv-legacy-envelope",
+      '<user_text>\nhello\n</user_text>\n<embedded_resource uri="file:///x.ts">\nbody\n</embedded_resource>'
+    );
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: "hello" } },
+      {
+        sessionUpdate: "user_message_chunk",
+        messageId: "1",
+        content: { type: "resource", resource: { uri: "file:///x.ts", text: "body" } }
+      }
+    ]);
+  });
+
+  it("replays verbatim a raw prompt that quotes a legacy-looking tag among other text", () => {
+    const raw = 'what does <embedded_resource uri="x">\nfoo\n</embedded_resource> do?';
+    const updates = promptUpdates("conv-raw-quoted-envelope", raw);
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
+    ]);
+  });
+
+  it("replays verbatim a raw prompt with an envelope-shaped prefix and trailing text", () => {
+    const raw = '<user_text>\nhello\n</user_text>\nwait, ignore that tag';
+    const updates = promptUpdates("conv-raw-envelope-prefix", raw);
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
+    ]);
+  });
+});
