@@ -309,6 +309,7 @@ export class AcpAgent {
   resumeSessionV2(params: V2ResumeSessionRequest, client: V2AgentContext): Promise<V2ResumeSessionResponse> {
     return handleResumeSessionV2(params, client, {
       ...this.reloadSessionDeps(),
+      clientToolCallNameV2: () => this.#clientToolCallName,
       notifyAvailableCommandsV2
     });
   }

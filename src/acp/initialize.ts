@@ -34,6 +34,9 @@ export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false
     (caps.clientCapabilities as Record<string, unknown> | undefined) ??
     (caps.capabilities as Record<string, unknown> | undefined) ??
     caps;
+  const capabilityMeta =
+    (clientCaps._meta as Record<string, unknown> | undefined) ??
+    (caps._meta as Record<string, unknown> | undefined);
 
   const toolCallName =
     clientCaps.toolCallName ??
@@ -43,7 +46,9 @@ export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false
     clientCaps.unstable_toolCallName ??
     clientCaps.unstable_tool_call_name ??
     (clientCaps.unstable as Record<string, unknown> | undefined)?.toolCallName ??
-    (clientCaps.unstable as Record<string, unknown> | undefined)?.tool_call_name;
+    (clientCaps.unstable as Record<string, unknown> | undefined)?.tool_call_name ??
+    capabilityMeta?.toolCallName ??
+    capabilityMeta?.tool_call_name;
 
   if (typeof toolCallName === "boolean") return { name: toolCallName };
   if (toolCallName && typeof toolCallName === "object") {

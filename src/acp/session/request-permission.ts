@@ -84,7 +84,8 @@ export async function requestPermissionV2(
   toolName: string | undefined,
   signal: AbortSignal,
   questionIndex?: number,
-  clientElicitation?: ClientElicitationCapability
+  clientElicitation?: ClientElicitationCapability,
+  clientToolCallName?: ClientToolCallNameCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal.aborted) return "cancelled";
 
@@ -108,11 +109,12 @@ export async function requestPermissionV2(
     }
   }
 
-  const expanded = expandSessionUpdateToV2(toolCall);
+  const options = { clientToolCallName };
+  const expanded = expandSessionUpdateToV2(toolCall, undefined, undefined, options);
   const converted = (expanded.find((item) => {
     const kind = (item as unknown as { sessionUpdate?: string }).sessionUpdate;
     return kind === "tool_call_update" || kind === "tool_call";
-  }) ?? sessionUpdateToV2(toolCall)) as unknown as Record<string, unknown>;
+  }) ?? sessionUpdateToV2(toolCall, options)) as unknown as Record<string, unknown>;
   const { sessionUpdate: _discriminator, ...requestToolCall } = converted;
 
   let title = String(requestToolCall.title ?? "Permission required");

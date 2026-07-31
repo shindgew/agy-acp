@@ -26,7 +26,7 @@ import {
   permissionKeys,
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
-import { requestPermissionV1 } from "../src/acp/session/request-permission.js";
+import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
@@ -317,6 +317,48 @@ describe("permission bridge", () => {
       toolCall,
       "run_command",
       undefined,
+      undefined,
+      undefined,
+      { name: true }
+    );
+
+    expect(payloads[0]).not.toHaveProperty("name");
+    expect(payloads[1]).toHaveProperty("name", "run_command");
+  });
+
+  it("filters v2 requestPermission tool names when the client opts out", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        payloads.push(params.subject.toolCall);
+        return { outcome: { outcome: "selected", optionId: "allow-once" } };
+      })
+    };
+    const toolCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "cmd-v2-name",
+      title: "echo hi",
+      kind: "execute" as const,
+      status: "pending" as const,
+      name: "run_command"
+    };
+
+    await requestPermissionV2(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      new AbortController().signal,
+      undefined,
+      undefined,
+      { name: false }
+    );
+    await requestPermissionV2(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      new AbortController().signal,
       undefined,
       undefined,
       { name: true }

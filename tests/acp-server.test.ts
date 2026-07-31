@@ -1451,7 +1451,20 @@ describe("ACP v2 (experimental draft)", () => {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
           { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) },
-          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
+          {
+            idx: 1,
+            stepType: 8,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({
+                  callId: "v2-replayed-view",
+                  namePrimary: "view_file",
+                  rawInputJson: '{"AbsolutePath":"/repo/README.md"}'
+                })
+              })
+            })
+          },
+          { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
       };
 
@@ -1504,7 +1517,7 @@ describe("ACP v2 (experimental draft)", () => {
           await connection.agent.request(acpV2.methods.agent.initialize, {
             protocolVersion: 2,
             info: { name: "test-client", version: "0.0.0" },
-            capabilities: {}
+            capabilities: { _meta: { toolCallName: false } }
           });
           await connection.agent.request(acpV2.methods.agent.session.resume, {
             sessionId,
@@ -1524,6 +1537,17 @@ describe("ACP v2 (experimental draft)", () => {
               messageId: expect.any(String)
             })
           );
+          const replayedToolCall = updates.find(
+            (update) =>
+              (update as { sessionUpdate?: string; toolCallId?: string }).sessionUpdate ===
+                "tool_call_update" &&
+              (update as { toolCallId?: string }).toolCallId === "v2-replayed-view"
+          );
+          expect(replayedToolCall).toMatchObject({
+            sessionUpdate: "tool_call_update",
+            title: "Read README.md"
+          });
+          expect(replayedToolCall).not.toHaveProperty("name");
         } finally {
           connection.close();
         }

@@ -287,7 +287,16 @@ async function runV2PromptTurn(
             }
           }, async (toolCall, { toolName, questionIndex }) => {
             const elicitationCap = deps.clientElicitationV2?.(client);
-            return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+            return requestPermissionV2(
+              client,
+              params.sessionId,
+              toolCall,
+              toolName,
+              signal,
+              questionIndex,
+              elicitationCap,
+              clientToolCallName
+            );
           }, undefined, deps.clientElicitationV2?.(client));
         } finally {
           const userStepIdxs = session.agy.lastPromptUserStepIdxs;
