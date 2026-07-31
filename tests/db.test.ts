@@ -1730,6 +1730,91 @@ describe("Translator", () => {
     });
   });
 
+  it("does not cache unsuccessful full plan writes for later replace derivation", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-write-cache", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const real = "- [ ] Real plan\n";
+    const rejected = "- [x] Speculative\n";
+    const bogusFromRejected = "- [ ] From rejected cache\n";
+    fs.writeFileSync(planPath, real);
+
+    const seedPayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-seed-cache",
+          namePrimary: "write_to_file",
+          rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: real })
+        })
+      })
+    });
+    const rejectedWritePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-write-rejected",
+          namePrimary: "write_to_file",
+          rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: rejected })
+        })
+      })
+    });
+    // Replace targets the rejected body. If the failed write poisoned the cache, this would
+    // succeed and emit a plan derived from the never-applied write. With a clean cache it
+    // cannot apply and falls back to the on-disk real plan.
+    const replacePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-replace-after-reject",
+          namePrimary: "replace_file_content",
+          rawInputJson: JSON.stringify({
+            TargetFile: planPath,
+            TargetContent: rejected,
+            ReplacementContent: bogusFromRejected
+          })
+        })
+      })
+    });
+
+    const db = createConversationDb(dir, "conv-plan-write-cache");
+    insertStep(db, { idx: 1, stepType: 5, status: 3, stepPayload: seedPayload });
+    insertStep(db, { idx: 2, stepType: 5, status: 9, stepPayload: rejectedWritePayload });
+
+    const conn = ConversationDb.open(dir, "conv-plan-write-cache")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+
+    const first = translator.translate(conn.readAfter(-1));
+    expect(first[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((first[0] as { entries: Array<{ content: string }> }).entries[0].content).toBe("Real plan");
+    // Pending write may still publish requested content for UX, but must not cache it.
+    expect(first[1]).toMatchObject({ sessionUpdate: "plan" });
+    expect((first[1] as { entries: Array<{ content: string }> }).entries[0].content).toBe("Speculative");
+
+    updateStep(db, 2, { status: 7, stepPayload: rejectedWritePayload });
+    // Re-translate the failed row only (status transition); plan snapshot stays speculative UX.
+    translator.translate(conn.readAfter(1));
+
+    insertStep(db, { idx: 3, stepType: 5, status: 3, stepPayload: replacePayload });
+    // File on disk never received the rejected write.
+    fs.writeFileSync(planPath, real);
+    // Translate only the new replace row so a prior failed write is not re-published.
+    const afterReplace = translator.translate(conn.readAfter(2));
+
+    // Poisoned cache would apply TargetContent=rejected and emit "From rejected cache".
+    // With a clean cache the replace cannot apply; disk fallback keeps the real plan
+    // (and progressive dedupe may emit nothing if the snapshot is unchanged).
+    const planUpdates = afterReplace.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "plan");
+    for (const u of planUpdates) {
+      const entries = (u as { entries: Array<{ content: string }> }).entries;
+      expect(entries.some((e) => e.content === "From rejected cache")).toBe(false);
+      expect(entries.map((e) => e.content)).toEqual(["Real plan"]);
+    }
+    // Even if no plan re-emit (deduped), we must not have published the rejected-derived body.
+    expect(planUpdates.some((u) =>
+      (u as { entries: Array<{ content: string }> }).entries.some((e) => e.content === "From rejected cache")
+    )).toBe(false);
+
+    conn.close();
+    db.close();
+  });
+
   it("does not apply speculative plan updates for incomplete nonempty replaces", () => {
     const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-speculative", "plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });
