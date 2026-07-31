@@ -139,33 +139,52 @@ function findJsonCandidates(str: string): Record<string, unknown>[] {
     }
   };
 
-  const stack: number[] = [];
-  let inString = false;
-  let escape = false;
+  let i = 0;
+  while (i < str.length) {
+    const start = str.indexOf("{", i);
+    if (start === -1) break;
 
-  for (let i = 0; i < str.length; i++) {
-    const char = str[i];
-    if (escape) {
-      escape = false;
-      continue;
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    let end = -1;
+
+    for (let j = start; j < str.length; j++) {
+      const char = str[j];
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (char === "\\") {
+        escape = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (char === "{") {
+          depth++;
+        } else if (char === "}") {
+          depth--;
+          if (depth === 0) {
+            end = j;
+            break;
+          }
+        }
+      }
     }
-    if (char === "\\") {
-      escape = true;
-      continue;
-    }
-    if (char === '"') {
-      inString = !inString;
-      continue;
-    }
-    if (!inString) {
-      if (char === "{") {
-        stack.push(i);
-      } else if (char === "}" && stack.length > 0) {
-        const start = stack.pop()!;
-        const sub = str.slice(start, i + 1);
-        tryParse(sub);
+
+    if (end !== -1) {
+      const sub = str.slice(start, end + 1);
+      tryParse(sub);
+      if (sub.includes('\\"')) {
         tryParse(sub.replace(/\\"/g, '"'));
       }
+      i = end + 1;
+    } else {
+      i = start + 1;
     }
   }
 

@@ -1247,6 +1247,13 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("parses 402 JSON payload even when preceded by unmatched quotes in terminal prose", () => {
+    const raw = `User: "Help with error\n402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
+    );
+  });
+
   it("parses escaped JSON 402 response", () => {
     const raw = `agy exited with status 1: 402 {\\"detail\\":\\"You've reached your 5-hour standard usage limit (resets in 3h 21min)...\\",\\"status\\":402,\\"title\\":\\"Payment Required\\",\\"displayToUser\\":true}`;
     expect(parseAgyUsageLimitError(raw)).toBe(
