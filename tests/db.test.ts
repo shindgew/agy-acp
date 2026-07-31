@@ -2004,6 +2004,20 @@ describe("tool call name support (gh#52)", () => {
         })
       })
     });
+    insertStep(db, {
+      idx: 4,
+      stepType: 132,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c4",
+            nameSecondary: "custom_secondary_tool",
+            rawInputJson: '{"value":"test"}'
+          }),
+          titlePrimary: "Custom secondary tool"
+        })
+      })
+    });
     db.close();
 
     const conn = ConversationDb.open(dir, "conv-name-test");
@@ -2019,6 +2033,8 @@ describe("tool call name support (gh#52)", () => {
 
     const editUpdate = sessionUpdateFromStep(rows[2]) as any;
     expect(editUpdate.name).toBe("replace_file_content");
+
+    const genericUpdate = sessionUpdateFromStep(rows[3]) as any;
+    expect(genericUpdate.name).toBe("custom_secondary_tool");
   });
 });
-

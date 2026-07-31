@@ -732,7 +732,7 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
     if (Object.keys(rest).length > 0) content.push(codeBlock(JSON.stringify(rest, null, 2)));
   }
 
-  const name = namePrimary || "unknown";
+  const name = namePrimary || toolRun?.call?.nameSecondary || "";
 
   return toolCallUpdate({ stepRow, title, kind: toolKind(name), name, content });
 }
