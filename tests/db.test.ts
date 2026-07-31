@@ -1563,6 +1563,54 @@ describe("Translator", () => {
     });
   });
 
+  it("does not emit plan_removed for empty plan writes that are not completed", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty-pending", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, "- [ ] Keep me\n");
+
+    // status 9 = permission pending, 7 = failed, 6 = cancelled
+    for (const { status, label, expectedStatus } of [
+      { status: 9, label: "pending", expectedStatus: "pending" },
+      { status: 7, label: "failed", expectedStatus: "failed" },
+      { status: 6, label: "cancelled", expectedStatus: "cancelled" }
+    ] as const) {
+      const convId = `conv-plan-empty-${label}`;
+      const db = createConversationDb(dir, convId);
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: `plan-empty-${label}`,
+              namePrimary: "write_to_file",
+              rawInputJson: JSON.stringify({
+                TargetFile: planPath,
+                CodeContent: ""
+              })
+            })
+          })
+        })
+      });
+      db.close();
+
+      const conn = ConversationDb.open(dir, convId)!;
+      const translator = new Translator({ mode: "stream", skipNarration: false });
+      const updates = translator.translate(conn.readAfter(-1));
+      conn.close();
+
+      expect(updates, label).toHaveLength(1);
+      expect(updates[0], label).toMatchObject({
+        sessionUpdate: "tool_call",
+        name: "write_to_file",
+        kind: "edit",
+        status: expectedStatus
+      });
+      expect((updates[0] as { sessionUpdate: string }).sessionUpdate, label).not.toBe("plan_removed");
+    }
+  });
+
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
     const db = createConversationDb(dir, "conv-4");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
