@@ -284,11 +284,11 @@ export class AgyCliSession {
    * translated ACP updates in order. Resolves once the process exits and a few
    * trailing polls have drained any steps flushed right around exit.
    *
-   * Invariant: `prompt` must be client-originated user content only. Never
-   * invent follow-ups (e.g. "continue") for background-task wakeups — keep the
-   * turn open and poll instead. PTY writes during a turn are permission keys
-   * (or the same user `prompt` when reusing an interactive TUI), not adapter
-   * prose.
+   * Invariant (zero prompt injection): `prompt` is only client-originated
+   * content from ACP session/prompt. Never invent labels, instructions, or
+   * follow-ups (e.g. "continue") — for background wakeups, keep the turn open
+   * and poll instead. PTY writes during a turn are permission keys (or the same
+   * user `prompt` when reusing an interactive TUI), never adapter prose.
    */
   async prompt(
     prompt: string,
@@ -691,11 +691,21 @@ export class AgyCliSession {
 
       // Print-mode child may exit before background task rows finish writing.
       // Keep draining the DB for this user turn only — no synthetic prompts.
+      // Re-arm the deadline on DB progress so long tasks can finish; still
+      // bound idle silence by printTimeout so a missing completion cannot hang.
       if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+        const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
+        let deadline = Date.now() + timeoutMs;
+        let seenRevision = poller.revision;
         while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          if (Date.now() >= deadline) break;
           await sleep(POLL_INTERVAL_MS);
           for (const update of poller.poll()) {
             await onUpdate(update);
+          }
+          if (poller.revision !== seenRevision) {
+            seenRevision = poller.revision;
+            deadline = Date.now() + timeoutMs;
           }
         }
       }

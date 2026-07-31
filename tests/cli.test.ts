@@ -569,7 +569,7 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("maintains turn execution while background tasks are active until completed", async () => {
+  it("maintains turn execution while background tasks are active until completed (gh#68)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "bg-test");
@@ -588,6 +588,8 @@ describe("permission bridge", () => {
       });
       db.close();
 
+      // Fresh TUI needs two idle markers. Emit the turn-complete marker early;
+      // without hasActiveBackgroundTasks the prompt would resolve here.
       setTimeout(() => {
         pty.emitData("? for shortcuts");
         setTimeout(async () => {
@@ -601,22 +603,32 @@ describe("permission bridge", () => {
             })
           });
           db2.close();
-        }, 80);
+        }, 250);
       }, 20);
     });
 
     const session = interactiveSession(dir, pty);
     const updates: any[] = [];
-    const outcome = await session.prompt("run bg", async (update) => {
+    let resolved = false;
+    const pending = session.prompt("run bg", async (update) => {
       updates.push(update);
-    }, async () => "agy-allow-once");
+    }, async () => "agy-allow-once").then((value) => {
+      resolved = true;
+      return value;
+    });
 
+    // Idle marker has fired and "preserving context" is on disk, but the
+    // background task is still active — turn must stay open (gh#68).
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    expect(resolved).toBe(false);
+
+    const outcome = await pending;
     expect(outcome.stopReason).toBe("end_turn");
+    expect(resolved).toBe(true);
     expect(updates.some(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("Preserving context"))).toBe(true);
-    // Background wait must not invent follow-up prompts (e.g. "continue").
+    // Zero prompt injection: never invent follow-ups (e.g. "continue").
     // Fresh interactive spawn puts the user prompt in argv; PTY writes stay empty.
     expect(pty.writes).toEqual([]);
-    expect(pty.writes.some((w) => /continue/i.test(w))).toBe(false);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
