@@ -251,6 +251,14 @@ export function sessionUpdateToV1(
     const { _meta: _drop, ...rest } = raw;
     return rest as V1SessionUpdate;
   }
+  // plan_removed is v2-only; v1 clients don't support it.
+  // Translate to an empty plan update so v1 clients clear their plan UI.
+  if (raw.sessionUpdate === "plan_removed") {
+    return {
+      sessionUpdate: "plan",
+      entries: []
+    } as V1SessionUpdate;
+  }
   return update;
 }
 
@@ -334,14 +342,16 @@ function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
   const entries = Array.isArray(raw.entries) ? raw.entries : [];
 
   // Prefer markdown when available (full fidelity of the brain artifact);
-  // otherwise fall back to item entries from the classic plan shape.
+  // also include entries with stable IDs so clients that want incremental
+  // reconciliation can use them.
   if (markdown !== null && markdown.length > 0) {
     return {
       sessionUpdate: "plan_update",
       plan: {
         type: "markdown",
         planId,
-        content: markdown
+        content: markdown,
+        entries
       }
     } as V2SessionUpdate;
   }

@@ -1516,10 +1516,14 @@ describe("Translator", () => {
     expect(first).toHaveLength(1);
     expect(second).toHaveLength(0);
     const entries = (first[0] as { entries: Array<{ content: string; status: string }> }).entries;
-    expect(entries).toEqual([
-      { id: "entry_1", content: "One", priority: "high", status: "pending" },
-      { id: "entry_2", content: "Two", priority: "high", status: "completed" }
+    expect(entries).toMatchObject([
+      { content: "One", priority: "high", status: "pending" },
+      { content: "Two", priority: "high", status: "completed" }
     ]);
+    // Entries have content-hash-based IDs
+    for (const e of entries) {
+      expect((e as Record<string, unknown>).id).toMatch(/^entry_[0-9a-f]+$/);
+    }
   });
 
   it("emits plan_removed session update when brain plan file is cleared", () => {

@@ -1600,11 +1600,15 @@ describe("ACP v2 (experimental draft)", () => {
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update.sessionUpdate).toBe("plan_update");
-    expect(v2Update.plan).toEqual({
-      type: "markdown",
-      planId: "file:/tmp/brain/plan.md",
-      content: markdown
-    });
+    const plan = v2Update.plan as Record<string, unknown>;
+    expect(plan.type).toBe("markdown");
+    expect(plan.planId).toBe("file:/tmp/brain/plan.md");
+    expect(plan.content).toBe(markdown);
+    // Entries with IDs are included alongside markdown for incremental reconciliation
+    expect(plan.entries).toEqual([
+      { content: "One", priority: "high", status: "pending" },
+      { content: "Two", priority: "high", status: "completed" }
+    ]);
 
     const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
     expect(v1Wire.sessionUpdate).toBe("plan");
@@ -1615,7 +1619,7 @@ describe("ACP v2 (experimental draft)", () => {
   it("maps classic plan to v2 plan_update items without markdown meta", () => {
     const update = {
       sessionUpdate: "plan",
-      entries: [{ id: "entry_1", content: "Ship it", priority: "medium", status: "pending" }]
+      entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
     } as unknown as SessionUpdate;
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
@@ -1624,7 +1628,7 @@ describe("ACP v2 (experimental draft)", () => {
       plan: {
         type: "items",
         planId: "agy-plan",
-        entries: [{ id: "entry_1", content: "Ship it", priority: "medium", status: "pending" }]
+        entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
       }
     });
   });
@@ -1640,6 +1644,17 @@ describe("ACP v2 (experimental draft)", () => {
       sessionUpdate: "plan_removed",
       planId: "file:/tmp/brain/plan.md"
     });
+  });
+
+  it("translates plan_removed to empty plan on v1 wire", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
+    expect(v1Wire.sessionUpdate).toBe("plan");
+    expect(v1Wire.entries).toEqual([]);
   });
 
   it("expands execute tool calls into terminal_update + tool_call_update", () => {
