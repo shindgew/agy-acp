@@ -234,6 +234,59 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("re-emits a progressive tool update when its decoded name changes", () => {
+    const db = createConversationDb(dir, "conv-progressive-tool-name");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-progressive-tool-name")!;
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "late-name",
+        name: "run_command"
+      }
+    ]);
+
+    updateStepPayload(
+      db,
+      1,
+      encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            nameSecondary: "resolved_command_tool",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    );
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "late-name",
+        name: "resolved_command_tool"
+      }
+    ]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
 
   it("emits tool_call then tool_call_update when status progresses on the same idx", () => {
     const db = createConversationDb(dir, "conv-tool-progress");

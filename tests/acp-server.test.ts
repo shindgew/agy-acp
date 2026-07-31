@@ -23,6 +23,7 @@ import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun }
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
+import { parseClientToolCallName } from "../src/acp/initialize.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -47,6 +48,13 @@ describe("contentBlocksToText", () => {
 });
 
 describe("initialize", () => {
+  it("parses nested camel- and snake-case tool call name capabilities", () => {
+    expect(parseClientToolCallName({ toolCall: { name: true } }, false)).toEqual({ name: true });
+    expect(
+      parseClientToolCallName({ capabilities: { tool_call: { name: false } } }, true)
+    ).toEqual({ name: false });
+  });
+
   it("returns SDK-validated ACP capabilities", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
     const connection = acpClient({ name: "test-client" }).connect(createAcpApp());

@@ -37,12 +37,14 @@ export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false
   const capabilityMeta =
     (clientCaps._meta as Record<string, unknown> | undefined) ??
     (caps._meta as Record<string, unknown> | undefined);
+  const nestedToolCall =
+    (clientCaps.toolCall as Record<string, unknown> | undefined) ??
+    (clientCaps.tool_call as Record<string, unknown> | undefined);
 
   const toolCallName =
     clientCaps.toolCallName ??
     clientCaps.tool_call_name ??
-    (clientCaps.toolCall as Record<string, unknown> | undefined)?.name ??
-    (clientCaps.tool_call as Record<string, unknown> | undefined)?.name ??
+    nestedToolCall?.name ??
     clientCaps.unstable_toolCallName ??
     clientCaps.unstable_tool_call_name ??
     (clientCaps.unstable as Record<string, unknown> | undefined)?.toolCallName ??
