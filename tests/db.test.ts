@@ -2304,6 +2304,70 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("does not close tasks launched after an id-less terminal lifecycle row", () => {
+    const db = createConversationDb(dir, "conv-bg-lifecycle-precedes-launch");
+    // Auto-proceed stop_hook with no embedded task id, written BEFORE the launch.
+    insertStep(db, {
+      idx: 1,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({})
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 10 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-b", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-lifecycle-precedes-launch",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Any later revision re-reads the old id-less lifecycle row; it must not
+    // close task-b, which launched after that row was written.
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: "still working" })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // The genuine completion message still closes it.
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-b content=Task id "task-b" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {

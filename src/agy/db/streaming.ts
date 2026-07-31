@@ -54,7 +54,8 @@ export class StreamPoller {
   private _lastUserStepIdx = -1;
   private _latestSystemMessageStepIdx = -1;
   private _hasBackgroundWaiting = false;
-  private readonly _launchedTaskIds = new Set<string>();
+  /** Launched background task id -> idx of the first row that carried it. */
+  private readonly _launchedTaskIdxs = new Map<string, number>();
   private readonly _completedTaskIds = new Set<string>();
 
   constructor(private readonly opts: StreamOptions) {
@@ -102,7 +103,7 @@ export class StreamPoller {
    * system/lifecycle message. Never requires injecting a synthetic prompt.
    */
   get hasActiveBackgroundTasks(): boolean {
-    if (this._launchedTaskIds.size > this._completedTaskIds.size) return true;
+    if (this._launchedTaskIdxs.size > this._completedTaskIds.size) return true;
     return this._hasBackgroundWaiting && !this.hasUnansweredSystemMessage;
   }
 
@@ -151,15 +152,15 @@ export class StreamPoller {
         this._lastUserStepIdx = Math.max(this._lastUserStepIdx, row.idx);
         this._hasBackgroundWaiting = false;
       }
-      if (row.task?.taskId) {
-        this._launchedTaskIds.add(row.task.taskId);
+      if (row.task?.taskId && !this._launchedTaskIdxs.has(row.task.taskId)) {
+        this._launchedTaskIdxs.set(row.task.taskId, row.idx);
       }
       const text = row.stepPayload.agentText?.text ?? "";
       // Only enter the background-wait path with corroborating task evidence.
       // A bare prose mention of "preserving context" must not pin the turn open
       // (and eventually time out) when no background task was launched.
       if (
-        this._launchedTaskIds.size > 0 &&
+        this._launchedTaskIdxs.size > 0 &&
         text &&
         isBackgroundWaitAgentText(text)
       ) {
@@ -172,8 +173,14 @@ export class StreamPoller {
         isTerminalStepStatus(row.status)
       ) {
         this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        // Rows are re-read on every poll, so an id-less lifecycle row observed
+        // before a later launch would otherwise close that newer task on the
+        // next revision. Only tasks launched BEFORE this row can complete here.
+        const launchedBefore = [...this._launchedTaskIdxs]
+          .filter(([, launchIdx]) => launchIdx < row.idx)
+          .map(([taskId]) => taskId);
         let matchedTask = false;
-        for (const taskId of this._launchedTaskIds) {
+        for (const taskId of launchedBefore) {
           if (taskId && textMentionsTaskId(text, taskId)) {
             this._completedTaskIds.add(taskId);
             matchedTask = true;
@@ -183,7 +190,7 @@ export class StreamPoller {
         // type 101): close every still-pending launch so the turn cannot hang
         // forever waiting for a match that never arrives.
         if (!matchedTask) {
-          for (const taskId of this._launchedTaskIds) {
+          for (const taskId of launchedBefore) {
             this._completedTaskIds.add(taskId);
           }
         }
