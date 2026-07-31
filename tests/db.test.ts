@@ -2122,6 +2122,58 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("does not complete launched tasks from a non-terminal system message row", () => {
+    const db = createConversationDb(dir, "conv-bg-nonterminal-sys");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 1 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-nt", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    // Streaming system envelope (status still active) must not end the wait.
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({
+        agentText: "<SYSTEM_MESSAGE>\n[Message] partial"
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-nonterminal-sys",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    updateStep(db, 3, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-nt content=Task id "task-nt" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
   it("does not treat prose about preserving context as a background wait without a task", () => {
     const db = createConversationDb(dir, "conv-bg-prose-only");
     insertStep(db, {

@@ -165,7 +165,12 @@ export class StreamPoller {
       ) {
         this._hasBackgroundWaiting = true;
       }
-      if (row.stepType === 101 || isSystemMessage(text)) {
+      // Defer completion tracking until the lifecycle row is terminal so a
+      // still-streaming system-message envelope cannot close the wait early.
+      if (
+        (row.stepType === 101 || isSystemMessage(text)) &&
+        isTerminalStepStatus(row.status)
+      ) {
         this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
         let matchedTask = false;
         for (const taskId of this._launchedTaskIds) {
@@ -269,3 +274,9 @@ function isBackgroundWaitAgentText(text: string): boolean {
   // Slight variants still seen with task_details present.
   return /waiting for.*background|preserving context while waiting/i.test(trimmed);
 }
+
+/** status 3/6/7 — completed, cancelled/aborted, or failed. */
+function isTerminalStepStatus(status: number): boolean {
+  return status === 3 || status === 6 || status === 7;
+}
+
