@@ -53,11 +53,20 @@ export function isPlanFile(targetFile: string): boolean {
 export function parsePlanEntries(markdown: string): PlanEntry[] {
   const entries: PlanEntry[] = [];
   const contentCounts = new Map<string, number>();
+  const usedIds = new Set<string>();
 
   function makeId(content: string): string {
     const count = contentCounts.get(content) ?? 0;
     contentCounts.set(content, count + 1);
-    return entryIdFromContent(content, count);
+    let occurrence = count;
+    let id = entryIdFromContent(content, occurrence);
+    // Guarantee uniqueness even under rare 32-bit hash collisions.
+    while (usedIds.has(id)) {
+      occurrence += 1;
+      id = entryIdFromContent(content, occurrence);
+    }
+    usedIds.add(id);
+    return id;
   }
 
   for (const rawLine of markdown.split(/\r?\n/)) {
@@ -160,16 +169,19 @@ function firstMeaningfulLine(markdown: string): string {
 }
 
 /**
- * Derive a stable entry ID from the entry's text content.
- * Uses a simple djb2-style hash with occurrence index tracking so duplicate
- * plan rows receive distinct IDs while preserving identity across reordering.
+ * Derive a stable entry ID from the entry's text content and occurrence index.
+ * Occurrence is mixed in as a separate hash domain (not string-concatenated
+ * onto the content) so a second `A` cannot collide with a first `A#1`.
+ * Duplicate plan rows stay distinct; reordering of unique text keeps identity.
  */
 function entryIdFromContent(content: string, occurrence = 0): string {
-  const key = occurrence > 0 ? `${content}#${occurrence}` : content;
   let hash = 5381;
-  for (let i = 0; i < key.length; i++) {
-    hash = ((hash << 5) + hash + key.charCodeAt(i)) | 0;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0;
   }
+  // Domain separator + occurrence so content never collides with a synthetic key.
+  hash = ((hash << 5) + hash + 0) | 0;
+  hash = ((hash << 5) + hash + occurrence) | 0;
   // Convert to unsigned hex for a short, URL-safe id.
   return `entry_${(hash >>> 0).toString(16)}`;
 }
