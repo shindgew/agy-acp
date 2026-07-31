@@ -1477,6 +1477,43 @@ describe("cancel", () => {
     expect((await pending).stopReason).toBe("cancelled");
   });
 
+  it("fails the print-mode turn when background drain exceeds printTimeout", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-bg-timeout-"));
+    try {
+      const session = new AgyCliSession(
+        { ...defaultConfig(), conversationsDir: dir, printTimeout: "200ms" },
+        (command, args, options) => {
+          const db = createConversationDb(dir, "print-bg-timeout");
+          insertStep(db, {
+            idx: 1,
+            stepType: 21,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              commandResult: encodeCommandResult({ command: "sleep 999 &", output: "Task task-to launched" })
+            }),
+            task: encodeTaskDetails({ taskId: "task-to", logUri: "", description: "Background task" })
+          });
+          insertStep(db, {
+            idx: 2,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              agentText: "Preserving context while waiting for background command output..."
+            })
+          });
+          db.close();
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      await expect(collectUpdates(session, "run bg")).rejects.toThrow(
+        /timed out after 200ms while waiting for background tasks/
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("cancels print-mode background drain after the child has already exited", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-bg-cancel-"));
     try {

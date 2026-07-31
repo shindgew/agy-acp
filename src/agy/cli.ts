@@ -699,7 +699,14 @@ export class AgyCliSession {
         let deadline = Date.now() + timeoutMs;
         let seenRevision = poller.revision;
         while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
-          if (Date.now() >= deadline) break;
+          if (Date.now() >= deadline) {
+            throw new AgyCliError(
+              `agy print turn timed out after ${this.config.printTimeout} while waiting for background tasks to complete`,
+              command,
+              null,
+              Buffer.concat(stderrChunks).toString("utf8")
+            );
+          }
           await sleep(POLL_INTERVAL_MS);
           for (const update of poller.poll()) {
             await onUpdate(update);
