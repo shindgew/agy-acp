@@ -352,6 +352,102 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("prioritizes CommandLine firstLine over toolSummary in executeUpdate title (issue #69)", () => {
+    const db = createConversationDb(dir, "conv-title-priority");
+    const call = encodeToolCall({
+      callId: "cmd-title-1",
+      namePrimary: "run_command",
+      rawInputJson: JSON.stringify({
+        CommandLine: "gh issue view 69",
+        toolSummary: "View issue 69",
+        toolAction: "Checking GitHub issue"
+      })
+    });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2, // in_progress
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-title-priority")!;
+
+    const updates = translator.translate(conn.readAfter(0));
+    expect(updates).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "cmd-title-1",
+        kind: "execute",
+        status: "in_progress",
+        title: "gh issue view 69"
+      }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("streams stdout output while step status is in_progress (status 2) (issue #69)", () => {
+    const db = createConversationDb(dir, "conv-streaming-output");
+    const call = encodeToolCall({
+      callId: "cmd-stream-out",
+      namePrimary: "run_command",
+      rawInputJson: JSON.stringify({ CommandLine: "long_running_task" })
+    });
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2, // in_progress
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-streaming-output")!;
+
+    const first = translator.translate(conn.readAfter(0));
+    expect(first).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "cmd-stream-out",
+        status: "in_progress",
+        title: "long_running_task"
+      }
+    ]);
+
+    // Live stdout arrives in commandResult while status is still in_progress (2)
+    updateStep(db, 1, {
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({ call }),
+        commandResult: encodeCommandResult({
+          cwd: "/repo",
+          output: "step 1 completed\n",
+          command: "long_running_task"
+        })
+      })
+    });
+
+    const second = translator.translate(conn.readAfter(0));
+    expect(second).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "cmd-stream-out",
+        status: "in_progress"
+      }
+    ]);
+    const content = (second[0] as { content?: Array<{ content?: { text?: string } }> }).content ?? [];
+    const texts = content.map((c) => c.content?.text ?? "").join("\n");
+    expect(texts).toContain("step 1 completed");
+
+    conn.close();
+    db.close();
+  });
+
   it("maps active step status 1 to in_progress tool status", () => {
     const db = createConversationDb(dir, "conv-status-1");
     const call = encodeToolCall({ callId: "active-1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo active"}' });

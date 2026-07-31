@@ -448,8 +448,8 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim();
   const action = asStr(pick(rawInput, "toolAction", "ToolAction"))?.trim();
   const title =
-    summary ||
     firstLine ||
+    summary ||
     action ||
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
