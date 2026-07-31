@@ -114,13 +114,6 @@ import {
 } from "./session/update.js";
 import { handlePromptV1, handlePromptV2, type PromptV1Deps, type PromptV2Deps } from "./session/prompt.js";
 import { handleCancel } from "./session/cancel.js";
-import {
-  handleMcpMessage,
-  handleMcpConnect,
-  handleMcpDisconnect,
-  type McpRequestParams,
-  type McpResponse
-} from "./mcp/index.js";
 
 const require = createRequire(import.meta.url);
 const packageJson = require("../../package.json") as { version?: string };
@@ -260,7 +253,7 @@ export class AcpAgent {
   private newSessionDeps(): NewSessionDeps {
     return {
       requireAuthenticated: (cwd) => this.requireAuthenticated(cwd),
-      createSession: (cwd, dirs, mcpServers) => this.createSession(cwd, dirs, mcpServers)
+      createSession: (cwd, dirs) => this.createSession(cwd, dirs)
     };
   }
 
@@ -411,32 +404,14 @@ export class AcpAgent {
 
   private createSession(
     requestedCwd: string | undefined,
-    requestedDirs: string[] | undefined,
-    mcpServers?: unknown
+    requestedDirs: string[] | undefined
   ): Promise<SessionState> {
-    return createSession(
-      requestedCwd,
-      requestedDirs,
-      {
-        ...this.sessionBuildDeps(),
-        sessions: this.#sessions,
-        maxActiveSessions: this.#maxActiveSessions,
-        persistSession: (sessionId, session) => this.persistSession(sessionId, session)
-      },
-      mcpServers
-    );
-  }
-
-  mcpMessage(params: McpRequestParams): Promise<McpResponse> {
-    return handleMcpMessage(params, { requireSession: (id) => this.requireSession(id) });
-  }
-
-  mcpConnect(params: McpRequestParams): Promise<McpResponse> {
-    return handleMcpConnect(params, { requireSession: (id) => this.requireSession(id) });
-  }
-
-  mcpDisconnect(params: McpRequestParams): Promise<McpResponse> {
-    return handleMcpDisconnect(params, { requireSession: (id) => this.requireSession(id) });
+    return createSession(requestedCwd, requestedDirs, {
+      ...this.sessionBuildDeps(),
+      sessions: this.#sessions,
+      maxActiveSessions: this.#maxActiveSessions,
+      persistSession: (sessionId, session) => this.persistSession(sessionId, session)
+    });
   }
 
   private applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
@@ -604,12 +579,6 @@ export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
     .onRequest(v1.methods.agent.session.prompt, (ctx) => agent.promptV1(ctx.params, ctx.client, ctx.signal))
     .onRequest(v1.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
     .onRequest(v1.methods.agent.session.delete, (ctx) => agent.deleteSession(ctx.params))
-    .onRequest("mcp/message", (p) => p as McpRequestParams, (ctx) => agent.mcpMessage(ctx.params))
-    .onRequest("mcp/connect", (p) => p as McpRequestParams, (ctx) => agent.mcpConnect(ctx.params))
-    .onRequest("mcp/disconnect", (p) => p as McpRequestParams, (ctx) => agent.mcpDisconnect(ctx.params))
-    .onRequest("_mcp/message", (p) => p as McpRequestParams, (ctx) => agent.mcpMessage(ctx.params))
-    .onRequest("_mcp/connect", (p) => p as McpRequestParams, (ctx) => agent.mcpConnect(ctx.params))
-    .onRequest("_mcp/disconnect", (p) => p as McpRequestParams, (ctx) => agent.mcpDisconnect(ctx.params))
     .onNotification(v1.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
 }
 
@@ -631,9 +600,6 @@ export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
     .onRequest(v2.methods.agent.session.prompt, (ctx) => agent.promptV2(ctx.params, ctx.client))
     .onRequest(v2.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))
     .onRequest(v2.methods.agent.session.delete, (ctx) => agent.deleteSession(ctx.params))
-    .onRequest("_mcp/message", (p) => p as McpRequestParams, (ctx) => agent.mcpMessage(ctx.params))
-    .onRequest("_mcp/connect", (p) => p as McpRequestParams, (ctx) => agent.mcpConnect(ctx.params))
-    .onRequest("_mcp/disconnect", (p) => p as McpRequestParams, (ctx) => agent.mcpDisconnect(ctx.params))
     .onNotification(v2.methods.agent.session.cancel, (ctx) => agent.cancel(ctx.params));
 }
 
