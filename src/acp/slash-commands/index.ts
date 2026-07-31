@@ -8,7 +8,7 @@
 // session config surfaces already mapped to `agy --mode` / `--model` / `--effort`.
 // Full TUI palette (/settings, /mcp, /help overlays, …) is intentionally omitted.
 
-import type { AvailableCommand, SessionUpdate } from "@agentclientprotocol/sdk";
+import type { AvailableCommand, ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk";
 
 export const MODE_SLASH = "mode";
 export const PLAN_SLASH = "plan";
@@ -72,6 +72,29 @@ export function parseSlashCommand(promptText: string): ParsedSlashCommand | null
     name: match[1].toLowerCase(),
     input: (match[2] ?? "").trim()
   };
+}
+
+/**
+ * True when the client's original ContentBlocks are a pure text slash command
+ * (exactly one non-empty text block, no images/resources/links).
+ *
+ * Slash interception must not fire on flattened resource bodies that merely
+ * contain text like `/plan` — those should be forwarded to agy as normal
+ * prompt content.
+ */
+export function isClientTextSlashPrompt(blocks: ContentBlock[]): boolean {
+  let textBlock: Extract<ContentBlock, { type: "text" }> | undefined;
+  for (const block of blocks) {
+    if (block.type === "text") {
+      if (block.text.trim().length === 0) continue;
+      if (textBlock) return false;
+      textBlock = block;
+      continue;
+    }
+    // Any non-text block means this is not a client slash-menu selection.
+    return false;
+  }
+  return textBlock !== undefined;
 }
 
 export type SlashConfigAction = {

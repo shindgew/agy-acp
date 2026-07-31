@@ -19,7 +19,12 @@ import type { ClientToolCallNameCapability } from "../initialize.js";
 import type { SessionModeId } from "../../agy/cli.js";
 import { contentBlocksToPrompt } from "../content/index.js";
 import type { ClientFileSystem } from "../../agy/edit/bridge.js";
-import { interpretSlashCommand, parseSlashCommand, resolveModelValue } from "../slash-commands/index.js";
+import {
+  interpretSlashCommand,
+  isClientTextSlashPrompt,
+  parseSlashCommand,
+  resolveModelValue
+} from "../slash-commands/index.js";
 import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
@@ -94,7 +99,12 @@ export async function applyCuratedSlashCommand(
   return true;
 }
 
-/** v1 `session/prompt`: response carries stopReason after the full turn. */
+/**
+ * v1 `session/prompt`: response carries stopReason after the full turn.
+ *
+ * Zero prompt injection: only client `params.prompt` content is encoded and
+ * forwarded to agy. No adapter-authored labels, instructions, or follow-ups.
+ */
 export async function handlePromptV1(
   params: V1PromptRequest,
   client: V1AgentContext,
@@ -109,23 +119,27 @@ export async function handlePromptV1(
   const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
 
   // Curated slash commands → config options; do not spawn agy for those.
-  const handled = await applyCuratedSlashCommand(
-    params.sessionId,
-    prompt,
-    {
-      // ACP transition: send both legacy current_mode_update (modes-API clients)
-      // and config_option_update (configOptions clients) on slash-command mode changes.
-      modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
-      configChanged: async () => {
-        await deps.notifyConfigOptionUpdateV1(
-          client,
-          params.sessionId,
-          deps.requireSession(params.sessionId)
-        );
-      }
-    },
-    deps
-  );
+  // Only intercept pure client text blocks (not resource/image payloads whose
+  // flattened body happens to look like `/plan`).
+  const handled =
+    isClientTextSlashPrompt(params.prompt) &&
+    (await applyCuratedSlashCommand(
+      params.sessionId,
+      prompt,
+      {
+        // ACP transition: send both legacy current_mode_update (modes-API clients)
+        // and config_option_update (configOptions clients) on slash-command mode changes.
+        modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
+        configChanged: async () => {
+          await deps.notifyConfigOptionUpdateV1(
+            client,
+            params.sessionId,
+            deps.requireSession(params.sessionId)
+          );
+        }
+      },
+      deps
+    ));
   if (handled) {
     return { stopReason: signal?.aborted ? "cancelled" : "end_turn" };
   }
@@ -178,6 +192,9 @@ export async function handlePromptV1(
 /**
  * v2 `session/prompt`: respond `{}` immediately on acceptance. Foreground
  * progress and stopReason arrive as `state_update` notifications.
+ *
+ * Zero prompt injection: only client `params.prompt` content is encoded and
+ * forwarded to agy. No adapter-authored labels, instructions, or follow-ups.
  */
 export async function handlePromptV2(
   params: V2PromptRequest,
@@ -231,7 +248,9 @@ async function runV2PromptTurn(
     });
   };
 
-  const parsedSlash = parseSlashCommand(promptText);
+  // Only treat pure client text as a slash-menu selection (not resource bodies).
+  const clientSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[]);
+  const parsedSlash = clientSlash ? parseSlashCommand(promptText) : null;
   const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
   const userMessageId =
     slashResult && slashResult.kind !== "pass"
@@ -251,16 +270,18 @@ async function runV2PromptTurn(
     await notify({ sessionUpdate: "state_update", state: "running" });
 
     // Curated slash commands → config options (no agy spawn).
-    const slashHandled = await applyCuratedSlashCommand(
-      params.sessionId,
-      promptText,
-      {
-        configChanged: async () => {
-          await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
-        }
-      },
-      deps
-    );
+    const slashHandled =
+      clientSlash &&
+      (await applyCuratedSlashCommand(
+        params.sessionId,
+        promptText,
+        {
+          configChanged: async () => {
+            await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
+          }
+        },
+        deps
+      ));
     if (slashHandled) {
       await notify({
         sessionUpdate: "state_update",

@@ -3,6 +3,7 @@ import {
   AVAILABLE_COMMANDS,
   availableCommandsUpdate,
   interpretSlashCommand,
+  isClientTextSlashPrompt,
   parseSlashCommand,
   resolveModelValue
 } from "../src/acp/slash-commands/index.js";
@@ -21,6 +22,35 @@ describe("parseSlashCommand", () => {
     expect(parseSlashCommand("hello")).toBeNull();
     expect(parseSlashCommand("/mode plan\nand more")).toBeNull();
     expect(parseSlashCommand("use /mode later")).toBeNull();
+  });
+});
+
+describe("isClientTextSlashPrompt", () => {
+  it("accepts a single non-empty text block", () => {
+    expect(isClientTextSlashPrompt([{ type: "text", text: "/plan" }])).toBe(true);
+    expect(isClientTextSlashPrompt([{ type: "text", text: "  /mode plan  " }])).toBe(true);
+  });
+
+  it("rejects resource, image, or multi-block prompts", () => {
+    expect(
+      isClientTextSlashPrompt([
+        {
+          type: "resource",
+          resource: { uri: "file:///notes.md", text: "/plan", mimeType: "text/markdown" }
+        }
+      ])
+    ).toBe(false);
+    expect(
+      isClientTextSlashPrompt([
+        { type: "text", text: "/plan" },
+        { type: "resource_link", uri: "file:///x.ts", name: "x.ts" }
+      ])
+    ).toBe(false);
+    expect(
+      isClientTextSlashPrompt([
+        { type: "image", mimeType: "image/png", data: "aa" }
+      ])
+    ).toBe(false);
   });
 });
 

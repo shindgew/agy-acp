@@ -17,6 +17,7 @@ import {
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
+  encodeTaskDetails,
   encodeToolCall,
   encodeToolRun,
   encodeUrlContentResult,
@@ -2071,6 +2072,302 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("tracks background tasks as active until completion system message, without requiring a new user prompt", () => {
+    const db = createConversationDb(dir, "conv-bg-active");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 10 &", output: "Task task-9 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-9", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-active",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+    expect(poller.hasUnansweredSystemMessage).toBe(false);
+
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-9 content=Task id "task-9" finished'
+      })
+    });
+    const afterDone = poller.poll();
+    // SYSTEM_MESSAGE is filtered from client updates; completion is poller state only.
+    expect(afterDone.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(false);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.hasUnansweredSystemMessage).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not complete launched tasks from a non-terminal system message row", () => {
+    const db = createConversationDb(dir, "conv-bg-nonterminal-sys");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 1 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-nt", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    // Streaming system envelope (status still active) must not end the wait.
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({
+        agentText: "<SYSTEM_MESSAGE>\n[Message] partial"
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-nonterminal-sys",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    updateStep(db, 3, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-nt content=Task id "task-nt" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("matches completed task ids with token boundaries, not prefixes", () => {
+    const db = createConversationDb(dir, "conv-bg-task-prefix");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "a &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-1", logUri: "", description: "one" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "b &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-10", logUri: "", description: "ten" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-10 content=Task id "task-10" finished'
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-task-prefix",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // task-10 completed; task-1 must remain active (includes() would false-complete it).
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not treat prose about preserving context as a background wait without a task", () => {
+    const db = createConversationDb(dir, "conv-bg-prose-only");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-prose-only",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("clears background wait on stop_hook type 101 even without task id in text", () => {
+    const db = createConversationDb(dir, "conv-bg-stop-hook");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 1 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-42", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-stop-hook",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({})
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not close tasks launched after an id-less terminal lifecycle row", () => {
+    const db = createConversationDb(dir, "conv-bg-lifecycle-precedes-launch");
+    // Auto-proceed stop_hook with no embedded task id, written BEFORE the launch.
+    insertStep(db, {
+      idx: 1,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({})
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 10 &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-b", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-lifecycle-precedes-launch",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Any later revision re-reads the old id-less lifecycle row; it must not
+    // close task-b, which launched after that row was written.
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 1,
+      stepPayload: encodeStepPayload({ agentText: "still working" })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // The genuine completion message still closes it.
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-b content=Task id "task-b" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
@@ -2297,5 +2594,48 @@ describe("tool call name support (gh#52)", () => {
 
     const routedUpdate = sessionUpdateFromStep(rows[5]) as any;
     expect(routedUpdate).toMatchObject({ name: "run_command", kind: "execute" });
+  });
+});
+
+describe("user prompt envelope replay", () => {
+  function promptUpdates(id: string, text: string): Array<Record<string, unknown>> {
+    const db = createConversationDb(dir, id);
+    insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: text }) });
+    db.close();
+    const conn = ConversationDb.open(dir, id);
+    const rows = conn!.readAfter(-1);
+    conn!.close();
+    return sessionUpdateFromStep(rows[0]) as unknown as Array<Record<string, unknown>>;
+  }
+
+  it("unwraps a fully-tagged legacy envelope row", () => {
+    const updates = promptUpdates(
+      "conv-legacy-envelope",
+      '<user_text>\nhello\n</user_text>\n<embedded_resource uri="file:///x.ts">\nbody\n</embedded_resource>'
+    );
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: "hello" } },
+      {
+        sessionUpdate: "user_message_chunk",
+        messageId: "1",
+        content: { type: "resource", resource: { uri: "file:///x.ts", text: "body" } }
+      }
+    ]);
+  });
+
+  it("replays verbatim a raw prompt that quotes a legacy-looking tag among other text", () => {
+    const raw = 'what does <embedded_resource uri="x">\nfoo\n</embedded_resource> do?';
+    const updates = promptUpdates("conv-raw-quoted-envelope", raw);
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
+    ]);
+  });
+
+  it("replays verbatim a raw prompt with an envelope-shaped prefix and trailing text", () => {
+    const raw = '<user_text>\nhello\n</user_text>\nwait, ignore that tag';
+    const updates = promptUpdates("conv-raw-envelope-prefix", raw);
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
+    ]);
   });
 });

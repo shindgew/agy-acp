@@ -131,10 +131,16 @@ function titleUpdate(stepRow: StepRow): SessionUpdate[] {
 }
 
 /**
- * Step type 14 — the user's prompt/input that opened a turn. Text is wrapped
- * in `<user_text>`/`<resource_link>`/`<embedded_resource>` tags by our own
- * prompt encoder (see prompt-content.ts); unwrap them back into ACP content
- * blocks for replay.
+ * Step type 14 — the user's prompt/input that opened a turn.
+ *
+ * Live encoding (`contentBlocksToPrompt`) forwards client text/URI/body only
+ * plus agy `@path` image transport — no adapter framing prose. Older tagged
+ * envelopes (`<user_text>`, `<resource_link>`, `<embedded_resource>`) wrapped
+ * EVERY block of the prompt, so a historical row consists solely of envelope
+ * tags joined by newlines. Only unwrap when the envelopes cover the entire
+ * text; a raw prompt that merely quotes a legacy-looking tag among other
+ * prose must replay verbatim instead of being shredded into resource blocks
+ * with the surrounding text discarded.
  */
 function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
   const up = stepRow.stepPayload.userPrompt;
@@ -143,19 +149,24 @@ function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
   const blockPattern =
     /<user_text>\n([\s\S]*?)\n<\/user_text>|<resource_link uri="(.*?)" title="(.*?)"\/>|<embedded_resource uri="(.*?)">\n([\s\S]*?)\n<\/embedded_resource>/g;
 
+  const matches = [...text.matchAll(blockPattern)];
+  const isLegacyEnvelope = matches.length > 0 && text.replace(blockPattern, "").trim().length === 0;
+
   const blocks: Record<string, unknown>[] = [];
-  for (const match of text.matchAll(blockPattern)) {
-    if (match[1] !== undefined) {
-      blocks.push({ type: "text", text: match[1] });
-    } else if (match[2] !== undefined) {
-      const uri = match[2].replace(/&quot;/g, '"');
-      const title = (match[3] || "").replace(/&quot;/g, '"');
-      blocks.push({ type: "resource_link", uri, name: title, title });
-    } else if (match[4] !== undefined) {
-      blocks.push({
-        type: "resource",
-        resource: { uri: match[4].replace(/&quot;/g, '"'), text: match[5] || "" }
-      });
+  if (isLegacyEnvelope) {
+    for (const match of matches) {
+      if (match[1] !== undefined) {
+        blocks.push({ type: "text", text: match[1] });
+      } else if (match[2] !== undefined) {
+        const uri = match[2].replace(/&quot;/g, '"');
+        const title = (match[3] || "").replace(/&quot;/g, '"');
+        blocks.push({ type: "resource_link", uri, name: title, title });
+      } else if (match[4] !== undefined) {
+        blocks.push({
+          type: "resource",
+          resource: { uri: match[4].replace(/&quot;/g, '"'), text: match[5] || "" }
+        });
+      }
     }
   }
   if (blocks.length === 0) blocks.push({ type: "text", text });
