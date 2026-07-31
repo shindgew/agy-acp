@@ -7,7 +7,24 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
-## [Unreleased]
+## [0.4.1] - 2026-07-31
+
+Support for Model Context Protocol (MCP) server configuration and RPC routing over ACP (`mcpServers`), programmatic tool call `name` field in ACP v2, bridge for `manage_task` permission requests, and clean formatting for upstream 402 quota limit errors.
+
+### Added
+
+- Support Model Context Protocol (MCP) over ACP: accept `mcpServers` session configuration, advertise MCP capabilities, and route MCP RPC messages (`mcp/list_tools`, `mcp/call_tool`) to configured servers. (#65)
+- Support programmatic tool-call `name` field alongside title/kind in ACP v2 (`toolCallName` capability, propagation, and wire protocol gating). (#66)
+- Bridge `manage_task` status-9 interaction requests directly to the ACP permission UI. (#63)
+
+### Changed
+
+- Surface and format upstream 402 usage limit / quota exhaustion errors cleanly instead of returning raw internal error responses. (#64)
+
+### Fixed
+
+- Preserve local PTY failure messages when shell execution fails.
+- Remove speculative PTY rate-limit parsing logic.
 
 ## [0.4.0] - 2026-07-29
 
