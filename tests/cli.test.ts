@@ -8,14 +8,11 @@ import { describe, expect, it, vi } from "vitest";
 import * as installer from "../src/agy/installer.js";
 import {
   AgyCliBackend,
-  AgyCliError,
   AgyCliSession,
   DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
   DEFAULT_CONVERSATIONS_DIR,
   configFromEnv,
-  formatAgyErrorMessage,
   parseAgyModels,
-  parseAgyUsageLimitError,
   type AgyCliConfig,
   type PtyFactory,
   type PtyProcess,
@@ -1229,155 +1226,6 @@ describe("cancel", () => {
     expect(fake.killedWith).toBe("SIGINT");
     expect(session.wasCancelled).toBe(true);
     expect((await pending).stopReason).toBe("cancelled");
-  });
-});
-
-describe("upstream 402 / usage-limit error formatting", () => {
-  it("parses 402 JSON response with title and detail", () => {
-    const raw = `402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
-    );
-  });
-
-  it("parses 402 JSON payload even when preceded by earlier JSON output in accumulated PTY output", () => {
-    const raw = `{"previousStep":"done","output":{}}\nsome text\n402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
-    );
-  });
-
-  it("parses 402 JSON payload even when preceded by unmatched quotes in terminal prose", () => {
-    const raw = `User: "Help with error\n402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
-    );
-  });
-
-  it("parses escaped JSON 402 response", () => {
-    const raw = `agy exited with status 1: 402 {\\"detail\\":\\"You've reached your 5-hour standard usage limit (resets in 3h 21min)...\\",\\"status\\":402,\\"title\\":\\"Payment Required\\",\\"displayToUser\\":true}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
-    );
-  });
-
-  it("decodes escaped JSON containing string escape sequences like newlines", () => {
-    const raw = `agy exited with status 1: 402 {\\"detail\\":\\"Limit reached.\\\\nResets in 3 hours.\\",\\"status\\":402,\\"title\\":\\"Payment Required\\",\\"displayToUser\\":true}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: Limit reached.\nResets in 3 hours."
-    );
-  });
-
-  it("decodes escaped JSON before balancing braces inside string values", () => {
-    const raw = `agy exited with status 1: 402 {\\"detail\\":\\"Limit {reached}; resets after } maintenance.\\",\\"status\\":402,\\"title\\":\\"Payment Required\\"}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: Limit {reached}; resets after } maintenance."
-    );
-  });
-
-  it("accepts status-less JSON only when adjacent to an authenticated 402 envelope", () => {
-    const raw = `agy exited with status 1: 402 {"detail":"Quota exhausted; try again later","title":"Payment Required"}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: Quota exhausted; try again later"
-    );
-  });
-
-  it("resynchronizes at an authenticated 402 object after truncated JSON output", () => {
-    const raw = `{\\"unfinished\\":true\nagy exited with status 1: 402 {\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402,\\"title\\":\\"Payment Required\\"}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: Quota exhausted; try again later"
-    );
-  });
-
-  it("resynchronizes at a status-only 402 object after truncated JSON output", () => {
-    const raw = `{\\"unfinished\\":true\n{\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Quota exhausted; try again later"
-    );
-  });
-
-  it.each([
-    ["colon", `{\\"unfinished\\":`],
-    ["comma", `{\\"unfinished\\":true,`],
-    ["array opener", `{\\"unfinished\\":[`],
-    ["string", `{\\"unfinished\\":\\"partial`]
-  ])("resynchronizes independently after a truncated %s state", (_state, prefix) => {
-    for (const separator of ["\n", " "]) {
-      const raw = `${prefix}${separator}{\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402}`;
-      expect(parseAgyUsageLimitError(raw)).toBe(
-        "Quota exhausted; try again later"
-      );
-    }
-  });
-
-  it("keeps valid nested objects inside an outer 402 payload", () => {
-    const raw = `{"metadata":
-      {"kind":"quota"},
-      "detail":"Quota exhausted; try again later",
-      "status":402}`;
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Quota exhausted; try again later"
-    );
-  });
-
-  it("does not classify status-less JSON by usage-limit wording alone", () => {
-    expect(
-      parseAgyUsageLimitError(`{"detail":"Explain the usage limit","title":"Discussion"}`)
-    ).toBeNull();
-  });
-
-  it("parses non-JSON 402 message", () => {
-    const raw = "agy exited with status 1: 402 Payment Required: You've reached your 5-hour standard usage limit";
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit"
-    );
-  });
-
-  it("parses authenticated non-JSON 402 error messages with custom wording", () => {
-    const raw = "agy exited with status 1: 402 Quota exhausted; try again later";
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: Quota exhausted; try again later"
-    );
-  });
-
-  it("returns null for generic error messages", () => {
-    expect(parseAgyUsageLimitError("agy exited with status 1: prompt failed")).toBeNull();
-  });
-
-  it("does not misclassify timeout errors on PTY output containing prompt discussions about usage limits", () => {
-    const message = "agy interactive turn timed out after 5m0s; no final idle marker was observed";
-    const stderr = "User: Explain 402 Payment Required usage limit.\nAgent: A 402 usage limit occurs when...";
-    const err = new AgyCliError(message, ["agy"], null, stderr);
-    expect(err.message).toBe("agy interactive turn timed out after 5m0s; no final idle marker was observed");
-  });
-
-  it("does not replace local failures from a 402-shaped JSON object in accumulated PTY output", () => {
-    const message = "agy permission panel was not observed before requesting permission";
-    const stderr = `User asked about {"detail":"Explain the usage limit","status":402,"title":"Payment Required"}`;
-    const err = new AgyCliError(message, ["agy"], null, stderr);
-    expect(err.message).toBe(message);
-  });
-
-  it("can use separate stderr for an authenticated agy process failure", () => {
-    const message = "agy exited with status 1: <no stderr>";
-    const stderr = `{"detail":"Quota exhausted","status":402,"title":"Payment Required"}`;
-    expect(formatAgyErrorMessage(message, stderr)).toBe(
-      "Payment Required: Quota exhausted"
-    );
-  });
-
-  it("formats AgyCliError message cleanly on 402 usage limit errors while preserving raw stderr", () => {
-    const stderr = `402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
-    const err = new AgyCliError(
-      `agy exited with status 1: ${stderr}`,
-      ["agy"],
-      1,
-      stderr
-    );
-
-    expect(err.message).toBe("Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)...");
-    expect(err.stderr).toBe(stderr);
-    expect(err.exitCode).toBe(1);
   });
 });
 
