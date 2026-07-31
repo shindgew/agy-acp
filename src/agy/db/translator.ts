@@ -52,6 +52,7 @@ function updateSnapshot(update: SessionUpdate): string {
   return JSON.stringify({
     sessionUpdate: raw.sessionUpdate,
     toolCallId: raw.toolCallId,
+    name: raw.name,
     title: raw.title,
     kind: raw.kind,
     status: raw.status,

@@ -13,6 +13,12 @@
 import type { SessionUpdate as V1SessionUpdate } from "@agentclientprotocol/sdk";
 import type { SessionUpdate as V2SessionUpdate } from "@agentclientprotocol/sdk/experimental/v2";
 import { asRecord, executeTerminalMeta, terminalUpdateForExecute } from "../terminal/index.js";
+import type { ClientToolCallNameCapability } from "../initialize.js";
+
+export interface WireTransformOptions {
+  clientToolCallName?: ClientToolCallNameCapability;
+  allowToolCallName?: boolean;
+}
 
 /** Absolute-path friendly git_patch text for a single-file text change. */
 export function gitPatchForFile(
@@ -175,14 +181,19 @@ function setTrackedToolContentCount(
 /** Identity cast for the v1 wire format (builders already emit v1 shapes). */
 export function sessionUpdateToV1(
   update: V1SessionUpdate,
-  tracker: TerminalOutputTracker = defaultTerminalOutputTracker
+  tracker: TerminalOutputTracker = defaultTerminalOutputTracker,
+  options?: WireTransformOptions
 ): V1SessionUpdate {
   const raw = update as unknown as Record<string, unknown>;
   if (raw.sessionUpdate === "tool_call" || raw.sessionUpdate === "tool_call_update") {
+    const allowName = options?.allowToolCallName ?? (options?.clientToolCallName ? options.clientToolCallName.name === true : true);
     const v1Update: Record<string, unknown> = {
       ...raw,
       status: mapToolStatusForV1(raw.status)
     };
+    if (!allowName) {
+      delete v1Update.name;
+    }
 
     if (Array.isArray(v1Update.content)) {
       v1Update.content = v1Update.content.map(cleanContentItem);
@@ -248,8 +259,15 @@ export function sessionUpdateToV1(
  * Prefer {@link expandSessionUpdateToV2} on the wire — execute tools also emit
  * a sibling `terminal_update`.
  */
-export function sessionUpdateToV2(update: V1SessionUpdate): V2SessionUpdate {
+export function sessionUpdateToV2(
+  update: V1SessionUpdate,
+  options?: WireTransformOptions
+): V2SessionUpdate {
   const raw = { ...(update as unknown as Record<string, unknown>) };
+  const allowName = options?.allowToolCallName ?? (options?.clientToolCallName ? options.clientToolCallName.name === true : true);
+  if (!allowName) {
+    delete raw.name;
+  }
 
   if (raw.sessionUpdate === "tool_call") {
     raw.sessionUpdate = "tool_call_update";
@@ -335,12 +353,13 @@ function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
 export function expandSessionUpdateToV2(
   update: V1SessionUpdate,
   terminalTracker: TerminalOutputTracker = defaultV2TerminalOutputTracker,
-  toolContentTracker: ToolCallContentTracker = defaultToolCallContentTracker
+  toolContentTracker: ToolCallContentTracker = defaultToolCallContentTracker,
+  options?: WireTransformOptions
 ): V2SessionUpdate[] {
   const meta = executeTerminalMeta(update);
 
   if (!meta) {
-    const v2Update = sessionUpdateToV2(update);
+    const v2Update = sessionUpdateToV2(update, options);
     return processV2ToolContentChunks(v2Update, toolContentTracker);
   }
 
@@ -367,7 +386,7 @@ export function expandSessionUpdateToV2(
     meta.status === "failed" ||
     meta.status === "cancelled";
 
-  const tool = sessionUpdateToV2(update) as unknown as Record<string, unknown>;
+  const tool = sessionUpdateToV2(update, options) as unknown as Record<string, unknown>;
   tool.content = withTerminalContent(tool.content, meta.terminalId, meta.status);
   const toolV2Updates = processV2ToolContentChunks(tool as V2SessionUpdate, toolContentTracker);
 

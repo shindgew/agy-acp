@@ -7,6 +7,7 @@ import { ReplayCache } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
+import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,
@@ -233,6 +234,59 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("re-emits a progressive tool update when its decoded name changes", () => {
+    const db = createConversationDb(dir, "conv-progressive-tool-name");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-progressive-tool-name")!;
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "late-name",
+        name: "run_command"
+      }
+    ]);
+
+    updateStepPayload(
+      db,
+      1,
+      encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            nameSecondary: "resolved_command_tool",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    );
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "late-name",
+        name: "resolved_command_tool"
+      }
+    ]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
 
   it("emits tool_call then tool_call_update when status progresses on the same idx", () => {
     const db = createConversationDb(dir, "conv-tool-progress");
@@ -1970,5 +2024,102 @@ describe("conversation scan", () => {
     createConversationDb(dir, "a").close();
     createConversationDb(dir, "b").close();
     expect(newConversationId(dir, before)).toBeNull();
+  });
+});
+
+describe("tool call name support (gh#52)", () => {
+  it("emits programmatic tool call name on tool_call session updates", () => {
+    const db = createConversationDb(dir, "conv-name-test");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo hi"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 8,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c2", namePrimary: "view_file", rawInputJson: '{"AbsolutePath":"/tmp/test.txt"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 5,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c3", namePrimary: "replace_file_content", rawInputJson: '{"TargetFile":"/tmp/test.txt","TargetContent":"a","ReplacementContent":"b"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 4,
+      stepType: 132,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c4",
+            nameSecondary: "custom_secondary_tool",
+            rawInputJson: '{"value":"test"}'
+          }),
+          titlePrimary: "Custom secondary tool"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 5,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c5",
+            nameSecondary: "custom_command_tool",
+            rawInputJson: '{"CommandLine":"echo secondary"}'
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 6,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c6",
+            nameSecondary: "run_command",
+            rawInputJson: '{"CommandLine":"echo routed"}'
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-name-test");
+    expect(conn).not.toBeNull();
+    const rows = conn!.readAfter(0);
+    conn!.close();
+
+    const execUpdate = sessionUpdateFromStep(rows[0]) as any;
+    expect(execUpdate.name).toBe("run_command");
+
+    const readUpdate = sessionUpdateFromStep(rows[1]) as any;
+    expect(readUpdate.name).toBe("view_file");
+
+    const editUpdate = sessionUpdateFromStep(rows[2]) as any;
+    expect(editUpdate.name).toBe("replace_file_content");
+
+    const genericUpdate = sessionUpdateFromStep(rows[3]) as any;
+    expect(genericUpdate.name).toBe("custom_secondary_tool");
+
+    const executeUpdate = sessionUpdateFromStep(rows[4]) as any;
+    expect(executeUpdate.name).toBe("custom_command_tool");
+
+    const routedUpdate = sessionUpdateFromStep(rows[5]) as any;
+    expect(routedUpdate).toMatchObject({ name: "run_command", kind: "execute" });
   });
 });

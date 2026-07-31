@@ -19,10 +19,11 @@ import {
 } from "../src/agent.js";
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
-import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
+import { parseClientToolCallName } from "../src/acp/initialize.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
 
 type SelectConfigOption = Extract<SessionConfigOption, { type: "select" }>;
@@ -47,6 +48,13 @@ describe("contentBlocksToText", () => {
 });
 
 describe("initialize", () => {
+  it("parses nested camel- and snake-case tool call name capabilities", () => {
+    expect(parseClientToolCallName({ toolCall: { name: true } }, false)).toEqual({ name: true });
+    expect(
+      parseClientToolCallName({ capabilities: { tool_call: { name: false } } }, true)
+    ).toEqual({ name: false });
+  });
+
   it("returns SDK-validated ACP capabilities", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
     const connection = acpClient({ name: "test-client" }).connect(createAcpApp());
@@ -424,7 +432,20 @@ describe("session/load and session/resume", () => {
       const appOptions = {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
-          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
+          {
+            idx: 1,
+            stepType: 8,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({
+                  callId: "replayed-view",
+                  namePrimary: "view_file",
+                  rawInputJson: '{"AbsolutePath":"/repo/README.md"}'
+                })
+              })
+            })
+          },
+          { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
         ])
       };
 
@@ -459,6 +480,10 @@ describe("session/load and session/resume", () => {
           });
         const connection = client.connect(createAcpApp(appOptions));
         try {
+          await connection.agent.request(methods.agent.initialize, {
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {}
+          });
           const response = await connection.agent.request(methods.agent.session.load, {
             sessionId,
             cwd: "/repo",
@@ -470,6 +495,16 @@ describe("session/load and session/resume", () => {
               content: { type: "text", text: "hello from before" }
             })
           );
+          const replayedToolCall = updates.find(
+            (update) =>
+              (update as { sessionUpdate?: string; toolCallId?: string }).sessionUpdate === "tool_call" &&
+              (update as { toolCallId?: string }).toolCallId === "replayed-view"
+          );
+          expect(replayedToolCall).toMatchObject({
+            sessionUpdate: "tool_call",
+            title: "Read README.md"
+          });
+          expect(replayedToolCall).not.toHaveProperty("name");
           expect(updates).toContainEqual(
             expect.objectContaining({ sessionUpdate: "available_commands_update" })
           );
@@ -1424,7 +1459,20 @@ describe("ACP v2 (experimental draft)", () => {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
           { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) },
-          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
+          {
+            idx: 1,
+            stepType: 8,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({
+                  callId: "v2-replayed-view",
+                  namePrimary: "view_file",
+                  rawInputJson: '{"AbsolutePath":"/repo/README.md"}'
+                })
+              })
+            })
+          },
+          { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "prior turn" }) }
         ])
       };
 
@@ -1477,7 +1525,7 @@ describe("ACP v2 (experimental draft)", () => {
           await connection.agent.request(acpV2.methods.agent.initialize, {
             protocolVersion: 2,
             info: { name: "test-client", version: "0.0.0" },
-            capabilities: {}
+            capabilities: { _meta: { toolCallName: false } }
           });
           await connection.agent.request(acpV2.methods.agent.session.resume, {
             sessionId,
@@ -1497,6 +1545,17 @@ describe("ACP v2 (experimental draft)", () => {
               messageId: expect.any(String)
             })
           );
+          const replayedToolCall = updates.find(
+            (update) =>
+              (update as { sessionUpdate?: string; toolCallId?: string }).sessionUpdate ===
+                "tool_call_update" &&
+              (update as { toolCallId?: string }).toolCallId === "v2-replayed-view"
+          );
+          expect(replayedToolCall).toMatchObject({
+            sessionUpdate: "tool_call_update",
+            title: "Read README.md"
+          });
+          expect(replayedToolCall).not.toHaveProperty("name");
         } finally {
           connection.close();
         }
@@ -2156,3 +2215,96 @@ function optionValues(configOption: SelectConfigOption): string[] {
 function optionNames(configOption: SelectConfigOption): string[] {
   return configOption.options.map((option) => option.name);
 }
+
+describe("tool call name field (gh#52)", () => {
+  it("advertises toolCallName in initialize agent capabilities", async () => {
+    vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+      return new FakeProcess(["ok"]);
+    };
+    const options = { env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory };
+    const connectionV1 = acpClient({ name: "test-client" }).connect(createAcpApp(options));
+    const connectionV2 = acpV2.client({ name: "test-client" }).connect(createAcpV2App(options));
+
+    try {
+      const initV1 = (await connectionV1.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      })) as any;
+      expect(initV1.agentCapabilities?.toolCallName).toEqual({});
+
+      const initV2 = (await connectionV2.agent.request(acpV2.methods.agent.initialize, {
+        protocolVersion: acpV2.PROTOCOL_VERSION,
+        info: { name: "test-client", version: "0.0.0" },
+        capabilities: {}
+      })) as any;
+      expect((initV2.capabilities as any)?.toolCallName ?? (initV2.capabilities as any)?._meta?.toolCallName).toBeDefined();
+    } finally {
+      connectionV1.close();
+      connectionV2.close();
+      vi.restoreAllMocks();
+    }
+  });
+
+  it("emits name field on tool_call_update for ACP v2 turns", async () => {
+    await withConversationsDir(async (dir) => {
+      vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue(null);
+      const sessionUpdates: any[] = [];
+      const connection = acpV2.client({ name: "test-client" })
+        .onNotification(acpV2.methods.client.session.update, (ctx) => {
+          sessionUpdates.push(ctx.params.update);
+        })
+        .connect(
+          createAcpV2App({
+            env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+            spawnProcess: spawnAgyWritingConversation(dir, "v2-name-session", [
+              {
+                idx: 1,
+                stepType: 21,
+                status: 3,
+                stepPayload: encodeStepPayload({
+                  toolRun: encodeToolRun({
+                    call: encodeToolCall({
+                      callId: "call-cmd-1",
+                      namePrimary: "run_command",
+                      rawInputJson: JSON.stringify({ CommandLine: "echo hello" })
+                    })
+                  }),
+                  commandResult: encodeCommandResult({ command: "echo hello", output: "hello", exitCode: 0, cwd: dir })
+                })
+              }
+            ])
+          })
+        );
+
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: acpV2.PROTOCOL_VERSION,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, { cwd: dir });
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "run echo" }]
+        });
+
+        await waitFor(() =>
+          sessionUpdates.some(
+            (u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-cmd-1"
+          )
+        );
+
+        const toolUpdate = sessionUpdates.find(
+          (u) => u.sessionUpdate === "tool_call_update" && u.toolCallId === "call-cmd-1"
+        );
+        expect(toolUpdate).toBeDefined();
+        expect(toolUpdate.name).toBe("run_command");
+      } finally {
+        connection.close();
+        vi.restoreAllMocks();
+      }
+    });
+  });
+});

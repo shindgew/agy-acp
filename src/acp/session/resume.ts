@@ -15,6 +15,7 @@ import type {
   ResumeSessionRequest as V2ResumeSessionRequest,
   ResumeSessionResponse as V2ResumeSessionResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
+import type { ClientToolCallNameCapability } from "../initialize.js";
 import { sessionConfigOptionsV1, sessionConfigOptionsV2 } from "./config-options.js";
 import { sessionModeState } from "./modes.js";
 import type { StoredSession } from "./store.js";
@@ -65,6 +66,7 @@ export async function handleResumeSessionV2(
   params: V2ResumeSessionRequest,
   client: V2AgentContext,
   deps: ResumeSessionDeps & {
+    clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
     notifyAvailableCommandsV2(client: V2AgentContext, sessionId: string): Promise<void>;
   }
 ): Promise<V2ResumeSessionResponse> {
@@ -80,12 +82,18 @@ export async function handleResumeSessionV2(
     if (stored.conversationId) {
       const terminalTracker = createTerminalOutputTracker();
       const toolContentTracker = createToolCallContentTracker();
+      const clientToolCallName = deps.clientToolCallNameV2?.(client);
       await deps.replayConversation(
         session,
         stored.conversationId,
         cwd,
         async (update) => {
-          for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
+          for (const v2Update of expandSessionUpdateToV2(
+            update,
+            terminalTracker,
+            toolContentTracker,
+            { clientToolCallName }
+          )) {
             await client.notify(v2.methods.client.session.update, {
               sessionId: params.sessionId,
               update: v2Update
