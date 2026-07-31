@@ -305,7 +305,10 @@ export function formatAgyErrorMessage(message: string, stderr?: string): string 
   const parsedFromMessage = parseAgyUsageLimitError(message);
   if (parsedFromMessage) return parsedFromMessage;
 
-  if (stderr && stderr !== message) {
+  const isUpstreamExit =
+    /^agy exited with status \d+:/i.test(message) ||
+    /^agy interactive PTY exited unexpectedly:/i.test(message);
+  if (isUpstreamExit && stderr && stderr !== message) {
     const parsedFromStderr = parseAgyUsageLimitError(stderr);
     if (parsedFromStderr) return parsedFromStderr;
   }

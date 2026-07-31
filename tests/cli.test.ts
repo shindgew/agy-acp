@@ -1313,6 +1313,21 @@ describe("upstream 402 / usage-limit error formatting", () => {
     expect(err.message).toBe("agy interactive turn timed out after 5m0s; no final idle marker was observed");
   });
 
+  it("does not replace local failures from a 402-shaped JSON object in accumulated PTY output", () => {
+    const message = "agy permission panel was not observed before requesting permission";
+    const stderr = `User asked about {"detail":"Explain the usage limit","status":402,"title":"Payment Required"}`;
+    const err = new AgyCliError(message, ["agy"], null, stderr);
+    expect(err.message).toBe(message);
+  });
+
+  it("can use separate stderr for an authenticated agy process failure", () => {
+    const message = "agy exited with status 1: <no stderr>";
+    const stderr = `{"detail":"Quota exhausted","status":402,"title":"Payment Required"}`;
+    expect(formatAgyErrorMessage(message, stderr)).toBe(
+      "Payment Required: Quota exhausted"
+    );
+  });
+
   it("formats AgyCliError message cleanly on 402 usage limit errors while preserving raw stderr", () => {
     const stderr = `402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
     const err = new AgyCliError(
