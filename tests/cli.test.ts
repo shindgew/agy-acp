@@ -8,11 +8,14 @@ import { describe, expect, it, vi } from "vitest";
 import * as installer from "../src/agy/installer.js";
 import {
   AgyCliBackend,
+  AgyCliError,
   AgyCliSession,
   DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
   DEFAULT_CONVERSATIONS_DIR,
   configFromEnv,
+  formatAgyErrorMessage,
   parseAgyModels,
+  parseAgyUsageLimitError,
   type AgyCliConfig,
   type PtyFactory,
   type PtyProcess,
@@ -1226,6 +1229,54 @@ describe("cancel", () => {
     expect(fake.killedWith).toBe("SIGINT");
     expect(session.wasCancelled).toBe(true);
     expect((await pending).stopReason).toBe("cancelled");
+  });
+});
+
+describe("upstream 402 / usage-limit error formatting", () => {
+  it("parses 402 JSON response with title and detail", () => {
+    const raw = `402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
+    );
+  });
+
+  it("parses escaped JSON 402 response", () => {
+    const raw = `agy exited with status 1: 402 {\\"detail\\":\\"You've reached your 5-hour standard usage limit (resets in 3h 21min)...\\",\\"status\\":402,\\"title\\":\\"Payment Required\\",\\"displayToUser\\":true}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
+    );
+  });
+
+  it("parses non-JSON 402 message", () => {
+    const raw = "agy exited with status 1: 402 Payment Required: You've reached your 5-hour standard usage limit";
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit"
+    );
+  });
+
+  it("parses usage limit text without 402 status code", () => {
+    const raw = "agy exited with status 1: You've reached your 5-hour standard usage limit (resets in 2h)";
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit (resets in 2h)"
+    );
+  });
+
+  it("returns null for generic error messages", () => {
+    expect(parseAgyUsageLimitError("agy exited with status 1: prompt failed")).toBeNull();
+  });
+
+  it("formats AgyCliError message cleanly on 402 usage limit errors while preserving raw stderr", () => {
+    const stderr = `402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
+    const err = new AgyCliError(
+      `agy exited with status 1: ${stderr}`,
+      ["agy"],
+      1,
+      stderr
+    );
+
+    expect(err.message).toBe("Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)...");
+    expect(err.stderr).toBe(stderr);
+    expect(err.exitCode).toBe(1);
   });
 });
 

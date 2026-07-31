@@ -126,6 +126,83 @@ export interface AgyCliConfigInput {
   argv?: string[];
 }
 
+export function parseAgyUsageLimitError(text: string): string | null {
+  if (!text) return null;
+
+  const tryParseJson = (str: string): Record<string, unknown> | null => {
+    const firstBrace = str.indexOf("{");
+    const lastBrace = str.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      const jsonSub = str.slice(firstBrace, lastBrace + 1);
+      try {
+        const parsed = JSON.parse(jsonSub);
+        if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
+      } catch {
+        // Ignore parse error
+      }
+    }
+    return null;
+  };
+
+  const parsed = tryParseJson(text) ?? tryParseJson(text.replace(/\\"/g, '"'));
+  if (parsed) {
+    const is402 =
+      parsed.status === 402 ||
+      parsed.status === "402" ||
+      (typeof parsed.title === "string" && /payment required/i.test(parsed.title)) ||
+      (typeof parsed.detail === "string" && /usage limit/i.test(parsed.detail));
+
+    if (is402) {
+      const detail = typeof parsed.detail === "string" ? parsed.detail.trim() : "";
+      const title = typeof parsed.title === "string" ? parsed.title.trim() : "";
+
+      if (detail) {
+        if (title && !detail.toLowerCase().startsWith(title.toLowerCase())) {
+          return `${title}: ${detail}`;
+        }
+        return detail;
+      }
+      if (title) return title;
+    }
+  }
+
+  if (/402|usage limit|payment required/i.test(text)) {
+    const match402 = text.match(/(?:402|payment required)[:\s]+(.*)/i);
+    if (match402 && match402[1]?.trim()) {
+      let body = match402[1].trim();
+      body = body.replace(/^[{"'\s]+|[}"'\s]+$/g, "").trim();
+      if (body) {
+        if (/payment required/i.test(body) || /402/i.test(body)) {
+          return body;
+        }
+        return `Payment Required: ${body}`;
+      }
+    }
+
+    if (/usage limit/i.test(text)) {
+      const matchLimit = text.match(/(?:You've reached|reached|exceeded)?\s*(?:your\s+)?(?:\d+-hour\s+)?(?:standard\s+)?usage limit[^\n.]*\.?/i);
+      if (matchLimit && matchLimit[0]?.trim()) {
+        const limitStr = matchLimit[0].trim();
+        return `Payment Required: ${limitStr}`;
+      }
+    }
+  }
+
+  return null;
+}
+
+export function formatAgyErrorMessage(message: string, stderr?: string): string {
+  const parsedFromMessage = parseAgyUsageLimitError(message);
+  if (parsedFromMessage) return parsedFromMessage;
+
+  if (stderr && stderr !== message) {
+    const parsedFromStderr = parseAgyUsageLimitError(stderr);
+    if (parsedFromStderr) return parsedFromStderr;
+  }
+
+  return message;
+}
+
 export class AgyCliError extends Error {
   readonly command: string[];
   readonly exitCode: number | null;
@@ -137,7 +214,8 @@ export class AgyCliError extends Error {
     exitCode: number | null,
     stderr: string
   ) {
-    super(message);
+    const formatted = formatAgyErrorMessage(message, stderr);
+    super(formatted);
     this.name = "AgyCliError";
     this.command = command;
     this.exitCode = exitCode;
