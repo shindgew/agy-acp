@@ -139,37 +139,32 @@ function findJsonCandidates(str: string): Record<string, unknown>[] {
     }
   };
 
+  const stack: number[] = [];
+  let inString = false;
+  let escape = false;
+
   for (let i = 0; i < str.length; i++) {
-    if (str[i] === "{") {
-      let depth = 0;
-      let inString = false;
-      let escape = false;
-      for (let j = i; j < str.length; j++) {
-        const char = str[j];
-        if (escape) {
-          escape = false;
-          continue;
-        }
-        if (char === "\\") {
-          escape = true;
-          continue;
-        }
-        if (char === '"') {
-          inString = !inString;
-          continue;
-        }
-        if (!inString) {
-          if (char === "{") depth++;
-          else if (char === "}") {
-            depth--;
-            if (depth === 0) {
-              const sub = str.slice(i, j + 1);
-              tryParse(sub);
-              tryParse(sub.replace(/\\"/g, '"'));
-              break;
-            }
-          }
-        }
+    const char = str[i];
+    if (escape) {
+      escape = false;
+      continue;
+    }
+    if (char === "\\") {
+      escape = true;
+      continue;
+    }
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (!inString) {
+      if (char === "{") {
+        stack.push(i);
+      } else if (char === "}" && stack.length > 0) {
+        const start = stack.pop()!;
+        const sub = str.slice(start, i + 1);
+        tryParse(sub);
+        tryParse(sub.replace(/\\"/g, '"'));
       }
     }
   }
@@ -212,9 +207,7 @@ export function parseAgyUsageLimitError(text: string): string | null {
       if (/payment required/i.test(body) || /402/i.test(body)) {
         return body;
       }
-      if (/usage limit/i.test(body) || /reached/i.test(body)) {
-        return `Payment Required: ${body}`;
-      }
+      return `Payment Required: ${body}`;
     }
   }
 

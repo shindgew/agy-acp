@@ -1261,6 +1261,13 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("parses authenticated non-JSON 402 error messages with custom wording", () => {
+    const raw = "agy exited with status 1: 402 Quota exhausted; try again later";
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: Quota exhausted; try again later"
+    );
+  });
+
   it("returns null for generic error messages", () => {
     expect(parseAgyUsageLimitError("agy exited with status 1: prompt failed")).toBeNull();
   });
