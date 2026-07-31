@@ -17,6 +17,7 @@ import {
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
+  encodeTaskDetails,
   encodeToolCall,
   encodeToolRun,
   encodeUrlContentResult,
@@ -2067,6 +2068,55 @@ describe("StreamPoller", () => {
     });
     expect(poller.poll()).toHaveLength(1);
     expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("tracks background tasks as active until completion system message, without requiring a new user prompt", () => {
+    const db = createConversationDb(dir, "conv-bg-active");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "sleep 10 &", output: "Task task-9 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-9", logUri: "", description: "bg" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-active",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+    expect(poller.hasUnansweredSystemMessage).toBe(false);
+
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-9 content=Task id "task-9" finished'
+      })
+    });
+    const afterDone = poller.poll();
+    // SYSTEM_MESSAGE is filtered from client updates; completion is poller state only.
+    expect(afterDone.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(false);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.hasUnansweredSystemMessage).toBe(true);
 
     poller.close();
     db.close();

@@ -1,5 +1,10 @@
 // ACP Content: map prompt ContentBlock[] (text / image / resource) onto agy input.
 // Docs: https://agentclientprotocol.com/protocol/v1/content
+//
+// Only encodes blocks from the ACP client's session/prompt payload — never invents
+// conversational turns. Minimal structural framing is used so non-text blocks can
+// be represented as a single agy prompt string (images → @path; text resources
+// keep a short "Resource <uri>:" label around client-supplied body text).
 
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";

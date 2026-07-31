@@ -283,6 +283,12 @@ export class AgyCliSession {
    * appended steps while the process runs, and invoke `onUpdate` with the
    * translated ACP updates in order. Resolves once the process exits and a few
    * trailing polls have drained any steps flushed right around exit.
+   *
+   * Invariant: `prompt` must be client-originated user content only. Never
+   * invent follow-ups (e.g. "continue") for background-task wakeups — keep the
+   * turn open and poll instead. PTY writes during a turn are permission keys
+   * (or the same user `prompt` when reusing an interactive TUI), not adapter
+   * prose.
    */
   async prompt(
     prompt: string,
@@ -549,8 +555,17 @@ export class AgyCliSession {
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
           if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
-        if (this.#cancelled) break;
-        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
+          // Background work can finish after the TUI looks idle. Stay on this
+          // user turn and keep polling — do not inject a synthetic "continue".
+          if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+            deadline = Date.now() + timeoutMs;
+            const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
+            if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
+            continue;
+          }
+          break;
+        }
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
@@ -672,6 +687,17 @@ export class AgyCliSession {
           exitCode,
           stderr
         );
+      }
+
+      // Print-mode child may exit before background task rows finish writing.
+      // Keep draining the DB for this user turn only — no synthetic prompts.
+      if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+        while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          await sleep(POLL_INTERVAL_MS);
+          for (const update of poller.poll()) {
+            await onUpdate(update);
+          }
+        }
       }
 
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };

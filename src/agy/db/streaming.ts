@@ -5,6 +5,7 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
 import { newConversationId } from "./scan.js";
+import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 import type { StepRow } from "./types.js";
@@ -50,6 +51,11 @@ export class StreamPoller {
   private rowSnapshot = "";
   private readonly activePending = new Map<string, PendingInteraction>();
   private readonly observedUserStepIdxs = new Set<number>();
+  private _lastUserStepIdx = -1;
+  private _latestSystemMessageStepIdx = -1;
+  private _hasBackgroundWaiting = false;
+  private readonly _launchedTaskIds = new Set<string>();
+  private readonly _completedTaskIds = new Set<string>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -75,6 +81,23 @@ export class StreamPoller {
   /** User-prompt rows observed during this prompt-scoped polling session. */
   get userStepIdxs(): number[] {
     return [...this.observedUserStepIdxs];
+  }
+
+  get lastUserStepIdx(): number {
+    return this._lastUserStepIdx;
+  }
+
+  get latestSystemMessageStepIdx(): number {
+    return this._latestSystemMessageStepIdx;
+  }
+
+  get hasUnansweredSystemMessage(): boolean {
+    return this._latestSystemMessageStepIdx > this._lastUserStepIdx && this._latestSystemMessageStepIdx !== -1;
+  }
+
+  get hasActiveBackgroundTasks(): boolean {
+    if (this._launchedTaskIds.size > this._completedTaskIds.size) return true;
+    return this._hasBackgroundWaiting && !this.hasUnansweredSystemMessage;
   }
 
   /** Newly observed status-9 tool calls from the most recent poll. */
@@ -117,7 +140,26 @@ export class StreamPoller {
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
     for (const row of rows) {
-      if (row.stepType === 14) this.observedUserStepIdxs.add(row.idx);
+      if (row.stepType === 14) {
+        this.observedUserStepIdxs.add(row.idx);
+        this._lastUserStepIdx = Math.max(this._lastUserStepIdx, row.idx);
+        this._hasBackgroundWaiting = false;
+      }
+      if (row.task?.taskId) {
+        this._launchedTaskIds.add(row.task.taskId);
+      }
+      const text = row.stepPayload.agentText?.text ?? "";
+      if (text && /waiting for.*background|preserving context/i.test(text)) {
+        this._hasBackgroundWaiting = true;
+      }
+      if (row.stepType === 101 || isSystemMessage(text)) {
+        this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        for (const taskId of this._launchedTaskIds) {
+          if (text.includes(taskId)) {
+            this._completedTaskIds.add(taskId);
+          }
+        }
+      }
     }
     if (!rows.hasDecodeError) {
       this.dataVersion = dataVersion;

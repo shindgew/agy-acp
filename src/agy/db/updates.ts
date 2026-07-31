@@ -131,10 +131,12 @@ function titleUpdate(stepRow: StepRow): SessionUpdate[] {
 }
 
 /**
- * Step type 14 — the user's prompt/input that opened a turn. Text is wrapped
- * in `<user_text>`/`<resource_link>`/`<embedded_resource>` tags by our own
- * prompt encoder (see prompt-content.ts); unwrap them back into ACP content
- * blocks for replay.
+ * Step type 14 — the user's prompt/input that opened a turn.
+ *
+ * Live encoding (`contentBlocksToPrompt`) sends plain text plus `@path` image
+ * refs. Older tagged envelopes (`<user_text>`, `<resource_link>`,
+ * `<embedded_resource>`) are still unwrapped when present so historical
+ * conversation DBs replay cleanly; otherwise the raw text is one text block.
  */
 function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
   const up = stepRow.stepPayload.userPrompt;

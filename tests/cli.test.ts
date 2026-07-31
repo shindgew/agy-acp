@@ -28,7 +28,7 @@ import {
 } from "../src/acp/tool-calls/permissions.js";
 import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodeCommandResult, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -565,6 +565,58 @@ describe("permission bridge", () => {
     expect(resolved).toBe(false);
     pty.emitData("? for shortcuts");
     expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("maintains turn execution while background tasks are active until completed", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-test");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "sleep 10 &", output: "Task task-1 launched" }) }),
+        task: encodeTaskDetails({ taskId: "task-1", logUri: "", description: "Background task" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Preserving context while waiting for background command output..." })
+      });
+      db.close();
+
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        setTimeout(async () => {
+          const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-test.db"));
+          insertStep(db2, {
+            idx: 3,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
+            })
+          });
+          db2.close();
+        }, 80);
+      }, 20);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("run bg", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some(u => u.sessionUpdate === "agent_message_chunk" && u.content.text.includes("Preserving context"))).toBe(true);
+    // Background wait must not invent follow-up prompts (e.g. "continue").
+    // Fresh interactive spawn puts the user prompt in argv; PTY writes stay empty.
+    expect(pty.writes).toEqual([]);
+    expect(pty.writes.some((w) => /continue/i.test(w))).toBe(false);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });

@@ -94,7 +94,12 @@ export async function applyCuratedSlashCommand(
   return true;
 }
 
-/** v1 `session/prompt`: response carries stopReason after the full turn. */
+/**
+ * v1 `session/prompt`: response carries stopReason after the full turn.
+ *
+ * Only the ACP client's `params.prompt` is forwarded to agy (after content-block
+ * encoding). The adapter never synthesizes conversational follow-ups.
+ */
 export async function handlePromptV1(
   params: V1PromptRequest,
   client: V1AgentContext,
@@ -178,6 +183,9 @@ export async function handlePromptV1(
 /**
  * v2 `session/prompt`: respond `{}` immediately on acceptance. Foreground
  * progress and stopReason arrive as `state_update` notifications.
+ *
+ * Only the ACP client's `params.prompt` is forwarded to agy (after content-block
+ * encoding). The adapter never synthesizes conversational follow-ups.
  */
 export async function handlePromptV2(
   params: V2PromptRequest,
