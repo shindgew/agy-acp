@@ -199,6 +199,23 @@ function findJsonCandidates(str: string): JsonCandidate[] {
         continue;
       }
 
+      // A rolling PTY buffer can begin inside a truncated object. Once agy
+      // emits an authenticated 402 record, discard that incomplete candidate
+      // instead of treating the real response object as nested within it.
+      if (
+        str[i] === "{" &&
+        objectStartKind(str, i) === kind &&
+        hasAuthenticated402Envelope(str, i)
+      ) {
+        start = i;
+        depth = 1;
+        inString = false;
+        escape = false;
+        decoded = ["{"];
+        i++;
+        continue;
+      }
+
       const decodedChar = kind === "escaped"
         ? decodeEscapedChar(str, i)
         : { char: str[i], nextIndex: i + 1 };

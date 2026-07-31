@@ -1282,6 +1282,13 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("resynchronizes at an authenticated 402 object after truncated JSON output", () => {
+    const raw = `{\\"unfinished\\":true\nagy exited with status 1: 402 {\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402,\\"title\\":\\"Payment Required\\"}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: Quota exhausted; try again later"
+    );
+  });
+
   it("does not classify status-less JSON by usage-limit wording alone", () => {
     expect(
       parseAgyUsageLimitError(`{"detail":"Explain the usage limit","title":"Discussion"}`)
