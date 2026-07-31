@@ -302,10 +302,22 @@ export function sessionUpdateToV2(
     return raw as V2SessionUpdate;
   }
 
-  // Classic v1 `plan` → draft v2 `plan_update` with structured items.
+  // Classic v1 `plan` / `plan_update` → draft v2 `plan_update` with structured items or markdown.
   // Prefer markdown content when the translator stashed it in _meta.
-  if (raw.sessionUpdate === "plan") {
+  if (raw.sessionUpdate === "plan" || (raw.sessionUpdate === "plan_update" && !raw.plan)) {
     return planToV2(raw);
+  }
+
+  if (raw.sessionUpdate === "plan_removed") {
+    const meta = asRecord(raw._meta);
+    const planId =
+      (typeof raw.planId === "string" && raw.planId) ||
+      (typeof meta?.["agy-acp/planId"] === "string" && meta["agy-acp/planId"]) ||
+      "agy-plan";
+    return {
+      sessionUpdate: "plan_removed",
+      planId
+    } as V2SessionUpdate;
   }
 
   return raw as V2SessionUpdate;

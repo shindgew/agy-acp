@@ -1615,8 +1615,8 @@ describe("ACP v2 (experimental draft)", () => {
   it("maps classic plan to v2 plan_update items without markdown meta", () => {
     const update = {
       sessionUpdate: "plan",
-      entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
-    } as SessionUpdate;
+      entries: [{ id: "entry_1", content: "Ship it", priority: "medium", status: "pending" }]
+    } as unknown as SessionUpdate;
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update).toEqual({
@@ -1624,8 +1624,21 @@ describe("ACP v2 (experimental draft)", () => {
       plan: {
         type: "items",
         planId: "agy-plan",
-        entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
+        entries: [{ id: "entry_1", content: "Ship it", priority: "medium", status: "pending" }]
       }
+    });
+  });
+
+  it("maps plan_removed to v2 plan_removed update with planId", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
     });
   });
 
