@@ -26,31 +26,49 @@ describe("isPlanFile", () => {
 });
 
 describe("parsePlanEntries", () => {
-  it("parses numbered and bulleted items with stable ids", () => {
+  it("parses numbered and bulleted items with stable content-hash ids", () => {
     const entries = parsePlanEntries("# Plan\n\n1. First\n2. Second\n- Third\n");
     expect(entries.map((e) => e.content)).toEqual(["First", "Second", "Third"]);
-    expect(entries.map((e) => (e as Record<string, unknown>).id)).toEqual([
-      "entry_1",
-      "entry_2",
-      "entry_3"
-    ]);
+    // IDs are content-hash-based, not ordinal
+    for (const e of entries) {
+      expect((e as Record<string, unknown>).id).toMatch(/^entry_[0-9a-f]+$/);
+    }
   });
 
-  it("maps checkbox markers to status with ids", () => {
-    expect(
-      parsePlanEntries("- [ ] open\n- [x] done\n- [~] mid\n- [X] DONE2\n")
-    ).toEqual([
-      { id: "entry_1", content: "open", priority: "high", status: "pending" },
-      { id: "entry_2", content: "done", priority: "high", status: "completed" },
-      { id: "entry_3", content: "mid", priority: "high", status: "in_progress" },
-      { id: "entry_4", content: "DONE2", priority: "medium", status: "completed" }
+  it("maps checkbox markers to status with content-hash ids", () => {
+    const entries = parsePlanEntries("- [ ] open\n- [x] done\n- [~] mid\n- [X] DONE2\n");
+    expect(entries).toMatchObject([
+      { content: "open", priority: "high", status: "pending" },
+      { content: "done", priority: "high", status: "completed" },
+      { content: "mid", priority: "high", status: "in_progress" },
+      { content: "DONE2", priority: "medium", status: "completed" }
     ]);
+    // Each entry has a content-hash id
+    for (const e of entries) {
+      expect((e as Record<string, unknown>).id).toMatch(/^entry_[0-9a-f]+$/);
+    }
+  });
+
+  it("preserves entry identity when items are reordered", () => {
+    const before = parsePlanEntries("- [ ] alpha\n- [x] beta\n");
+    const after = parsePlanEntries("- [x] beta\n- [ ] alpha\n");
+    const idOf = (e: Record<string, unknown>) => e.id;
+    // alpha keeps same id regardless of position
+    expect(idOf(before[0] as Record<string, unknown>)).toBe(
+      idOf(after[1] as Record<string, unknown>)
+    );
+    // beta keeps same id regardless of position
+    expect(idOf(before[1] as Record<string, unknown>)).toBe(
+      idOf(after[0] as Record<string, unknown>)
+    );
   });
 
   it("falls back to the first heading when there is no list", () => {
-    expect(parsePlanEntries("# Ship the feature\n\nSome prose only.\n")).toEqual([
-      { id: "entry_1", content: "Ship the feature", priority: "medium", status: "pending" }
+    const entries = parsePlanEntries("# Ship the feature\n\nSome prose only.\n");
+    expect(entries).toMatchObject([
+      { content: "Ship the feature", priority: "medium", status: "pending" }
     ]);
+    expect((entries[0] as Record<string, unknown>).id).toMatch(/^entry_[0-9a-f]+$/);
   });
 });
 

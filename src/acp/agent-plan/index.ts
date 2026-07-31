@@ -62,7 +62,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       const content = checkbox[2].trim();
       if (!content) continue;
       entries.push({
-        id: `entry_${entries.length + 1}`,
+        id: entryIdFromContent(content),
         content,
         priority: defaultPriority(entries.length),
         status: checkboxStatus(checkbox[1])
@@ -78,7 +78,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       // Ignore list markers that are really horizontal rules / separators.
       if (/^[-*_]{3,}$/.test(content)) continue;
       entries.push({
-        id: `entry_${entries.length + 1}`,
+        id: entryIdFromContent(content),
         content,
         priority: defaultPriority(entries.length),
         status: "pending"
@@ -91,7 +91,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
   const fallback = firstMeaningfulLine(markdown);
   return [
     {
-      id: "entry_1",
+      id: entryIdFromContent(fallback),
       content: fallback,
       priority: "medium",
       status: "pending"
@@ -150,4 +150,18 @@ function firstMeaningfulLine(markdown: string): string {
     if (withoutHeading) return withoutHeading.slice(0, 500);
   }
   return "Plan";
+}
+
+/**
+ * Derive a stable entry ID from the entry's text content.
+ * Uses a simple djb2-style hash so that entries keep their identity
+ * across insertions, removals, and reordering in the plan markdown.
+ */
+function entryIdFromContent(content: string): string {
+  let hash = 5381;
+  for (let i = 0; i < content.length; i++) {
+    hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0;
+  }
+  // Convert to unsigned hex for a short, URL-safe id.
+  return `entry_${(hash >>> 0).toString(16)}`;
 }
