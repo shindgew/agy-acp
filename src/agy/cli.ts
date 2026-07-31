@@ -185,6 +185,7 @@ function findJsonCandidates(str: string): JsonCandidate[] {
     let inString = false;
     let escape = false;
     let decoded: string[] = [];
+    let lastSignificantChar = "";
 
     for (let i = 0; i < str.length;) {
       if (start === -1) {
@@ -194,24 +195,34 @@ function findJsonCandidates(str: string): JsonCandidate[] {
           inString = false;
           escape = false;
           decoded = ["{"];
+          lastSignificantChar = "{";
         }
         i++;
         continue;
       }
 
-      // A rolling PTY buffer can begin inside a truncated object. Once agy
-      // emits an authenticated 402 record, discard that incomplete candidate
-      // instead of treating the real response object as nested within it.
+      // A rolling PTY buffer can begin inside a truncated object. Start a new
+      // record when agy authenticates it as a 402, or when an object appears
+      // somewhere an object value cannot legally begin in the current JSON.
       if (
         str[i] === "{" &&
         objectStartKind(str, i) === kind &&
-        hasAuthenticated402Envelope(str, i)
+        (
+          hasAuthenticated402Envelope(str, i) ||
+          (
+            !inString &&
+            lastSignificantChar !== ":" &&
+            lastSignificantChar !== "[" &&
+            lastSignificantChar !== ","
+          )
+        )
       ) {
         start = i;
         depth = 1;
         inString = false;
         escape = false;
         decoded = ["{"];
+        lastSignificantChar = "{";
         i++;
         continue;
       }
@@ -223,12 +234,14 @@ function findJsonCandidates(str: string): JsonCandidate[] {
         start = -1;
         depth = 0;
         decoded = [];
+        lastSignificantChar = "";
         i++;
         continue;
       }
 
       const { char } = decodedChar;
       decoded.push(char);
+      if (!/\s/.test(char)) lastSignificantChar = char;
       i = decodedChar.nextIndex;
 
       if (escape) {
@@ -264,6 +277,7 @@ function findJsonCandidates(str: string): JsonCandidate[] {
       }
       start = -1;
       decoded = [];
+      lastSignificantChar = "";
     }
   }
 

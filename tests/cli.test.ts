@@ -1289,6 +1289,23 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("resynchronizes at a status-only 402 object after truncated JSON output", () => {
+    const raw = `{\\"unfinished\\":true\n{\\"detail\\":\\"Quota exhausted; try again later\\",\\"status\\":402}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Quota exhausted; try again later"
+    );
+  });
+
+  it("keeps valid nested objects inside an outer 402 payload", () => {
+    const raw = `{"metadata":
+      {"kind":"quota"},
+      "detail":"Quota exhausted; try again later",
+      "status":402}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Quota exhausted; try again later"
+    );
+  });
+
   it("does not classify status-less JSON by usage-limit wording alone", () => {
     expect(
       parseAgyUsageLimitError(`{"detail":"Explain the usage limit","title":"Discussion"}`)
