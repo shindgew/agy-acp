@@ -580,8 +580,12 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
-  if (isPlanFile(targetFile)) {
-    if (fullContent === null || fullContent.trim().length === 0) {
+  // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
+  // When CodeContent is present but empty, the plan was cleared → emit plan_removed.
+  // When CodeContent is null, this is a partial edit (replace_file_content) → fall through to
+  // the normal edit handler; the plan file itself still exists.
+  if (isPlanFile(targetFile) && fullContent !== null) {
+    if (fullContent.trim().length === 0) {
       return planRemovedFromPath(targetFile);
     }
     return planUpdateFromMarkdown(targetFile, fullContent);
