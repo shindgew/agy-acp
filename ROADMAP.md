@@ -82,7 +82,7 @@ Need interactive agy control plane or client terminal protocol beyond DB polling
 
 ### Fidelity improvements
 
-- [ ] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind` (unstable)
+- [x] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind` (unstable)
 - [ ] [`ContentBlock`](https://agentclientprotocol.com/protocol/v1/content): agent-outbound images / richer blocks when agy produces them
 - [ ] [`plan_update`](https://agentclientprotocol.com/rfds/plan-operations): unstable id-based plan ops (+ `plan_removed`) if a client prefers that over classic `plan`
 
@@ -153,7 +153,7 @@ differs or is incomplete.
 
 ### Fidelity improvements
 
-- [ ] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind`
+- [x] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind`
 - [ ] [`diff`](https://agentclientprotocol.com/rfds/diff-delete): `delete` / rename ops and richer [fileType](https://agentclientprotocol.com/rfds/v2/diff-file-states) when agy exposes them
 - [ ] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): agent-outbound images / richer blocks when agy produces them
 

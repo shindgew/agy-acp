@@ -7,6 +7,7 @@ import { ReplayCache } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
+import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,
@@ -1972,3 +1973,52 @@ describe("conversation scan", () => {
     expect(newConversationId(dir, before)).toBeNull();
   });
 });
+
+describe("tool call name support (gh#52)", () => {
+  it("emits programmatic tool call name on tool_call session updates", () => {
+    const db = createConversationDb(dir, "conv-name-test");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo hi"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 8,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c2", namePrimary: "view_file", rawInputJson: '{"AbsolutePath":"/tmp/test.txt"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 5,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c3", namePrimary: "replace_file_content", rawInputJson: '{"TargetFile":"/tmp/test.txt","TargetContent":"a","ReplacementContent":"b"}' })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-name-test");
+    expect(conn).not.toBeNull();
+    const rows = conn!.readAfter(0);
+    conn!.close();
+
+    const execUpdate = sessionUpdateFromStep(rows[0]) as any;
+    expect(execUpdate.name).toBe("run_command");
+
+    const readUpdate = sessionUpdateFromStep(rows[1]) as any;
+    expect(readUpdate.name).toBe("view_file");
+
+    const editUpdate = sessionUpdateFromStep(rows[2]) as any;
+    expect(editUpdate.name).toBe("replace_file_content");
+  });
+});
+
