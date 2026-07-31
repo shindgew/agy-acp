@@ -253,6 +253,12 @@ function findJsonCandidates(str: string): JsonCandidate[] {
   return results.sort((a, b) => a.start - b.start);
 }
 
+function hasAuthenticated402Envelope(text: string, candidateStart: number): boolean {
+  const lineStart = text.lastIndexOf("\n", candidateStart - 1) + 1;
+  const prefix = text.slice(lineStart, candidateStart);
+  return /^\s*(?:(?:agy exited with status \d+:|agy interactive PTY exited unexpectedly:)\s*)?(?:402\b|status:\s*402\b|Payment Required:)\s*$/i.test(prefix);
+}
+
 export function parseAgyUsageLimitError(text: string): string | null {
   if (!text) return null;
 
@@ -263,8 +269,7 @@ export function parseAgyUsageLimitError(text: string): string | null {
     const is402 =
       parsed.status === 402 ||
       parsed.status === "402" ||
-      (typeof parsed.title === "string" && /payment required/i.test(parsed.title)) ||
-      (typeof parsed.detail === "string" && /usage limit/i.test(parsed.detail));
+      hasAuthenticated402Envelope(text, candidate.start);
 
     if (is402) {
       const detail = typeof parsed.detail === "string" ? parsed.detail.trim() : "";

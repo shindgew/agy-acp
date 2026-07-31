@@ -1275,6 +1275,19 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("accepts status-less JSON only when adjacent to an authenticated 402 envelope", () => {
+    const raw = `agy exited with status 1: 402 {"detail":"Quota exhausted; try again later","title":"Payment Required"}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: Quota exhausted; try again later"
+    );
+  });
+
+  it("does not classify status-less JSON by usage-limit wording alone", () => {
+    expect(
+      parseAgyUsageLimitError(`{"detail":"Explain the usage limit","title":"Discussion"}`)
+    ).toBeNull();
+  });
+
   it("parses non-JSON 402 message", () => {
     const raw = "agy exited with status 1: 402 Payment Required: You've reached your 5-hour standard usage limit";
     expect(parseAgyUsageLimitError(raw)).toBe(
