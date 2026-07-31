@@ -97,8 +97,8 @@ export async function applyCuratedSlashCommand(
 /**
  * v1 `session/prompt`: response carries stopReason after the full turn.
  *
- * Only the ACP client's `params.prompt` is forwarded to agy (after content-block
- * encoding). The adapter never synthesizes conversational follow-ups.
+ * Zero prompt injection: only client `params.prompt` content is encoded and
+ * forwarded to agy. No adapter-authored labels, instructions, or follow-ups.
  */
 export async function handlePromptV1(
   params: V1PromptRequest,
@@ -184,8 +184,8 @@ export async function handlePromptV1(
  * v2 `session/prompt`: respond `{}` immediately on acceptance. Foreground
  * progress and stopReason arrive as `state_update` notifications.
  *
- * Only the ACP client's `params.prompt` is forwarded to agy (after content-block
- * encoding). The adapter never synthesizes conversational follow-ups.
+ * Zero prompt injection: only client `params.prompt` content is encoded and
+ * forwarded to agy. No adapter-authored labels, instructions, or follow-ups.
  */
 export async function handlePromptV2(
   params: V2PromptRequest,

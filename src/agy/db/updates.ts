@@ -133,10 +133,11 @@ function titleUpdate(stepRow: StepRow): SessionUpdate[] {
 /**
  * Step type 14 — the user's prompt/input that opened a turn.
  *
- * Live encoding (`contentBlocksToPrompt`) sends plain text plus `@path` image
- * refs. Older tagged envelopes (`<user_text>`, `<resource_link>`,
- * `<embedded_resource>`) are still unwrapped when present so historical
- * conversation DBs replay cleanly; otherwise the raw text is one text block.
+ * Live encoding (`contentBlocksToPrompt`) forwards client text/URI/body only
+ * plus agy `@path` image transport — no adapter framing prose. Older tagged
+ * envelopes (`<user_text>`, `<resource_link>`, `<embedded_resource>`) are still
+ * unwrapped when present so historical conversation DBs replay cleanly;
+ * otherwise the raw text is one text block.
  */
 function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
   const up = stepRow.stepPayload.userPrompt;
