@@ -12,6 +12,7 @@ import {
   encodeAgentText,
   encodeCommandResult,
   encodeGrepSearchResult,
+  encodeModelProviderError,
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
@@ -79,6 +80,34 @@ describe("ConversationDb", () => {
     expect(rows[0].stepPayload.agentText?.thought).toBe("Calculating 347 * 892...");
   });
 
+  it("decodes the model-provider error wrapper from field 24", () => {
+    const db = createConversationDb(dir, "conv-provider-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "RESOURCE_EXHAUSTED (code 429): quota reached",
+          diagnostic: "HTTP 429 Too Many Requests",
+          responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+          userMessage: "RESOURCE_EXHAUSTED (code 429): quota reached"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-provider-error")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].stepPayload.modelProviderError).toEqual({
+      summary: "RESOURCE_EXHAUSTED (code 429): quota reached",
+      diagnostic: "HTTP 429 Too Many Requests",
+      responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+      userMessage: "RESOURCE_EXHAUSTED (code 429): quota reached"
+    });
+  });
+
   it("returns null for a missing conversation", () => {
     expect(ConversationDb.open(dir, "does-not-exist")).toBeNull();
   });
@@ -113,6 +142,101 @@ describe("ConversationDb", () => {
 });
 
 describe("Translator", () => {
+  it("emits only the final persisted quota exhaustion as an agent message", () => {
+    const db = createConversationDb(dir, "conv-quota-exhausted");
+    const summaries = [
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m25s.",
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m24s.",
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m22s."
+    ];
+    const responseJson = JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ reason: "QUOTA_EXHAUSTED" }]
+      }
+    });
+    summaries.forEach((summary, index) => {
+      insertStep(db, {
+        idx: 27 + index * 2,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          modelProviderError: encodeModelProviderError({
+            summary,
+            diagnostic: "HTTP 429 Too Many Requests",
+            responseJson,
+            userMessage:
+              index === summaries.length - 1
+                ? summary
+                : "The model API is currently overloaded and may experience intermittent errors."
+          })
+        })
+      });
+    });
+    db.close();
+
+    const expected = [{
+      sessionUpdate: "agent_message_chunk",
+      messageId: "provider-error-31",
+      content: { type: "text", text: summaries[2] },
+      _meta: { stepIdx: 31 }
+    }];
+
+    const replayConn = ConversationDb.open(dir, "conv-quota-exhausted")!;
+    const replay = new Translator({ mode: "replay", skipNarration: false });
+    expect(replay.translate(replayConn.readAfter(-1))).toEqual(expected);
+    replayConn.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-quota-exhausted")!;
+    const stream = new Translator({ mode: "stream", skipNarration: false });
+    expect(stream.translate(streamConn.readAfter(-1))).toEqual(expected);
+    expect(stream.translate(streamConn.readAfter(-1))).toEqual([]);
+    streamConn.close();
+  });
+
+  it("does not infer quota exhaustion without the observed structured response and final message", () => {
+    const summary = "RESOURCE_EXHAUSTED (code 429): quota reached";
+    const db = createConversationDb(dir, "conv-unverified-quota");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary,
+          responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+          userMessage: summary
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary,
+          responseJson: JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ reason: "QUOTA_EXHAUSTED" }]
+            }
+          }),
+          userMessage: "The model API is currently overloaded and may experience intermittent errors."
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-unverified-quota")!;
+    const updates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      conn.readAfter(-1)
+    );
+    conn.close();
+
+    expect(updates).toEqual([]);
+  });
+
   it("streams only the newly-appended slice of a growing agent-text row", () => {
     const db = createConversationDb(dir, "conv-2");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });

@@ -90,6 +90,8 @@ export class Translator {
   private readonly agentTextLengths = new Map<number, number>();
   // Streaming: thought messageId -> chars already emitted.
   private readonly thoughtTextLengths = new Map<string, number>();
+  // Stream + replay: provider-error messageId -> chars already emitted.
+  private readonly providerErrorTextLengths = new Map<string, number>();
   // Stream + replay: last emitted snapshot keyed by tool call id / plan id (tool progressive lifecycle).
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
@@ -213,6 +215,10 @@ export class Translator {
       this.emitThought(stepIdx, update, out);
       return;
     }
+    if (kind === "agent_message_chunk" && String(raw.messageId).startsWith("provider-error-")) {
+      this.emitProviderError(stepIdx, update, out);
+      return;
+    }
 
     const stamped = withStepMeta(update, stepIdx);
 
@@ -260,6 +266,17 @@ export class Translator {
     this.thoughtTextLengths.set(messageId, text.length);
     const delta = text.slice(emitted);
     if (delta.length > 0) out.push(withStepMeta(thoughtChunk(delta, messageId), stepIdx));
+  }
+
+  private emitProviderError(stepIdx: number, update: SessionUpdate, out: SessionUpdate[]): void {
+    const raw = update as unknown as Record<string, unknown>;
+    const content = raw.content as { type?: string; text?: string } | undefined;
+    const text = typeof content?.text === "string" ? content.text : "";
+    const messageId = typeof raw.messageId === "string" ? raw.messageId : `provider-error-${stepIdx}`;
+    const emitted = this.providerErrorTextLengths.get(messageId) ?? 0;
+    if (text.length <= emitted) return;
+    this.providerErrorTextLengths.set(messageId, text.length);
+    out.push(withStepMeta(agentChunk(text.slice(emitted), messageId), stepIdx));
   }
 
   private handleTitle(row: StepRow, out: SessionUpdate[]): void {
