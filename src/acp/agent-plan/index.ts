@@ -52,6 +52,13 @@ export function isPlanFile(targetFile: string): boolean {
  */
 export function parsePlanEntries(markdown: string): PlanEntry[] {
   const entries: PlanEntry[] = [];
+  const contentCounts = new Map<string, number>();
+
+  function makeId(content: string): string {
+    const count = contentCounts.get(content) ?? 0;
+    contentCounts.set(content, count + 1);
+    return entryIdFromContent(content, count);
+  }
 
   for (const rawLine of markdown.split(/\r?\n/)) {
     const line = rawLine.replace(/\s+$/, "");
@@ -62,7 +69,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       const content = checkbox[2].trim();
       if (!content) continue;
       entries.push({
-        id: entryIdFromContent(content),
+        id: makeId(content),
         content,
         priority: defaultPriority(entries.length),
         status: checkboxStatus(checkbox[1])
@@ -78,7 +85,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       // Ignore list markers that are really horizontal rules / separators.
       if (/^[-*_]{3,}$/.test(content)) continue;
       entries.push({
-        id: entryIdFromContent(content),
+        id: makeId(content),
         content,
         priority: defaultPriority(entries.length),
         status: "pending"
@@ -91,7 +98,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
   const fallback = firstMeaningfulLine(markdown);
   return [
     {
-      id: entryIdFromContent(fallback),
+      id: makeId(fallback),
       content: fallback,
       priority: "medium",
       status: "pending"
@@ -154,13 +161,14 @@ function firstMeaningfulLine(markdown: string): string {
 
 /**
  * Derive a stable entry ID from the entry's text content.
- * Uses a simple djb2-style hash so that entries keep their identity
- * across insertions, removals, and reordering in the plan markdown.
+ * Uses a simple djb2-style hash with occurrence index tracking so duplicate
+ * plan rows receive distinct IDs while preserving identity across reordering.
  */
-function entryIdFromContent(content: string): string {
+function entryIdFromContent(content: string, occurrence = 0): string {
+  const key = occurrence > 0 ? `${content}#${occurrence}` : content;
   let hash = 5381;
-  for (let i = 0; i < content.length; i++) {
-    hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = ((hash << 5) + hash + key.charCodeAt(i)) | 0;
   }
   // Convert to unsigned hex for a short, URL-safe id.
   return `entry_${(hash >>> 0).toString(16)}`;

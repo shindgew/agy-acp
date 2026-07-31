@@ -63,6 +63,13 @@ describe("parsePlanEntries", () => {
     );
   });
 
+  it("assigns distinct entry IDs to duplicate task text", () => {
+    const entries = parsePlanEntries("- [ ] Run tests\n- [ ] Build\n- [ ] Run tests\n");
+    const ids = entries.map((e) => (e as Record<string, unknown>).id);
+    expect(ids[0]).not.toBe(ids[2]);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it("falls back to the first heading when there is no list", () => {
     const entries = parsePlanEntries("# Ship the feature\n\nSome prose only.\n");
     expect(entries).toMatchObject([
