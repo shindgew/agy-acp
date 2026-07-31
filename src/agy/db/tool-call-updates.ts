@@ -128,6 +128,15 @@ function taskBlock(t: TaskDetails): Record<string, unknown> {
   return textBlock(lines.join("\n"));
 }
 
+/** Decoded agy tool identity, preferring the primary field when both exist. */
+export function decodedToolName(stepRow: StepRow): string {
+  return (
+    stepRow.stepPayload.toolRun?.call?.namePrimary ||
+    stepRow.stepPayload.toolRun?.call?.nameSecondary ||
+    ""
+  );
+}
+
 /**
  * Build a `tool_call` update with the envelope common to every tool step: the
  * parsed args become `rawInput`, a decoded error becomes `rawOutput` plus a
@@ -157,8 +166,7 @@ export function toolCallUpdate(opts: {
 
   const name =
     nameOpt ||
-    stepRow.stepPayload.toolRun?.call?.namePrimary ||
-    stepRow.stepPayload.toolRun?.call?.nameSecondary ||
+    decodedToolName(stepRow) ||
     undefined;
 
   // Emit `tool_call` (v1 create shape). The v2 boundary rewrites this to
@@ -316,7 +324,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const toolRun = stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
-  const namePrimary = toolRun?.call?.namePrimary ?? "";
+  const nameFromCall = decodedToolName(stepRow);
   const view = stepPayload.viewFile;
   const list = stepPayload.listDirectory;
 
@@ -325,8 +333,8 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
 
-  if (list || namePrimary === "list_dir" || stepType === 9) {
-    name = "list_dir";
+  if (list || nameFromCall === "list_dir" || stepType === 9) {
+    name = nameFromCall || "list_dir";
     const dir = fsPath(asStr(list?.dirUri)) ?? fsPath(asStr(pick(rawInput, "DirectoryPath", "directoryPath")));
     const shown = dir ? toDisplayPath(dir, displayCwd) : "";
     title = shown ? `Read ${shown}` : "Read directory";
@@ -336,6 +344,7 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       content.push(codeBlock(entries.map((e) => `${e.name}${e.isDirectory !== 0 ? "/" : ""}`).join("\n")));
     }
   } else {
+    name = nameFromCall || "view_file";
     const filePath =
       fsPath(asStr(pick(rawInput, "AbsolutePath", "absolutePath", "FilePath"))) ?? fsPath(asStr(view?.fileUri));
     const resolvedFile = resolvePath(filePath, displayCwd);
@@ -386,7 +395,7 @@ function renderHits(hits: SearchHit[] | undefined): string {
 export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
   const cwd = ctx?.cwd;
   const { stepPayload, stepType } = stepRow;
-  const namePrimary = stepPayload.toolRun?.call?.namePrimary ?? "";
+  const nameFromCall = decodedToolName(stepRow);
   const rawInput = parseRawInput(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
   const grep = stepPayload.grepSearch;
@@ -396,8 +405,8 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
 
-  if (grep || namePrimary === "grep_search" || stepType === 7) {
-    name = "grep_search";
+  if (grep || nameFromCall === "grep_search" || stepType === 7) {
+    name = nameFromCall || "grep_search";
     const query = asStr(grep?.query) ?? asStr(pick(rawInput, "Query", "query")) ?? "";
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
     const resolvedPath = resolvePath(searchPath, displayCwd);
@@ -408,6 +417,7 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
     if (body) content.push(codeBlock(body));
   } else {
+    name = nameFromCall || "search_web";
     // search_web: field 42 carries query metadata; hit lists are not persisted.
     const web = stepPayload.webSearch;
     const query =
@@ -460,7 +470,7 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
     fsPath(commandResult?.cwd?.trim() ? commandResult.cwd : null);
   const locations: Record<string, unknown>[] = [];
 
-  const name = toolRun?.call?.namePrimary || "run_command";
+  const name = decodedToolName(stepRow) || "run_command";
 
   const update = toolCallUpdate({
     stepRow,
@@ -537,7 +547,7 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
     content.push(codeBlock(sliced.text));
   }
 
-  const name = toolRun?.call?.namePrimary || "read_url_content";
+  const name = decodedToolName(stepRow) || "read_url_content";
 
   const update = toolCallUpdate({ stepRow, title, kind: "fetch", name, content }) as SessionUpdate & {
     rawOutput?: unknown;
@@ -581,7 +591,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
 
-  let name = stepRow.stepPayload.toolRun?.call?.namePrimary || "";
+  let name = decodedToolName(stepRow);
 
   if (fullContent !== null) {
     if (!name || name === "edit") name = "write_to_file";
@@ -641,7 +651,7 @@ export function questionUpdate(stepRow: StepRow): SessionUpdate {
     content.push(textBlock(lines.join("\n")));
   }
 
-  const name = toolRun?.call?.namePrimary || "ask_question";
+  const name = decodedToolName(stepRow) || "ask_question";
 
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
 }
@@ -663,7 +673,7 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
     .filter((prompt): prompt is string => Boolean(prompt))
     .map(codeBlock);
 
-  const name = toolRun?.call?.namePrimary || "invoke_subagent";
+  const name = decodedToolName(stepRow) || "invoke_subagent";
 
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
 }
@@ -675,10 +685,10 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
  */
 export function otherUpdate(stepRow: StepRow): SessionUpdate {
   const toolRun = stepRow.stepPayload.toolRun;
-  const namePrimary = toolRun?.call?.namePrimary ?? "";
+  const name = decodedToolName(stepRow);
   const rawInput = parseRawInput(stepRow);
 
-  switch (namePrimary) {
+  switch (name) {
     case "manage_task": {
       const action = asStr(pick(rawInput, "Action", "action"))?.trim() || "manage";
       const taskId = asStr(pick(rawInput, "TaskId", "taskId"));
@@ -723,7 +733,7 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
-    namePrimary ||
+    name ||
     "Tool";
 
   const content: Record<string, unknown>[] = [];
@@ -731,8 +741,6 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
     const { toolAction: _toolAction, toolSummary: _toolSummary, ...rest } = rawInput as Record<string, unknown>;
     if (Object.keys(rest).length > 0) content.push(codeBlock(JSON.stringify(rest, null, 2)));
   }
-
-  const name = namePrimary || toolRun?.call?.nameSecondary || "";
 
   return toolCallUpdate({ stepRow, title, kind: toolKind(name), name, content });
 }

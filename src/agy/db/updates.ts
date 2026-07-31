@@ -5,6 +5,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import {
+  decodedToolName,
   editUpdate,
   executeUpdate,
   fetchUpdate,
@@ -128,7 +129,7 @@ function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
  *  step carries no actual tool call (e.g. type-17 artifact progress wrappers
  *  have a tool-run header but no `call`), so we don't emit empty tool_calls. */
 function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate | SessionUpdate[] | null {
-  const name = stepRow.stepPayload.toolRun?.call?.namePrimary ?? "";
+  const name = decodedToolName(stepRow);
   if (!name) return null;
 
   if (isThoughtToolName(name)) return thoughtUpdate(stepRow);

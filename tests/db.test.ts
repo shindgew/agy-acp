@@ -2018,6 +2018,32 @@ describe("tool call name support (gh#52)", () => {
         })
       })
     });
+    insertStep(db, {
+      idx: 5,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c5",
+            nameSecondary: "custom_command_tool",
+            rawInputJson: '{"CommandLine":"echo secondary"}'
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 6,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c6",
+            nameSecondary: "run_command",
+            rawInputJson: '{"CommandLine":"echo routed"}'
+          })
+        })
+      })
+    });
     db.close();
 
     const conn = ConversationDb.open(dir, "conv-name-test");
@@ -2036,5 +2062,11 @@ describe("tool call name support (gh#52)", () => {
 
     const genericUpdate = sessionUpdateFromStep(rows[3]) as any;
     expect(genericUpdate.name).toBe("custom_secondary_tool");
+
+    const executeUpdate = sessionUpdateFromStep(rows[4]) as any;
+    expect(executeUpdate.name).toBe("custom_command_tool");
+
+    const routedUpdate = sessionUpdateFromStep(rows[5]) as any;
+    expect(routedUpdate).toMatchObject({ name: "run_command", kind: "execute" });
   });
 });
