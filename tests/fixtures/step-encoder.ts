@@ -107,6 +107,23 @@ export function encodeUrlContentResult(result: {
   return w.finish();
 }
 
+export function encodeModelProviderError(error: {
+  summary?: string;
+  diagnostic?: string;
+  responseJson?: string;
+  userMessage?: string;
+}): Uint8Array {
+  const details = new BinaryWriter();
+  if (error.summary) details.tag(2, 2).string(error.summary);
+  if (error.diagnostic) details.tag(3, 2).string(error.diagnostic);
+  if (error.responseJson) details.tag(5, 2).string(error.responseJson);
+  if (error.userMessage) details.tag(9, 2).string(error.userMessage);
+
+  const wrapper = new BinaryWriter();
+  submessage(wrapper, 3, details.finish());
+  return wrapper.finish();
+}
+
 export function encodeViewFileResult(result: {
   fileUri?: string;
   startLine?: number;
@@ -180,6 +197,7 @@ export function encodeStepPayload(opts: {
   grepSearch?: Uint8Array;
   webSearch?: Uint8Array;
   urlContent?: Uint8Array;
+  modelProviderError?: Uint8Array;
 }): Uint8Array {
   const w = new BinaryWriter();
   if (opts.toolRun) submessage(w, 5, opts.toolRun);
@@ -190,6 +208,7 @@ export function encodeStepPayload(opts: {
     const bytes = opts.agentText instanceof Uint8Array ? opts.agentText : encodeAgentText(opts.agentText);
     submessage(w, 20, bytes);
   }
+  if (opts.modelProviderError) submessage(w, 24, opts.modelProviderError);
   if (opts.commandResult) submessage(w, 28, opts.commandResult);
   if (opts.titleUpdate !== undefined) submessage(w, 30, encodeTitleUpdate(opts.titleUpdate));
   if (opts.urlContent) submessage(w, 40, opts.urlContent);

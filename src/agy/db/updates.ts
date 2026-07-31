@@ -5,6 +5,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import {
+  decodedToolName,
   editUpdate,
   executeUpdate,
   fetchUpdate,
@@ -30,6 +31,46 @@ export type { UpdateContext } from "./tool-call-updates.js";
  *   101 stop_hook            — termination/auto-proceed decisions
  */
 const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
+
+function isFinalQuotaExhaustion(stepRow: StepRow): boolean {
+  if (stepRow.status !== 3 && stepRow.status !== 6 && stepRow.status !== 7) return false;
+
+  const providerError = stepRow.stepPayload.modelProviderError;
+  if (!providerError) return false;
+
+  const summary = providerError.summary.trim();
+  const userMessage = providerError.userMessage.trim();
+  if (!summary || userMessage !== summary) return false;
+
+  try {
+    const parsed = JSON.parse(providerError.responseJson) as {
+      error?: {
+        code?: unknown;
+        status?: unknown;
+        details?: Array<{ reason?: unknown }>;
+      };
+    };
+    return (
+      parsed.error?.code === 429 &&
+      parsed.error.status === "RESOURCE_EXHAUSTED" &&
+      parsed.error.details?.some((detail) => detail.reason === "QUOTA_EXHAUSTED") === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function quotaExhaustionUpdate(stepRow: StepRow): SessionUpdate | null {
+  if (!isFinalQuotaExhaustion(stepRow)) return null;
+  return {
+    sessionUpdate: "agent_message_chunk",
+    messageId: `provider-error-${stepRow.idx}`,
+    content: {
+      type: "text",
+      text: stepRow.stepPayload.modelProviderError!.userMessage.trim()
+    }
+  };
+}
 
 /** Step type 15 — a chunk of the agent's streamed text message (+ optional thought). */
 function agentUpdate(stepRow: StepRow): SessionUpdate | SessionUpdate[] | null {
@@ -128,7 +169,7 @@ function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
  *  step carries no actual tool call (e.g. type-17 artifact progress wrappers
  *  have a tool-run header but no `call`), so we don't emit empty tool_calls. */
 function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate | SessionUpdate[] | null {
-  const name = stepRow.stepPayload.toolRun?.call?.namePrimary ?? "";
+  const name = decodedToolName(stepRow);
   if (!name) return null;
 
   if (isThoughtToolName(name)) return thoughtUpdate(stepRow);
@@ -173,7 +214,7 @@ export function sessionUpdateFromStep(
     case 5:
       return editUpdate(stepRow, ctx);
     case 17:
-      return buildByToolName(stepRow, ctx);
+      return quotaExhaustionUpdate(stepRow) ?? buildByToolName(stepRow, ctx);
     case 8:
     case 9:
       return readUpdate(stepRow, ctx);

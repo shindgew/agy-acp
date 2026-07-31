@@ -23,6 +23,41 @@ export interface ClientFsCapability {
   writeTextFile: boolean;
 }
 
+export interface ClientToolCallNameCapability {
+  name: boolean;
+}
+
+export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false): ClientToolCallNameCapability {
+  if (!rawCaps || typeof rawCaps !== "object") return { name: defaultEnabled };
+  const caps = rawCaps as Record<string, unknown>;
+  const clientCaps =
+    (caps.clientCapabilities as Record<string, unknown> | undefined) ??
+    (caps.capabilities as Record<string, unknown> | undefined) ??
+    caps;
+  const capabilityMeta =
+    (clientCaps._meta as Record<string, unknown> | undefined) ??
+    (caps._meta as Record<string, unknown> | undefined);
+  const nestedToolCall =
+    (clientCaps.toolCall as Record<string, unknown> | undefined) ??
+    (clientCaps.tool_call as Record<string, unknown> | undefined);
+
+  const toolCallName =
+    clientCaps.toolCallName ??
+    clientCaps.tool_call_name ??
+    nestedToolCall?.name ??
+    clientCaps.unstable_toolCallName ??
+    clientCaps.unstable_tool_call_name ??
+    (clientCaps.unstable as Record<string, unknown> | undefined)?.toolCallName ??
+    (clientCaps.unstable as Record<string, unknown> | undefined)?.tool_call_name ??
+    capabilityMeta?.toolCallName ??
+    capabilityMeta?.tool_call_name;
+
+  if (typeof toolCallName === "boolean") return { name: toolCallName };
+  if (toolCallName && typeof toolCallName === "object") {
+    return { name: Boolean((toolCallName as Record<string, unknown>).name ?? true) };
+  }
+  return { name: defaultEnabled };
+}
 function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   if (!rawCaps || typeof rawCaps !== "object") return { form: false, url: false };
   const caps = rawCaps as Record<string, unknown>;
@@ -34,7 +69,7 @@ function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   };
 }
 
-/** v1 `initialize`: also returns the client's advertised `fs` and `elicitation` capabilities. */
+/** v1 `initialize`: also returns the client's advertised `fs`, `elicitation`, and `toolCallName` capabilities. */
 export function handleInitializeV1(
   params: V1InitializeRequest,
   agentVersion: string
@@ -42,6 +77,7 @@ export function handleInitializeV1(
   response: V1InitializeResponse;
   clientFs: ClientFsCapability;
   clientElicitation: ClientElicitationCapability;
+  clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
     clientFs: {
@@ -49,6 +85,7 @@ export function handleInitializeV1(
       writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
     },
     clientElicitation: parseClientElicitation(params.clientCapabilities),
+    clientToolCallName: parseClientToolCallName(params.clientCapabilities, false),
     response: {
       protocolVersion:
         params.protocolVersion === v1.PROTOCOL_VERSION ? params.protocolVersion : v1.PROTOCOL_VERSION,
@@ -72,8 +109,9 @@ export function handleInitializeV1(
         },
         auth: {
           logout: {}
-        }
-      },
+        },
+        toolCallName: {}
+      } as unknown as v1.AgentCapabilities,
       authMethods: v1AuthMethods(),
       agentInfo: { ...AGENT_INFO, version: agentVersion }
     }
@@ -86,9 +124,11 @@ export function handleInitializeV2(
 ): {
   response: V2InitializeResponse;
   clientElicitation: ClientElicitationCapability;
+  clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
     clientElicitation: parseClientElicitation(params),
+    clientToolCallName: parseClientToolCallName(params, true),
     response: {
       protocolVersion:
         params.protocolVersion === v2.PROTOCOL_VERSION ? params.protocolVersion : v2.PROTOCOL_VERSION,
@@ -102,8 +142,12 @@ export function handleInitializeV2(
           },
           additionalDirectories: {}
         },
-        auth: {}
-      },
+        auth: {},
+        toolCallName: {},
+        _meta: {
+          toolCallName: {}
+        }
+      } as unknown as v2.AgentCapabilities,
       // Non-empty authMethods commits the agent to auth/login + auth/logout.
       authMethods: v2AuthMethods()
     }

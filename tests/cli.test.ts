@@ -26,7 +26,7 @@ import {
   permissionKeys,
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
-import { requestPermissionV1 } from "../src/acp/session/request-permission.js";
+import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
 import { encodePermissions, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
@@ -284,6 +284,90 @@ describe("permission bridge", () => {
     expect(capturedTitle).toBe("[Question 2/2] Second Question?");
   });
 
+  it("filters v1 requestPermission tool names unless the client negotiated them", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        payloads.push(params.toolCall);
+        return { outcome: { outcome: "selected", optionId: "allow-once" } };
+      })
+    };
+    const toolCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "cmd-name",
+      title: "echo hi",
+      kind: "execute" as const,
+      status: "pending" as const,
+      name: "run_command"
+    };
+
+    await requestPermissionV1(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      undefined,
+      undefined,
+      undefined,
+      { name: false }
+    );
+    await requestPermissionV1(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      undefined,
+      undefined,
+      undefined,
+      { name: true }
+    );
+
+    expect(payloads[0]).not.toHaveProperty("name");
+    expect(payloads[1]).toHaveProperty("name", "run_command");
+  });
+
+  it("filters v2 requestPermission tool names when the client opts out", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        payloads.push(params.subject.toolCall);
+        return { outcome: { outcome: "selected", optionId: "allow-once" } };
+      })
+    };
+    const toolCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "cmd-v2-name",
+      title: "echo hi",
+      kind: "execute" as const,
+      status: "pending" as const,
+      name: "run_command"
+    };
+
+    await requestPermissionV2(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      new AbortController().signal,
+      undefined,
+      undefined,
+      { name: false }
+    );
+    await requestPermissionV2(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      new AbortController().signal,
+      undefined,
+      undefined,
+      { name: true }
+    );
+
+    expect(payloads[0]).not.toHaveProperty("name");
+    expect(payloads[1]).toHaveProperty("name", "run_command");
+  });
+
   it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
     // agy 1.1.7 gates sandbox bypass (run a command / read a file outside the
     // sandbox) through a status-9 `ask_permission` step whose TUI menu is the
@@ -311,6 +395,49 @@ describe("permission bridge", () => {
     ]);
     expect(interactionKeys("agy-allow-once", "ask_permission", askPermission)).toBe("\r");
     expect(interactionKeys("agy-reject-once", "ask_permission", askPermission)).toBe("\x1b[B\x1b[B\x1b[B\r");
+  });
+
+  it("bridges agy's manage_task gated actions (kill, send_input) as a 4-row menu", () => {
+    const manageTaskKill = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "mt1",
+      title: "Manage task kill",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: {
+        Action: "kill",
+        TaskId: "task-42",
+        toolAction: "Killing background task",
+        toolSummary: "Kill task"
+      }
+    };
+    expect(isBridgeablePermissionTool("manage_task")).toBe(true);
+    expect(canBridgeInteraction("manage_task", manageTaskKill)).toBe(true);
+    expect(permissionOptions(manageTaskKill, "manage_task")).toEqual([
+      { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+      { optionId: "agy-allow-conversation", kind: "allow_always", name: "Yes, and always allow 'manage_task kill (task-42)' in this conversation" },
+      { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow 'manage_task kill (task-42)' (Persist to settings.json)" },
+      { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
+    ]);
+    expect(interactionKeys("agy-allow-once", "manage_task", manageTaskKill)).toBe("\r");
+    expect(interactionKeys("agy-allow-conversation", "manage_task", manageTaskKill)).toBe("\x1b[B\r");
+    expect(interactionKeys("agy-reject-once", "manage_task", manageTaskKill)).toBe("\x1b[B\x1b[B\x1b[B\r");
+
+    // Without a TaskId, the target omits the parenthetical.
+    const manageTaskNoId = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "mt2",
+      title: "Manage task send_input",
+      kind: "other" as const,
+      status: "pending" as const,
+      rawInput: { Action: "send_input" }
+    };
+    expect(permissionOptions(manageTaskNoId, "manage_task")).toEqual([
+      { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+      { optionId: "agy-allow-conversation", kind: "allow_always", name: "Yes, and always allow 'manage_task send_input' in this conversation" },
+      { optionId: "agy-allow-settings", kind: "allow_always", name: "Yes, and always allow 'manage_task send_input' (Persist to settings.json)" },
+      { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
+    ]);
   });
 
   for (const [choice, keys] of [
@@ -603,6 +730,29 @@ describe("permission bridge", () => {
     expect((await result).stopReason).toBe("end_turn");
     expect(calls).toBe(1);
     expect(pty.writes).toEqual(["\x1b[B", "\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("bridges manage_task status-9 interaction through full PTY turn loop", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const manageInput = JSON.stringify({ Action: "send_input", TaskId: "task-7", Input: "yes\n" });
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "manage-task");
+      insertStep(db, pendingToolRow("manage_task", manageInput, 132));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "manage-task.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "sent input" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 150);
+      return "agy-allow-once";
+    });
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toEqual(["\r"]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });

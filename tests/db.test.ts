@@ -7,11 +7,13 @@ import { ReplayCache } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
+import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,
   encodeCommandResult,
   encodeGrepSearchResult,
+  encodeModelProviderError,
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
@@ -79,6 +81,34 @@ describe("ConversationDb", () => {
     expect(rows[0].stepPayload.agentText?.thought).toBe("Calculating 347 * 892...");
   });
 
+  it("decodes the model-provider error wrapper from field 24", () => {
+    const db = createConversationDb(dir, "conv-provider-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "RESOURCE_EXHAUSTED (code 429): quota reached",
+          diagnostic: "HTTP 429 Too Many Requests",
+          responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+          userMessage: "RESOURCE_EXHAUSTED (code 429): quota reached"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-provider-error")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].stepPayload.modelProviderError).toEqual({
+      summary: "RESOURCE_EXHAUSTED (code 429): quota reached",
+      diagnostic: "HTTP 429 Too Many Requests",
+      responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+      userMessage: "RESOURCE_EXHAUSTED (code 429): quota reached"
+    });
+  });
+
   it("returns null for a missing conversation", () => {
     expect(ConversationDb.open(dir, "does-not-exist")).toBeNull();
   });
@@ -113,6 +143,153 @@ describe("ConversationDb", () => {
 });
 
 describe("Translator", () => {
+  it("emits only the final persisted quota exhaustion as an agent message", () => {
+    const db = createConversationDb(dir, "conv-quota-exhausted");
+    const summaries = [
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m25s.",
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m24s.",
+      "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 3h35m22s."
+    ];
+    const responseJson = JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ reason: "QUOTA_EXHAUSTED" }]
+      }
+    });
+    summaries.forEach((summary, index) => {
+      insertStep(db, {
+        idx: 27 + index * 2,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          modelProviderError: encodeModelProviderError({
+            summary,
+            diagnostic: "HTTP 429 Too Many Requests",
+            responseJson,
+            userMessage:
+              index === summaries.length - 1
+                ? summary
+                : "The model API is currently overloaded and may experience intermittent errors."
+          })
+        })
+      });
+    });
+    db.close();
+
+    const expected = [{
+      sessionUpdate: "agent_message_chunk",
+      messageId: "provider-error-31",
+      content: { type: "text", text: summaries[2] },
+      _meta: { stepIdx: 31 }
+    }];
+
+    const replayConn = ConversationDb.open(dir, "conv-quota-exhausted")!;
+    const replay = new Translator({ mode: "replay", skipNarration: false });
+    expect(replay.translate(replayConn.readAfter(-1))).toEqual(expected);
+    replayConn.close();
+
+    const streamConn = ConversationDb.open(dir, "conv-quota-exhausted")!;
+    const stream = new Translator({ mode: "stream", skipNarration: false });
+    expect(stream.translate(streamConn.readAfter(-1))).toEqual(expected);
+    expect(stream.translate(streamConn.readAfter(-1))).toEqual([]);
+    streamConn.close();
+  });
+
+  it("does not infer quota exhaustion without the observed structured response and final message", () => {
+    const summary = "RESOURCE_EXHAUSTED (code 429): quota reached";
+    const db = createConversationDb(dir, "conv-unverified-quota");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary,
+          responseJson: '{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}',
+          userMessage: summary
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary,
+          responseJson: JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ reason: "QUOTA_EXHAUSTED" }]
+            }
+          }),
+          userMessage: "The model API is currently overloaded and may experience intermittent errors."
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-unverified-quota")!;
+    const updates = new Translator({ mode: "replay", skipNarration: false }).translate(
+      conn.readAfter(-1)
+    );
+    conn.close();
+
+    expect(updates).toEqual([]);
+  });
+
+  it("waits for a provider-error row to become terminal before emitting its full message", () => {
+    const initial = "RESOURCE_EXHAUSTED (code 429): quota reached. Resets in 4h.";
+    const final = "RESOURCE_EXHAUSTED (code 429): quota reached. Resets in 3h59m58s.";
+    const responseJson = JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ reason: "QUOTA_EXHAUSTED" }]
+      }
+    });
+    const db = createConversationDb(dir, "conv-growing-provider-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      status: 1,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: initial,
+          responseJson,
+          userMessage: initial
+        })
+      })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-provider-error")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(-1))).toEqual([]);
+
+    updateStep(db, 1, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: final,
+          responseJson,
+          userMessage: final
+        })
+      })
+    });
+    expect(translator.translate(conn.readAfter(-1))).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "provider-error-1",
+        content: { type: "text", text: final },
+        _meta: { stepIdx: 1 }
+      }
+    ]);
+    expect(translator.translate(conn.readAfter(-1))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
   it("streams only the newly-appended slice of a growing agent-text row", () => {
     const db = createConversationDb(dir, "conv-2");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });
@@ -233,6 +410,59 @@ describe("Translator", () => {
     db.close();
   });
 
+  it("re-emits a progressive tool update when its decoded name changes", () => {
+    const db = createConversationDb(dir, "conv-progressive-tool-name");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-progressive-tool-name")!;
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call",
+        toolCallId: "late-name",
+        name: "run_command"
+      }
+    ]);
+
+    updateStepPayload(
+      db,
+      1,
+      encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "late-name",
+            nameSecondary: "resolved_command_tool",
+            rawInputJson: '{"CommandLine":"echo hi"}'
+          })
+        })
+      })
+    );
+
+    expect(translator.translate(conn.readAfter(0))).toMatchObject([
+      {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "late-name",
+        name: "resolved_command_tool"
+      }
+    ]);
+    expect(translator.translate(conn.readAfter(0))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
 
   it("emits tool_call then tool_call_update when status progresses on the same idx", () => {
     const db = createConversationDb(dir, "conv-tool-progress");
@@ -1970,5 +2200,102 @@ describe("conversation scan", () => {
     createConversationDb(dir, "a").close();
     createConversationDb(dir, "b").close();
     expect(newConversationId(dir, before)).toBeNull();
+  });
+});
+
+describe("tool call name support (gh#52)", () => {
+  it("emits programmatic tool call name on tool_call session updates", () => {
+    const db = createConversationDb(dir, "conv-name-test");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c1", namePrimary: "run_command", rawInputJson: '{"CommandLine":"echo hi"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 8,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c2", namePrimary: "view_file", rawInputJson: '{"AbsolutePath":"/tmp/test.txt"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 5,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c3", namePrimary: "replace_file_content", rawInputJson: '{"TargetFile":"/tmp/test.txt","TargetContent":"a","ReplacementContent":"b"}' })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 4,
+      stepType: 132,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c4",
+            nameSecondary: "custom_secondary_tool",
+            rawInputJson: '{"value":"test"}'
+          }),
+          titlePrimary: "Custom secondary tool"
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 5,
+      stepType: 21,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c5",
+            nameSecondary: "custom_command_tool",
+            rawInputJson: '{"CommandLine":"echo secondary"}'
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 6,
+      stepType: 17,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "c6",
+            nameSecondary: "run_command",
+            rawInputJson: '{"CommandLine":"echo routed"}'
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-name-test");
+    expect(conn).not.toBeNull();
+    const rows = conn!.readAfter(0);
+    conn!.close();
+
+    const execUpdate = sessionUpdateFromStep(rows[0]) as any;
+    expect(execUpdate.name).toBe("run_command");
+
+    const readUpdate = sessionUpdateFromStep(rows[1]) as any;
+    expect(readUpdate.name).toBe("view_file");
+
+    const editUpdate = sessionUpdateFromStep(rows[2]) as any;
+    expect(editUpdate.name).toBe("replace_file_content");
+
+    const genericUpdate = sessionUpdateFromStep(rows[3]) as any;
+    expect(genericUpdate.name).toBe("custom_secondary_tool");
+
+    const executeUpdate = sessionUpdateFromStep(rows[4]) as any;
+    expect(executeUpdate.name).toBe("custom_command_tool");
+
+    const routedUpdate = sessionUpdateFromStep(rows[5]) as any;
+    expect(routedUpdate).toMatchObject({ name: "run_command", kind: "execute" });
   });
 });

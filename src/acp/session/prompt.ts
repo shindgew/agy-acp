@@ -15,6 +15,7 @@ import type {
   PromptResponse as V2PromptResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
 import type { ClientElicitationCapability } from "../tool-calls/elicitation.js";
+import type { ClientToolCallNameCapability } from "../initialize.js";
 import type { SessionModeId } from "../../agy/cli.js";
 import { contentBlocksToPrompt } from "../content/index.js";
 import type { ClientFileSystem } from "../../agy/edit/bridge.js";
@@ -36,11 +37,13 @@ export interface PromptV1Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV1(client: V1AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined;
   clientElicitationV1?(client: V1AgentContext): ClientElicitationCapability | undefined;
+  clientToolCallNameV1?(client: V1AgentContext): ClientToolCallNameCapability | undefined;
 }
 
 export interface PromptV2Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV2(client: V2AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientElicitationV2?(client: V2AgentContext): ClientElicitationCapability | undefined;
+  clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
 }
 
 /**
@@ -137,14 +140,24 @@ export async function handlePromptV1(
 
   try {
     const tracker = createTerminalOutputTracker();
+    const clientToolCallName = deps.clientToolCallNameV1?.(client);
     const outcome = await session.agy.prompt(prompt, async (update) => {
       await client.notify(v1.methods.client.session.update, {
         sessionId: params.sessionId,
-        update: sessionUpdateToV1(update, tracker)
+        update: sessionUpdateToV1(update, tracker, { clientToolCallName })
       });
     }, async (toolCall, { toolName, questionIndex }) => {
       const elicitationCap = deps.clientElicitationV1?.(client);
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+      return requestPermissionV1(
+        client,
+        params.sessionId,
+        toolCall,
+        toolName,
+        signal,
+        questionIndex,
+        elicitationCap,
+        clientToolCallName
+      );
     }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
     await deps.persistSession(params.sessionId, session);
     return {
@@ -265,15 +278,25 @@ async function runV2PromptTurn(
     try {
       const terminalTracker = createTerminalOutputTracker();
       const toolContentTracker = createToolCallContentTracker();
+      const clientToolCallName = deps.clientToolCallNameV2?.(client);
       const outcome = await (async () => {
         try {
           return await session.agy.prompt(promptText, async (update) => {
-            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker)) {
+            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker, { clientToolCallName })) {
               await notify(v2Update);
             }
           }, async (toolCall, { toolName, questionIndex }) => {
             const elicitationCap = deps.clientElicitationV2?.(client);
-            return requestPermissionV2(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+            return requestPermissionV2(
+              client,
+              params.sessionId,
+              toolCall,
+              toolName,
+              signal,
+              questionIndex,
+              elicitationCap,
+              clientToolCallName
+            );
           }, undefined, deps.clientElicitationV2?.(client));
         } finally {
           const userStepIdxs = session.agy.lastPromptUserStepIdxs;

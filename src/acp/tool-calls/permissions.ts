@@ -39,6 +39,7 @@ export function isBridgeablePermissionTool(toolName: string): boolean {
   if (!toolName || toolName === "ask_question") return false;
   if (toolName === "run_command") return true;
   if (toolName === "ask_permission") return true;
+  if (toolName === "manage_task") return true;
   if (toolName === "view_file" || toolName === "list_dir") return true;
   if (isEditToolName(toolName)) return true;
   return false;
@@ -286,6 +287,11 @@ export function permissionOptions(
     return askPermissionOptions(toolCall);
   }
 
+  // manage_task gated actions (kill, send_input). Same 4-row TUI layout.
+  if (toolName === "manage_task") {
+    return manageTaskOptions(toolCall);
+  }
+
   // File edits: standard ACP option ids/kinds so clients can render native
   // Keep / Reject (or equivalent) review UI against the tool_call diff.
   if (isEditToolName(toolName ?? "") || (toolName == null && isEditToolCall(toolCall))) {
@@ -356,6 +362,32 @@ function standardEditPermissionOptions(): PermissionMenuOption[] {
     { optionId: "allow-once", kind: "allow_once", name: "Allow" },
     { optionId: "allow-always", kind: "allow_always", name: "Always allow" },
     { optionId: "reject-once", kind: "reject_once", name: "Reject" }
+  ];
+}
+
+/**
+ * Options for agy's `manage_task` gated actions (kill, send_input, etc.).
+ * The TUI renders the standard 4-row permission menu, so the standard
+ * permissionKeys navigation applies.
+ */
+function manageTaskOptions(toolCall: SessionUpdate): PermissionMenuOption[] {
+  const input = toolRawInput(toolCall);
+  const action = pickString(input, "Action", "action") ?? "manage";
+  const taskId = pickString(input, "TaskId", "taskId");
+  const target = taskId ? `manage_task ${action} (${taskId})` : `manage_task ${action}`;
+  return [
+    { optionId: "agy-allow-once", kind: "allow_once", name: "Yes" },
+    {
+      optionId: "agy-allow-conversation",
+      kind: "allow_always",
+      name: `Yes, and always allow '${target}' in this conversation`
+    },
+    {
+      optionId: "agy-allow-settings",
+      kind: "allow_always",
+      name: `Yes, and always allow '${target}' (Persist to settings.json)`
+    },
+    { optionId: "agy-reject-once", kind: "reject_once", name: "No" }
   ];
 }
 
