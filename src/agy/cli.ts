@@ -126,42 +126,94 @@ export interface AgyCliConfigInput {
   argv?: string[];
 }
 
-function findJsonCandidates(str: string): Record<string, unknown>[] {
-  const results: Record<string, unknown>[] = [];
-  const tryParse = (s: string) => {
-    try {
-      const p = JSON.parse(s);
-      if (p && typeof p === "object" && !Array.isArray(p)) {
-        results.push(p as Record<string, unknown>);
-      }
-    } catch {
-      // Ignore parse error
-    }
+interface JsonCandidate {
+  value: Record<string, unknown>;
+  start: number;
+}
+
+function objectStartKind(str: string, start: number): "plain" | "escaped" | null {
+  let i = start + 1;
+  while (i < str.length && /\s/.test(str[i])) i++;
+  if (str[i] === '"' || str[i] === "}") return "plain";
+  if (str[i] === "\\" && str[i + 1] === '"') return "escaped";
+  return null;
+}
+
+function decodeEscapedChar(
+  str: string,
+  index: number
+): { char: string; nextIndex: number } | null {
+  const char = str[index];
+  if (char !== "\\") return { char, nextIndex: index + 1 };
+  if (index + 1 >= str.length) return null;
+
+  const escaped = str[index + 1];
+  if (escaped === '"' || escaped === "\\" || escaped === "/") {
+    return { char: escaped, nextIndex: index + 2 };
+  }
+
+  const simpleEscapes: Record<string, string> = {
+    b: "\b",
+    f: "\f",
+    n: "\n",
+    r: "\r",
+    t: "\t"
   };
+  if (escaped in simpleEscapes) {
+    return { char: simpleEscapes[escaped], nextIndex: index + 2 };
+  }
 
-  const tryParseEscaped = (s: string) => {
-    try {
-      const unescaped = JSON.parse(`"${s}"`);
-      if (typeof unescaped === "string") {
-        tryParse(unescaped);
-      }
-    } catch {
-      tryParse(s.replace(/\\"/g, '"'));
+  if (escaped === "u") {
+    const codePoint = str.slice(index + 2, index + 6);
+    if (/^[0-9a-f]{4}$/i.test(codePoint)) {
+      return {
+        char: String.fromCharCode(Number.parseInt(codePoint, 16)),
+        nextIndex: index + 6
+      };
     }
-  };
+  }
 
-  let i = 0;
-  while (i < str.length) {
-    const start = str.indexOf("{", i);
-    if (start === -1) break;
+  return null;
+}
 
+function findJsonCandidates(str: string): JsonCandidate[] {
+  const results: JsonCandidate[] = [];
+
+  for (const kind of ["plain", "escaped"] as const) {
+    let start = -1;
     let depth = 0;
     let inString = false;
     let escape = false;
-    let end = -1;
+    let decoded: string[] = [];
 
-    for (let j = start; j < str.length; j++) {
-      const char = str[j];
+    for (let i = 0; i < str.length;) {
+      if (start === -1) {
+        if (str[i] === "{" && objectStartKind(str, i) === kind) {
+          start = i;
+          depth = 1;
+          inString = false;
+          escape = false;
+          decoded = ["{"];
+        }
+        i++;
+        continue;
+      }
+
+      const decodedChar = kind === "escaped"
+        ? decodeEscapedChar(str, i)
+        : { char: str[i], nextIndex: i + 1 };
+      if (!decodedChar) {
+        start = -1;
+        depth = 0;
+        decoded = [];
+        i++;
+        continue;
+      }
+
+      const { char } = decodedChar;
+      decoded.push(char);
+      i = decodedChar.nextIndex;
+
       if (escape) {
         escape = false;
         continue;
@@ -174,32 +226,31 @@ function findJsonCandidates(str: string): Record<string, unknown>[] {
         inString = !inString;
         continue;
       }
-      if (!inString) {
-        if (char === "{") {
-          depth++;
-        } else if (char === "}") {
-          depth--;
-          if (depth === 0) {
-            end = j;
-            break;
-          }
-        }
-      }
-    }
+      if (inString) continue;
 
-    if (end !== -1) {
-      const sub = str.slice(start, end + 1);
-      tryParse(sub);
-      if (sub.includes("\\")) {
-        tryParseEscaped(sub);
+      if (char === "{") {
+        depth++;
+        continue;
       }
-      i = end + 1;
-    } else {
-      i = start + 1;
+      if (char !== "}") continue;
+
+      depth--;
+      if (depth !== 0) continue;
+
+      try {
+        const parsed = JSON.parse(decoded.join(""));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          results.push({ value: parsed as Record<string, unknown>, start });
+        }
+      } catch {
+        // Ignore malformed candidates and continue scanning later output.
+      }
+      start = -1;
+      decoded = [];
     }
   }
 
-  return results;
+  return results.sort((a, b) => a.start - b.start);
 }
 
 export function parseAgyUsageLimitError(text: string): string | null {
@@ -207,7 +258,8 @@ export function parseAgyUsageLimitError(text: string): string | null {
 
   // 1. Scan for individual balanced JSON objects
   const candidates = findJsonCandidates(text);
-  for (const parsed of candidates) {
+  for (const candidate of candidates) {
+    const parsed = candidate.value;
     const is402 =
       parsed.status === 402 ||
       parsed.status === "402" ||

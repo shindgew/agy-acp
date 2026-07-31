@@ -1268,6 +1268,13 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("decodes escaped JSON before balancing braces inside string values", () => {
+    const raw = `agy exited with status 1: 402 {\\"detail\\":\\"Limit {reached}; resets after } maintenance.\\",\\"status\\":402,\\"title\\":\\"Payment Required\\"}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: Limit {reached}; resets after } maintenance."
+    );
+  });
+
   it("parses non-JSON 402 message", () => {
     const raw = "agy exited with status 1: 402 Payment Required: You've reached your 5-hour standard usage limit";
     expect(parseAgyUsageLimitError(raw)).toBe(
