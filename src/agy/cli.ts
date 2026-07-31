@@ -139,6 +139,17 @@ function findJsonCandidates(str: string): Record<string, unknown>[] {
     }
   };
 
+  const tryParseEscaped = (s: string) => {
+    try {
+      const unescaped = JSON.parse(`"${s}"`);
+      if (typeof unescaped === "string") {
+        tryParse(unescaped);
+      }
+    } catch {
+      tryParse(s.replace(/\\"/g, '"'));
+    }
+  };
+
   let i = 0;
   while (i < str.length) {
     const start = str.indexOf("{", i);
@@ -179,8 +190,8 @@ function findJsonCandidates(str: string): Record<string, unknown>[] {
     if (end !== -1) {
       const sub = str.slice(start, end + 1);
       tryParse(sub);
-      if (sub.includes('\\"')) {
-        tryParse(sub.replace(/\\"/g, '"'));
+      if (sub.includes("\\")) {
+        tryParseEscaped(sub);
       }
       i = end + 1;
     } else {
