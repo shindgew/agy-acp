@@ -630,11 +630,14 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
   // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
-  // Empty body + completed write/replace → plan_removed. Pending/failed/cancelled empty edits must
-  // not discard an existing plan; fall through to the normal edit tool lifecycle instead.
+  // Replacement-derived plan bodies (and cache writes) only apply after status completed so a
+  // denied/failed replace cannot overwrite the live plan or poison the content cache.
+  // write_to_file still publishes requested CodeContent immediately (requested full body).
+  // Empty body + completed write/replace → plan_removed; incomplete empty edits fall through.
   if (isPlanFile(targetFile)) {
+    const isReplaceEdit = fullContent === null;
     let planBody: string | null = null;
-    if (fullContent !== null) {
+    if (!isReplaceEdit) {
       planBody = fullContent;
     } else {
       planBody = planBodyAfterReplacementEdits(stepRow, resolvedTarget, fileContents, rawInput);
@@ -647,10 +650,11 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
           return planRemovedFromPath(targetFile);
         }
         // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
-      } else {
+      } else if (!isReplaceEdit || status === "completed") {
         fileContents?.set(path.resolve(resolvedTarget), planBody);
         return planUpdateFromMarkdown(targetFile, planBody);
       }
+      // Incomplete/failed replace with a nonempty speculative body: keep tool lifecycle.
     }
   }
 
