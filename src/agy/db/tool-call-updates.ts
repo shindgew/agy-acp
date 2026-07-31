@@ -581,14 +581,20 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
   // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
-  // When CodeContent is present but empty, the plan was cleared → emit plan_removed.
+  // When CodeContent is present but empty *and* the write completed successfully, the plan was
+  // cleared → emit plan_removed. Pending (status 9), failed, or cancelled empty writes must not
+  // discard an existing plan; fall through to the normal edit tool lifecycle instead.
   // When CodeContent is null, this is a partial edit (replace_file_content) → fall through to
   // the normal edit handler; the plan file itself still exists.
   if (isPlanFile(targetFile) && fullContent !== null) {
     if (fullContent.trim().length === 0) {
-      return planRemovedFromPath(targetFile);
+      if (toolCallStatus(stepRow) === "completed") {
+        return planRemovedFromPath(targetFile);
+      }
+      // Incomplete/failed empty write: preserve tool_call lifecycle, do not remove plan.
+    } else {
+      return planUpdateFromMarkdown(targetFile, fullContent);
     }
-    return planUpdateFromMarkdown(targetFile, fullContent);
   }
 
   const shown = targetFile ? toDisplayPath(targetFile, displayCwd) : "";
