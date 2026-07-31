@@ -9,7 +9,6 @@ export interface SessionState {
   cwd: string;
   /** ACP additionalDirectories (excludes cwd). */
   additionalDirectories: string[];
-  mcpServers?: unknown;
   agy: AgyCliSession;
   catalog: ModelCatalog;
   selectedBaseModel: string;
