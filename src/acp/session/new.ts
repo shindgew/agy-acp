@@ -32,7 +32,7 @@ function deferAfterResponse(fn: () => Promise<void>): void {
 
 export interface NewSessionDeps {
   requireAuthenticated(cwd?: string): Promise<void>;
-  createSession(cwd: string | undefined, additionalDirectories: string[] | undefined): Promise<SessionState>;
+  createSession(cwd: string | undefined, additionalDirectories: string[] | undefined, mcpServers?: unknown): Promise<SessionState>;
 }
 
 export async function handleNewSessionV1(
@@ -43,7 +43,8 @@ export async function handleNewSessionV1(
   }
 ): Promise<V1NewSessionResponse> {
   await deps.requireAuthenticated(params.cwd);
-  const session = await deps.createSession(params.cwd, params.additionalDirectories);
+  const rawParams = params as Record<string, unknown>;
+  const session = await deps.createSession(params.cwd, params.additionalDirectories, rawParams.mcpServers);
   if (client) {
     // Clients (e.g. Zed) only learn this sessionId from the `session/new`
     // response and register it then; a notification sent earlier targets a
@@ -66,7 +67,8 @@ export async function handleNewSessionV2(
   }
 ): Promise<V2NewSessionResponse> {
   await deps.requireAuthenticated(params.cwd);
-  const session = await deps.createSession(params.cwd, params.additionalDirectories);
+  const rawParams = params as Record<string, unknown>;
+  const session = await deps.createSession(params.cwd, params.additionalDirectories, rawParams.mcpServers);
   // Draft v2 has no native session/set_mode surface; mode is the config option only.
   if (client) {
     // See handleNewSessionV1: must not resolve before the response is sent, or
