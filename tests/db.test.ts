@@ -2174,6 +2174,69 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("matches completed task ids with token boundaries, not prefixes", () => {
+    const db = createConversationDb(dir, "conv-bg-task-prefix");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "a &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-1", logUri: "", description: "one" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "b &", output: "launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-10", logUri: "", description: "ten" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Preserving context while waiting for background command output..."
+      })
+    });
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-10 content=Task id "task-10" finished'
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-task-prefix",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // task-10 completed; task-1 must remain active (includes() would false-complete it).
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
+      })
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
   it("does not treat prose about preserving context as a background wait without a task", () => {
     const db = createConversationDb(dir, "conv-bg-prose-only");
     insertStep(db, {

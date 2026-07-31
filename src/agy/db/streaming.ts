@@ -174,7 +174,7 @@ export class StreamPoller {
         this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
         let matchedTask = false;
         for (const taskId of this._launchedTaskIds) {
-          if (taskId && text.includes(taskId)) {
+          if (taskId && textMentionsTaskId(text, taskId)) {
             this._completedTaskIds.add(taskId);
             matchedTask = true;
           }
@@ -280,3 +280,21 @@ function isTerminalStepStatus(status: number): boolean {
   return status === 3 || status === 6 || status === 7;
 }
 
+/**
+ * True when `text` contains `taskId` as a whole token (not a prefix of a longer
+ * id). Avoids `task-1` matching inside `task-10`.
+ */
+function textMentionsTaskId(text: string, taskId: string): boolean {
+  if (!taskId || !text) return false;
+  let from = 0;
+  while (from <= text.length) {
+    const index = text.indexOf(taskId, from);
+    if (index < 0) return false;
+    const before = index === 0 ? "" : text[index - 1]!;
+    const after = text[index + taskId.length] ?? "";
+    const boundary = (ch: string) => ch === "" || !/[\w-]/.test(ch);
+    if (boundary(before) && boundary(after)) return true;
+    from = index + 1;
+  }
+  return false;
+}
