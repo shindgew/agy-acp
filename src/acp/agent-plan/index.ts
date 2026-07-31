@@ -10,7 +10,9 @@
 // no live task-progress channel from agy, so in-progress/completed only update
 // when the plan file itself is rewritten with new markers.
 
-import type { PlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate } from "@agentclientprotocol/sdk";
+import type { PlanEntry as ACPPlanEntry, PlanEntryPriority, PlanEntryStatus, SessionUpdate } from "@agentclientprotocol/sdk";
+
+export type PlanEntry = ACPPlanEntry & { id?: string };
 
 /** Stable plan id derived from the absolute brain file path. */
 export function planIdForPath(targetFile: string): string {
@@ -60,6 +62,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       const content = checkbox[2].trim();
       if (!content) continue;
       entries.push({
+        id: `entry_${entries.length + 1}`,
         content,
         priority: defaultPriority(entries.length),
         status: checkboxStatus(checkbox[1])
@@ -75,6 +78,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
       // Ignore list markers that are really horizontal rules / separators.
       if (/^[-*_]{3,}$/.test(content)) continue;
       entries.push({
+        id: `entry_${entries.length + 1}`,
         content,
         priority: defaultPriority(entries.length),
         status: "pending"
@@ -87,6 +91,7 @@ export function parsePlanEntries(markdown: string): PlanEntry[] {
   const fallback = firstMeaningfulLine(markdown);
   return [
     {
+      id: "entry_1",
       content: fallback,
       priority: "medium",
       status: "pending"
@@ -108,6 +113,18 @@ export function planUpdateFromMarkdown(targetFile: string, markdown: string): Se
       "agy-acp/planId": planIdForPath(targetFile),
       "agy-acp/planPath": targetFile,
       "agy-acp/planMarkdown": markdown
+    }
+  } as SessionUpdate;
+}
+
+/** Build an ACP `plan_removed` session update when plan artifact is cleared/deleted. */
+export function planRemovedFromPath(targetFile: string): SessionUpdate {
+  return {
+    sessionUpdate: "plan_removed",
+    planId: planIdForPath(targetFile),
+    _meta: {
+      "agy-acp/planId": planIdForPath(targetFile),
+      "agy-acp/planPath": targetFile
     }
   } as SessionUpdate;
 }

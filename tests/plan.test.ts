@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isPlanFile, parsePlanEntries, planIdForPath, planUpdateFromMarkdown } from "../src/acp/agent-plan/index.js";
+import { isPlanFile, parsePlanEntries, planIdForPath, planRemovedFromPath, planUpdateFromMarkdown } from "../src/acp/agent-plan/index.js";
 
 describe("isPlanFile", () => {
   it("matches agy brain markdown paths", () => {
@@ -26,32 +26,36 @@ describe("isPlanFile", () => {
 });
 
 describe("parsePlanEntries", () => {
-  it("parses numbered and bulleted items", () => {
-    expect(
-      parsePlanEntries("# Plan\n\n1. First\n2. Second\n- Third\n").map((e) => e.content)
-    ).toEqual(["First", "Second", "Third"]);
+  it("parses numbered and bulleted items with stable ids", () => {
+    const entries = parsePlanEntries("# Plan\n\n1. First\n2. Second\n- Third\n");
+    expect(entries.map((e) => e.content)).toEqual(["First", "Second", "Third"]);
+    expect(entries.map((e) => (e as Record<string, unknown>).id)).toEqual([
+      "entry_1",
+      "entry_2",
+      "entry_3"
+    ]);
   });
 
-  it("maps checkbox markers to status", () => {
+  it("maps checkbox markers to status with ids", () => {
     expect(
       parsePlanEntries("- [ ] open\n- [x] done\n- [~] mid\n- [X] DONE2\n")
     ).toEqual([
-      { content: "open", priority: "high", status: "pending" },
-      { content: "done", priority: "high", status: "completed" },
-      { content: "mid", priority: "high", status: "in_progress" },
-      { content: "DONE2", priority: "medium", status: "completed" }
+      { id: "entry_1", content: "open", priority: "high", status: "pending" },
+      { id: "entry_2", content: "done", priority: "high", status: "completed" },
+      { id: "entry_3", content: "mid", priority: "high", status: "in_progress" },
+      { id: "entry_4", content: "DONE2", priority: "medium", status: "completed" }
     ]);
   });
 
   it("falls back to the first heading when there is no list", () => {
     expect(parsePlanEntries("# Ship the feature\n\nSome prose only.\n")).toEqual([
-      { content: "Ship the feature", priority: "medium", status: "pending" }
+      { id: "entry_1", content: "Ship the feature", priority: "medium", status: "pending" }
     ]);
   });
 });
 
-describe("planUpdateFromMarkdown", () => {
-  it("builds a classic plan update with stable meta", () => {
+describe("planUpdateFromMarkdown & planRemovedFromPath", () => {
+  it("builds a classic plan update with stable meta and entry ids", () => {
     const path = "/Users/me/.gemini/antigravity-cli/brain/c/plan.md";
     const md = "1. A\n2. B\n";
     const update = planUpdateFromMarkdown(path, md) as {
@@ -63,5 +67,17 @@ describe("planUpdateFromMarkdown", () => {
     expect(update.entries).toHaveLength(2);
     expect(update._meta?.["agy-acp/planId"]).toBe(planIdForPath(path));
     expect(update._meta?.["agy-acp/planMarkdown"]).toBe(md);
+  });
+
+  it("builds a plan_removed update for empty/deleted plans", () => {
+    const path = "/Users/me/.gemini/antigravity-cli/brain/c/plan.md";
+    const update = planRemovedFromPath(path) as {
+      sessionUpdate: string;
+      planId: string;
+      _meta?: Record<string, unknown>;
+    };
+    expect(update.sessionUpdate).toBe("plan_removed");
+    expect(update.planId).toBe(planIdForPath(path));
+    expect(update._meta?.["agy-acp/planId"]).toBe(planIdForPath(path));
   });
 });
