@@ -126,26 +126,63 @@ export interface AgyCliConfigInput {
   argv?: string[];
 }
 
+function findJsonCandidates(str: string): Record<string, unknown>[] {
+  const results: Record<string, unknown>[] = [];
+  const tryParse = (s: string) => {
+    try {
+      const p = JSON.parse(s);
+      if (p && typeof p === "object" && !Array.isArray(p)) {
+        results.push(p as Record<string, unknown>);
+      }
+    } catch {
+      // Ignore parse error
+    }
+  };
+
+  for (let i = 0; i < str.length; i++) {
+    if (str[i] === "{") {
+      let depth = 0;
+      let inString = false;
+      let escape = false;
+      for (let j = i; j < str.length; j++) {
+        const char = str[j];
+        if (escape) {
+          escape = false;
+          continue;
+        }
+        if (char === "\\") {
+          escape = true;
+          continue;
+        }
+        if (char === '"') {
+          inString = !inString;
+          continue;
+        }
+        if (!inString) {
+          if (char === "{") depth++;
+          else if (char === "}") {
+            depth--;
+            if (depth === 0) {
+              const sub = str.slice(i, j + 1);
+              tryParse(sub);
+              tryParse(sub.replace(/\\"/g, '"'));
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  return results;
+}
+
 export function parseAgyUsageLimitError(text: string): string | null {
   if (!text) return null;
 
-  const tryParseJson = (str: string): Record<string, unknown> | null => {
-    const firstBrace = str.indexOf("{");
-    const lastBrace = str.lastIndexOf("}");
-    if (firstBrace !== -1 && lastBrace > firstBrace) {
-      const jsonSub = str.slice(firstBrace, lastBrace + 1);
-      try {
-        const parsed = JSON.parse(jsonSub);
-        if (parsed && typeof parsed === "object") return parsed as Record<string, unknown>;
-      } catch {
-        // Ignore parse error
-      }
-    }
-    return null;
-  };
-
-  const parsed = tryParseJson(text) ?? tryParseJson(text.replace(/\\"/g, '"'));
-  if (parsed) {
+  // 1. Scan for individual balanced JSON objects
+  const candidates = findJsonCandidates(text);
+  for (const parsed of candidates) {
     const is402 =
       parsed.status === 402 ||
       parsed.status === "402" ||
@@ -166,24 +203,17 @@ export function parseAgyUsageLimitError(text: string): string | null {
     }
   }
 
-  if (/402|usage limit|payment required/i.test(text)) {
-    const match402 = text.match(/(?:402|payment required)[:\s]+(.*)/i);
-    if (match402 && match402[1]?.trim()) {
-      let body = match402[1].trim();
-      body = body.replace(/^[{"'\s]+|[}"'\s]+$/g, "").trim();
-      if (body) {
-        if (/payment required/i.test(body) || /402/i.test(body)) {
-          return body;
-        }
-        return `Payment Required: ${body}`;
+  // 2. Strict text fallback for non-JSON 402 responses (must have explicit 402 error header)
+  const lineMatch = text.match(/(?:agy exited with status \d+:|agy interactive PTY exited unexpectedly:|^|\n)\s*(?:402\b|status:\s*402\b|Payment Required:)\s*(.*)/i);
+  if (lineMatch && lineMatch[1]?.trim()) {
+    let body = lineMatch[1].trim();
+    body = body.replace(/^[{"'\s]+|[}"'\s]+$/g, "").trim();
+    if (body && !body.includes("interactive turn timed out") && !body.includes("permission panel")) {
+      if (/payment required/i.test(body) || /402/i.test(body)) {
+        return body;
       }
-    }
-
-    if (/usage limit/i.test(text)) {
-      const matchLimit = text.match(/(?:You've reached|reached|exceeded)?\s*(?:your\s+)?(?:\d+-hour\s+)?(?:standard\s+)?usage limit[^\n.]*\.?/i);
-      if (matchLimit && matchLimit[0]?.trim()) {
-        const limitStr = matchLimit[0].trim();
-        return `Payment Required: ${limitStr}`;
+      if (/usage limit/i.test(body) || /reached/i.test(body)) {
+        return `Payment Required: ${body}`;
       }
     }
   }

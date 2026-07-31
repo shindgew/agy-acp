@@ -1240,6 +1240,13 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
+  it("parses 402 JSON payload even when preceded by earlier JSON output in accumulated PTY output", () => {
+    const raw = `{"previousStep":"done","output":{}}\nsome text\n402 {"detail":"You've reached your 5-hour standard usage limit (resets in 3h 21min)...","status":402,"title":"Payment Required","displayToUser":true}`;
+    expect(parseAgyUsageLimitError(raw)).toBe(
+      "Payment Required: You've reached your 5-hour standard usage limit (resets in 3h 21min)..."
+    );
+  });
+
   it("parses escaped JSON 402 response", () => {
     const raw = `agy exited with status 1: 402 {\\"detail\\":\\"You've reached your 5-hour standard usage limit (resets in 3h 21min)...\\",\\"status\\":402,\\"title\\":\\"Payment Required\\",\\"displayToUser\\":true}`;
     expect(parseAgyUsageLimitError(raw)).toBe(
@@ -1254,15 +1261,15 @@ describe("upstream 402 / usage-limit error formatting", () => {
     );
   });
 
-  it("parses usage limit text without 402 status code", () => {
-    const raw = "agy exited with status 1: You've reached your 5-hour standard usage limit (resets in 2h)";
-    expect(parseAgyUsageLimitError(raw)).toBe(
-      "Payment Required: You've reached your 5-hour standard usage limit (resets in 2h)"
-    );
-  });
-
   it("returns null for generic error messages", () => {
     expect(parseAgyUsageLimitError("agy exited with status 1: prompt failed")).toBeNull();
+  });
+
+  it("does not misclassify timeout errors on PTY output containing prompt discussions about usage limits", () => {
+    const message = "agy interactive turn timed out after 5m0s; no final idle marker was observed";
+    const stderr = "User: Explain 402 Payment Required usage limit.\nAgent: A 402 usage limit occurs when...";
+    const err = new AgyCliError(message, ["agy"], null, stderr);
+    expect(err.message).toBe("agy interactive turn timed out after 5m0s; no final idle marker was observed");
   });
 
   it("formats AgyCliError message cleanly on 402 usage limit errors while preserving raw stderr", () => {
