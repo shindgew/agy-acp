@@ -225,7 +225,12 @@ export class Translator {
 
     if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
       const snapshot = updateSnapshot(stamped);
-      const key = typeof raw.planId === "string" && raw.planId ? `plan:${raw.planId}` : `plan:${stepIdx}`;
+      const meta = raw._meta && typeof raw._meta === "object" ? (raw._meta as Record<string, unknown>) : null;
+      const planId =
+        (typeof raw.planId === "string" && raw.planId) ||
+        (typeof meta?.["agy-acp/planId"] === "string" && (meta["agy-acp/planId"] as string)) ||
+        undefined;
+      const key = planId ? `plan:${planId}` : `plan:${stepIdx}`;
       const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
       this.toolSnapshots.set(key, snapshot);

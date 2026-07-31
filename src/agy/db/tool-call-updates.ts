@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
-import { isPlanFile, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
+import { isPlanFile, planRemovedFromPath, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -579,9 +579,11 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const resolvedTarget = resolvePath(targetFile, displayCwd) ?? targetFile;
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
 
-  // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update).
+  // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
   if (isPlanFile(targetFile)) {
-    if (fullContent === null || fullContent.length === 0) return [];
+    if (fullContent === null || fullContent.trim().length === 0) {
+      return planRemovedFromPath(targetFile);
+    }
     return planUpdateFromMarkdown(targetFile, fullContent);
   }
 

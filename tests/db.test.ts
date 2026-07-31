@@ -1517,9 +1517,46 @@ describe("Translator", () => {
     expect(second).toHaveLength(0);
     const entries = (first[0] as { entries: Array<{ content: string; status: string }> }).entries;
     expect(entries).toEqual([
-      { content: "One", priority: "high", status: "pending" },
-      { content: "Two", priority: "high", status: "completed" }
+      { id: "entry_1", content: "One", priority: "high", status: "pending" },
+      { id: "entry_2", content: "Two", priority: "high", status: "completed" }
     ]);
+  });
+
+  it("emits plan_removed session update when brain plan file is cleared", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, "");
+
+    const db = createConversationDb(dir, "conv-plan-empty");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-empty-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: ""
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-empty")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${planPath}`
+    });
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {
