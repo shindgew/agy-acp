@@ -51,7 +51,7 @@ export async function buildSession(
     sessionId: "", // set by the caller once the ACP session id is known
     cwd,
     additionalDirectories,
-    mcpServers: mcpServers ?? stored?.mcpServers,
+    mcpServers,
     agy,
     catalog,
     selectedBaseModel: selection.baseModel,
@@ -138,7 +138,6 @@ export function sessionRecord(session: SessionState): StoredSession {
   return {
     cwd: session.cwd,
     additionalDirectories: session.additionalDirectories,
-    mcpServers: session.mcpServers,
     conversationId: session.agy.conversationId,
     lastStepIdx: session.agy.lastStepIdx,
     model: session.selectedBaseModel,
