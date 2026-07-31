@@ -32,6 +32,8 @@ export type { UpdateContext } from "./tool-call-updates.js";
 const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
 
 function isFinalQuotaExhaustion(stepRow: StepRow): boolean {
+  if (stepRow.status !== 3 && stepRow.status !== 6 && stepRow.status !== 7) return false;
+
   const providerError = stepRow.stepPayload.modelProviderError;
   if (!providerError) return false;
 

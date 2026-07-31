@@ -237,6 +237,58 @@ describe("Translator", () => {
     expect(updates).toEqual([]);
   });
 
+  it("waits for a provider-error row to become terminal before emitting its full message", () => {
+    const initial = "RESOURCE_EXHAUSTED (code 429): quota reached. Resets in 4h.";
+    const final = "RESOURCE_EXHAUSTED (code 429): quota reached. Resets in 3h59m58s.";
+    const responseJson = JSON.stringify({
+      error: {
+        code: 429,
+        status: "RESOURCE_EXHAUSTED",
+        details: [{ reason: "QUOTA_EXHAUSTED" }]
+      }
+    });
+    const db = createConversationDb(dir, "conv-growing-provider-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 17,
+      status: 1,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: initial,
+          responseJson,
+          userMessage: initial
+        })
+      })
+    });
+
+    const conn = ConversationDb.open(dir, "conv-growing-provider-error")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    expect(translator.translate(conn.readAfter(-1))).toEqual([]);
+
+    updateStep(db, 1, {
+      status: 3,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: final,
+          responseJson,
+          userMessage: final
+        })
+      })
+    });
+    expect(translator.translate(conn.readAfter(-1))).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "provider-error-1",
+        content: { type: "text", text: final },
+        _meta: { stepIdx: 1 }
+      }
+    ]);
+    expect(translator.translate(conn.readAfter(-1))).toEqual([]);
+
+    conn.close();
+    db.close();
+  });
+
   it("streams only the newly-appended slice of a growing agent-text row", () => {
     const db = createConversationDb(dir, "conv-2");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "Hello" }) });

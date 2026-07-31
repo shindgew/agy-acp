@@ -90,8 +90,8 @@ export class Translator {
   private readonly agentTextLengths = new Map<number, number>();
   // Streaming: thought messageId -> chars already emitted.
   private readonly thoughtTextLengths = new Map<string, number>();
-  // Stream + replay: provider-error messageId -> chars already emitted.
-  private readonly providerErrorTextLengths = new Map<string, number>();
+  // Stream + replay: final provider-error messages already emitted.
+  private readonly emittedProviderErrorMessageIds = new Set<string>();
   // Stream + replay: last emitted snapshot keyed by tool call id / plan id (tool progressive lifecycle).
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
@@ -273,10 +273,9 @@ export class Translator {
     const content = raw.content as { type?: string; text?: string } | undefined;
     const text = typeof content?.text === "string" ? content.text : "";
     const messageId = typeof raw.messageId === "string" ? raw.messageId : `provider-error-${stepIdx}`;
-    const emitted = this.providerErrorTextLengths.get(messageId) ?? 0;
-    if (text.length <= emitted) return;
-    this.providerErrorTextLengths.set(messageId, text.length);
-    out.push(withStepMeta(agentChunk(text.slice(emitted), messageId), stepIdx));
+    if (!text || this.emittedProviderErrorMessageIds.has(messageId)) return;
+    this.emittedProviderErrorMessageIds.add(messageId);
+    out.push(withStepMeta(agentChunk(text, messageId), stepIdx));
   }
 
   private handleTitle(row: StepRow, out: SessionUpdate[]): void {
