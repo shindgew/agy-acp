@@ -1106,7 +1106,7 @@ function unsupportedInteractionDetail(
     if (ask.questions.some((q) => q.options.length === 0)) return "ask_question has a question with no selectable options";
     return "ask_question could not be bridged";
   }
-  return "only standard permission menus (run_command, ask_permission, file read/write) and ask_question can be bridged safely";
+  return "only standard permission menus (run_command, ask_permission, manage_task, file read/write) and ask_question can be bridged safely";
 }
 
 function isAgyStatusLine(line: string): boolean {
