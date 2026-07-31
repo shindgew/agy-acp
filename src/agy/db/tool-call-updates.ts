@@ -566,6 +566,54 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   return update;
 }
 
+/**
+ * Apply replace/multi_replace chunks to a prior plan body (first-occurrence
+ * replacements, matching agy replace_file_content semantics).
+ */
+function applyReplacementChunks(prior: string, chunks: unknown[]): string | null {
+  let body = prior;
+  for (const chunk of chunks) {
+    const newText = asStr(pick(chunk, "ReplacementContent", "replacementContent"));
+    if (newText === null) return null;
+    const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
+    if (oldText === null) return null;
+    const idx = body.indexOf(oldText);
+    if (idx === -1) return null;
+    body = body.slice(0, idx) + newText + body.slice(idx + oldText.length);
+  }
+  return body;
+}
+
+/** Best-effort post-edit plan body for replace_file_content / multi_replace. */
+function planBodyAfterReplacementEdits(
+  stepRow: StepRow,
+  resolvedTarget: string,
+  fileContents: FileContentCache | undefined,
+  rawInput: unknown
+): string | null {
+  const chunksRaw = pick(rawInput, "ReplacementChunks", "replacementChunks");
+  const chunks = Array.isArray(chunksRaw) ? chunksRaw : [rawInput];
+  const cacheKey = path.resolve(resolvedTarget);
+  const prior = fileContents?.get(cacheKey);
+
+  if (prior !== undefined) {
+    const applied = applyReplacementChunks(prior, chunks);
+    if (applied !== null) return applied;
+  }
+
+  // Completed replaces: on-disk artifact is the source of truth after agy applies the edit.
+  if (toolCallStatus(stepRow) === "completed") {
+    try {
+      if (fs.existsSync(resolvedTarget) && fs.statSync(resolvedTarget).isFile()) {
+        return fs.readFileSync(resolvedTarget, "utf8");
+      }
+    } catch {
+      // ignore unreadable paths
+    }
+  }
+  return null;
+}
+
 /** Step type 5 (write_to_file|replace_file_content|multi_replace_file_content),
  *  and step 17 artifact writes (e.g. a generated `plan.md` for user review).
  *  Brain plan markdown becomes a structured ACP `plan` update (not an edit tool). */
@@ -578,22 +626,31 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
   const resolvedTarget = resolvePath(targetFile, displayCwd) ?? targetFile;
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
+  const status = toolCallStatus(stepRow);
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
   // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
-  // When CodeContent is present but empty *and* the write completed successfully, the plan was
-  // cleared → emit plan_removed. Pending (status 9), failed, or cancelled empty writes must not
-  // discard an existing plan; fall through to the normal edit tool lifecycle instead.
-  // When CodeContent is null, this is a partial edit (replace_file_content) → fall through to
-  // the normal edit handler; the plan file itself still exists.
-  if (isPlanFile(targetFile) && fullContent !== null) {
-    if (fullContent.trim().length === 0) {
-      if (toolCallStatus(stepRow) === "completed") {
-        return planRemovedFromPath(targetFile);
-      }
-      // Incomplete/failed empty write: preserve tool_call lifecycle, do not remove plan.
+  // Empty body + completed write/replace → plan_removed. Pending/failed/cancelled empty edits must
+  // not discard an existing plan; fall through to the normal edit tool lifecycle instead.
+  if (isPlanFile(targetFile)) {
+    let planBody: string | null = null;
+    if (fullContent !== null) {
+      planBody = fullContent;
     } else {
-      return planUpdateFromMarkdown(targetFile, fullContent);
+      planBody = planBodyAfterReplacementEdits(stepRow, resolvedTarget, fileContents, rawInput);
+    }
+
+    if (planBody !== null) {
+      if (planBody.trim().length === 0) {
+        if (status === "completed") {
+          fileContents?.set(path.resolve(resolvedTarget), planBody);
+          return planRemovedFromPath(targetFile);
+        }
+        // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
+      } else {
+        fileContents?.set(path.resolve(resolvedTarget), planBody);
+        return planUpdateFromMarkdown(targetFile, planBody);
+      }
     }
   }
 
