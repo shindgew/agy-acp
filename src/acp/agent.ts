@@ -152,7 +152,6 @@ export class AcpAgent {
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
   #clientFs = { readTextFile: false, writeTextFile: false };
   #clientElicitation = { form: false, url: false };
-  #clientTerminal = { create: false };
   #clientToolCallName = { name: false };
 
   constructor(options: AcpAgentOptions = {}) {
@@ -174,19 +173,17 @@ export class AcpAgent {
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
-    const { response, clientFs, clientElicitation, clientTerminal, clientToolCallName } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
+    const { response, clientFs, clientElicitation, clientToolCallName } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
     this.#clientFs = clientFs;
     this.#clientElicitation = clientElicitation;
-    this.#clientTerminal = clientTerminal;
     this.#clientToolCallName = clientToolCallName;
     return response;
   }
 
   async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
     await this.ensureAgyReady();
-    const { response, clientElicitation, clientTerminal, clientToolCallName } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
+    const { response, clientElicitation, clientToolCallName } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
     this.#clientElicitation = clientElicitation;
-    this.#clientTerminal = clientTerminal;
     this.#clientToolCallName = clientToolCallName;
     return response;
   }
@@ -297,6 +294,7 @@ export class AcpAgent {
   loadSession(params: LoadSessionRequest, client: V1AgentContext): Promise<LoadSessionResponse> {
     return handleLoadSession(params, client, {
       ...this.reloadSessionDeps(),
+      clientToolCallNameV1: () => this.#clientToolCallName,
       notifyAvailableCommandsV1
     });
   }
@@ -357,7 +355,6 @@ export class AcpAgent {
       notifyConfigOptionUpdateV1,
       clientFileSystemV1: (client, sessionId) => this.clientFileSystemV1(client, sessionId),
       clientElicitationV1: () => this.#clientElicitation,
-      clientTerminalV1: () => this.#clientTerminal,
       clientToolCallNameV1: () => this.#clientToolCallName
     };
   }
@@ -369,7 +366,6 @@ export class AcpAgent {
       persistSession: (id, session) => this.persistSession(id, session),
       notifyConfigOptionUpdateV2,
       clientElicitationV2: () => this.#clientElicitation,
-      clientTerminalV2: () => this.#clientTerminal,
       clientToolCallNameV2: () => this.#clientToolCallName
     };
   }

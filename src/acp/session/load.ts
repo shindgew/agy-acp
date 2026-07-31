@@ -8,6 +8,7 @@ import type {
   LoadSessionRequest,
   LoadSessionResponse
 } from "@agentclientprotocol/sdk";
+import type { ClientToolCallNameCapability } from "../initialize.js";
 import { sessionConfigOptionsV1 } from "./config-options.js";
 import { sessionModeState } from "./modes.js";
 import type { StoredSession } from "./store.js";
@@ -27,6 +28,7 @@ export interface LoadSessionDeps {
     cwd: string,
     emit: (update: v1.SessionUpdate) => Promise<void>
   ): Promise<void>;
+  clientToolCallNameV1?(client: V1AgentContext): ClientToolCallNameCapability | undefined;
   notifyAvailableCommandsV1(client: V1AgentContext, sessionId: string): Promise<void>;
 }
 
@@ -44,10 +46,11 @@ export async function handleLoadSession(
 
   if (stored.conversationId) {
     const tracker = createTerminalOutputTracker();
+    const clientToolCallName = deps.clientToolCallNameV1?.(client) ?? { name: false };
     await deps.replayConversation(session, stored.conversationId, cwd, async (update) => {
       await client.notify(v1.methods.client.session.update, {
         sessionId: params.sessionId,
-        update: sessionUpdateToV1(update, tracker)
+        update: sessionUpdateToV1(update, tracker, { clientToolCallName })
       });
     });
   }

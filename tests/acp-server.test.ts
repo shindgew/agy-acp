@@ -424,7 +424,20 @@ describe("session/load and session/resume", () => {
       const appOptions = {
         env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
-          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
+          {
+            idx: 1,
+            stepType: 8,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({
+                  callId: "replayed-view",
+                  namePrimary: "view_file",
+                  rawInputJson: '{"AbsolutePath":"/repo/README.md"}'
+                })
+              })
+            })
+          },
+          { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello from before" }) }
         ])
       };
 
@@ -459,6 +472,10 @@ describe("session/load and session/resume", () => {
           });
         const connection = client.connect(createAcpApp(appOptions));
         try {
+          await connection.agent.request(methods.agent.initialize, {
+            protocolVersion: PROTOCOL_VERSION,
+            clientCapabilities: {}
+          });
           const response = await connection.agent.request(methods.agent.session.load, {
             sessionId,
             cwd: "/repo",
@@ -470,6 +487,16 @@ describe("session/load and session/resume", () => {
               content: { type: "text", text: "hello from before" }
             })
           );
+          const replayedToolCall = updates.find(
+            (update) =>
+              (update as { sessionUpdate?: string; toolCallId?: string }).sessionUpdate === "tool_call" &&
+              (update as { toolCallId?: string }).toolCallId === "replayed-view"
+          );
+          expect(replayedToolCall).toMatchObject({
+            sessionUpdate: "tool_call",
+            title: "Read README.md"
+          });
+          expect(replayedToolCall).not.toHaveProperty("name");
           expect(updates).toContainEqual(
             expect.objectContaining({ sessionUpdate: "available_commands_update" })
           );
@@ -2249,4 +2276,3 @@ describe("tool call name field (gh#52)", () => {
     });
   });
 });
-

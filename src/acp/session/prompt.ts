@@ -15,7 +15,7 @@ import type {
   PromptResponse as V2PromptResponse
 } from "@agentclientprotocol/sdk/experimental/v2";
 import type { ClientElicitationCapability } from "../tool-calls/elicitation.js";
-import type { ClientTerminalCapability, ClientToolCallNameCapability } from "../initialize.js";
+import type { ClientToolCallNameCapability } from "../initialize.js";
 import type { SessionModeId } from "../../agy/cli.js";
 import { contentBlocksToPrompt } from "../content/index.js";
 import type { ClientFileSystem } from "../../agy/edit/bridge.js";
@@ -37,14 +37,12 @@ export interface PromptV1Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV1(client: V1AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientFileSystemV1(client: V1AgentContext, sessionId: string): ClientFileSystem | undefined;
   clientElicitationV1?(client: V1AgentContext): ClientElicitationCapability | undefined;
-  clientTerminalV1?(client: V1AgentContext): ClientTerminalCapability | undefined;
   clientToolCallNameV1?(client: V1AgentContext): ClientToolCallNameCapability | undefined;
 }
 
 export interface PromptV2Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV2(client: V2AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientElicitationV2?(client: V2AgentContext): ClientElicitationCapability | undefined;
-  clientTerminalV2?(client: V2AgentContext): ClientTerminalCapability | undefined;
   clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
 }
 
@@ -150,7 +148,16 @@ export async function handlePromptV1(
       });
     }, async (toolCall, { toolName, questionIndex }) => {
       const elicitationCap = deps.clientElicitationV1?.(client);
-      return requestPermissionV1(client, params.sessionId, toolCall, toolName, signal, questionIndex, elicitationCap);
+      return requestPermissionV1(
+        client,
+        params.sessionId,
+        toolCall,
+        toolName,
+        signal,
+        questionIndex,
+        elicitationCap,
+        clientToolCallName
+      );
     }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
     await deps.persistSession(params.sessionId, session);
     return {

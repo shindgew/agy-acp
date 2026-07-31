@@ -23,29 +23,8 @@ export interface ClientFsCapability {
   writeTextFile: boolean;
 }
 
-export interface ClientTerminalCapability {
-  create: boolean;
-}
-
 export interface ClientToolCallNameCapability {
   name: boolean;
-}
-
-export function parseClientTerminal(rawCaps: unknown): ClientTerminalCapability {
-  if (!rawCaps || typeof rawCaps !== "object") return { create: false };
-  const caps = rawCaps as Record<string, unknown>;
-  const terminal =
-    caps.terminal ??
-    (caps.clientCapabilities as Record<string, unknown> | undefined)?.terminal ??
-    (caps.capabilities as Record<string, unknown> | undefined)?.terminal;
-  if (!terminal) return { create: false };
-  if (typeof terminal === "boolean") return { create: terminal };
-  if (typeof terminal === "object") {
-    const createObj = (terminal as Record<string, unknown>).create;
-    const create = createObj != null ? Boolean(createObj) : true;
-    return { create };
-  }
-  return { create: false };
 }
 
 export function parseClientToolCallName(rawCaps: unknown, defaultEnabled = false): ClientToolCallNameCapability {
@@ -83,7 +62,7 @@ function parseClientElicitation(rawCaps: unknown): ClientElicitationCapability {
   };
 }
 
-/** v1 `initialize`: also returns the client's advertised `fs`, `elicitation`, `terminal`, and `toolCallName` capabilities. */
+/** v1 `initialize`: also returns the client's advertised `fs`, `elicitation`, and `toolCallName` capabilities. */
 export function handleInitializeV1(
   params: V1InitializeRequest,
   agentVersion: string
@@ -91,7 +70,6 @@ export function handleInitializeV1(
   response: V1InitializeResponse;
   clientFs: ClientFsCapability;
   clientElicitation: ClientElicitationCapability;
-  clientTerminal: ClientTerminalCapability;
   clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
@@ -100,7 +78,6 @@ export function handleInitializeV1(
       writeTextFile: params.clientCapabilities?.fs?.writeTextFile ?? false
     },
     clientElicitation: parseClientElicitation(params.clientCapabilities),
-    clientTerminal: parseClientTerminal(params.clientCapabilities),
     clientToolCallName: parseClientToolCallName(params.clientCapabilities, false),
     response: {
       protocolVersion:
@@ -140,12 +117,10 @@ export function handleInitializeV2(
 ): {
   response: V2InitializeResponse;
   clientElicitation: ClientElicitationCapability;
-  clientTerminal: ClientTerminalCapability;
   clientToolCallName: ClientToolCallNameCapability;
 } {
   return {
     clientElicitation: parseClientElicitation(params),
-    clientTerminal: parseClientTerminal(params),
     clientToolCallName: parseClientToolCallName(params, true),
     response: {
       protocolVersion:
@@ -161,7 +136,6 @@ export function handleInitializeV2(
           additionalDirectories: {}
         },
         auth: {},
-        terminal: {},
         toolCallName: {},
         _meta: {
           toolCallName: {}

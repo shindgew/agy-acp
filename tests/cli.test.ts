@@ -284,6 +284,48 @@ describe("permission bridge", () => {
     expect(capturedTitle).toBe("[Question 2/2] Second Question?");
   });
 
+  it("filters v1 requestPermission tool names unless the client negotiated them", async () => {
+    const payloads: Record<string, unknown>[] = [];
+    const mockClient = {
+      request: vi.fn().mockImplementation(async (_method, params) => {
+        payloads.push(params.toolCall);
+        return { outcome: { outcome: "selected", optionId: "allow-once" } };
+      })
+    };
+    const toolCall = {
+      sessionUpdate: "tool_call" as const,
+      toolCallId: "cmd-name",
+      title: "echo hi",
+      kind: "execute" as const,
+      status: "pending" as const,
+      name: "run_command"
+    };
+
+    await requestPermissionV1(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      undefined,
+      undefined,
+      undefined,
+      { name: false }
+    );
+    await requestPermissionV1(
+      mockClient as any,
+      "s1",
+      toolCall,
+      "run_command",
+      undefined,
+      undefined,
+      undefined,
+      { name: true }
+    );
+
+    expect(payloads[0]).not.toHaveProperty("name");
+    expect(payloads[1]).toHaveProperty("name", "run_command");
+  });
+
   it("bridges agy's ask_permission sandbox-bypass request as a command-style menu", () => {
     // agy 1.1.7 gates sandbox bypass (run a command / read a file outside the
     // sandbox) through a status-9 `ask_permission` step whose TUI menu is the

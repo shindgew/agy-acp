@@ -6,6 +6,7 @@ import * as v1 from "@agentclientprotocol/sdk";
 import type { AgentContext as V1AgentContext, SessionUpdate as V1SessionUpdate } from "@agentclientprotocol/sdk";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
 import type { AgentContext as V2AgentContext } from "@agentclientprotocol/sdk/experimental/v2";
+import type { ClientToolCallNameCapability } from "../initialize.js";
 import { permissionOptions, parseAskQuestion, type PermissionChoice } from "../tool-calls/permissions.js";
 import {
   buildElicitationRequestFromAskQuestion,
@@ -23,7 +24,8 @@ export async function requestPermissionV1(
   toolName: string | undefined,
   signal: AbortSignal | undefined,
   questionIndex?: number,
-  clientElicitation?: ClientElicitationCapability
+  clientElicitation?: ClientElicitationCapability,
+  clientToolCallName?: ClientToolCallNameCapability
 ): Promise<PermissionChoice | "cancelled"> {
   if (signal?.aborted) return "cancelled";
 
@@ -49,6 +51,9 @@ export async function requestPermissionV1(
 
   const { sessionUpdate: _discriminator, ...requestToolCall } = toolCall as unknown as Record<string, unknown>;
   const toolCallPayload = { ...requestToolCall };
+  if (clientToolCallName?.name !== true) {
+    delete toolCallPayload.name;
+  }
   if (toolName === "ask_question") {
     const ask = parseAskQuestion(toolCall);
     const qIdx = questionIndex ?? 0;
