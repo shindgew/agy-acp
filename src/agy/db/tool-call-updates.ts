@@ -630,9 +630,9 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
   // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
   // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
-  // Replacement-derived plan bodies (and cache writes) only apply after status completed so a
-  // denied/failed replace cannot overwrite the live plan or poison the content cache.
-  // write_to_file still publishes requested CodeContent immediately (requested full body).
+  // Cache writes only after status completed so denied/failed edits cannot poison later replace
+  // derivation. Replacement-derived plan bodies also require completed. write_to_file still
+  // publishes requested CodeContent immediately (requested full body) without caching until done.
   // Empty body + completed write/replace → plan_removed; incomplete empty edits fall through.
   if (isPlanFile(targetFile)) {
     const isReplaceEdit = fullContent === null;
@@ -651,7 +651,10 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
         }
         // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
       } else if (!isReplaceEdit || status === "completed") {
-        fileContents?.set(path.resolve(resolvedTarget), planBody);
+        // Only successful writes update the content cache used by later replace derivation.
+        if (status === "completed") {
+          fileContents?.set(path.resolve(resolvedTarget), planBody);
+        }
         return planUpdateFromMarkdown(targetFile, planBody);
       }
       // Incomplete/failed replace with a nonempty speculative body: keep tool lifecycle.
@@ -675,7 +678,10 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const cacheKey = path.resolve(resolvedTarget);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
-      fileContents?.set(cacheKey, fullContent);
+      // Plan-file incomplete writes must not poison the cache used by replace derivation.
+      if (!isPlanFile(targetFile) || status === "completed") {
+        fileContents?.set(cacheKey, fullContent);
+      }
       if (isReadableLocation(resolvedTarget, ctx)) locations.push({ path: resolvedTarget });
     }
   } else {
