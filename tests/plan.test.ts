@@ -70,6 +70,14 @@ describe("parsePlanEntries", () => {
     expect(new Set(ids).size).toBe(3);
   });
 
+  it("keeps IDs unique when content matches an occurrence-style suffix", () => {
+    // Second "A" must not collide with a first-occurrence literal "A#1".
+    const entries = parsePlanEntries("- [ ] A\n- [ ] A\n- [ ] A#1\n");
+    const ids = entries.map((e) => (e as Record<string, unknown>).id as string);
+    expect(ids).toHaveLength(3);
+    expect(new Set(ids).size).toBe(3);
+  });
+
   it("falls back to the first heading when there is no list", () => {
     const entries = parsePlanEntries("# Ship the feature\n\nSome prose only.\n");
     expect(entries).toMatchObject([
