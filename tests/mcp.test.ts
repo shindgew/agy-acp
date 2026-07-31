@@ -3,24 +3,27 @@ import { handleInitializeV1, handleInitializeV2 } from "../src/acp/initialize.js
 import { handleMcpMessage, handleMcpConnect, handleMcpDisconnect } from "../src/acp/mcp/index.js";
 
 describe("MCP over ACP (Issue #36)", () => {
-  it("advertises MCP capabilities in initialize responses (v1)", () => {
+  it("does not advertise MCP transports until the bridge is implemented (v1)", () => {
     const { response } = handleInitializeV1(
       { protocolVersion: 1, clientCapabilities: {} },
       "1.0.0"
     );
-    expect(response.agentCapabilities.mcpCapabilities).toEqual({
-      http: true,
-      sse: true,
-      acp: true
+    expect(response.agentCapabilities?.mcpCapabilities).toEqual({
+      http: false,
+      sse: false,
+      acp: false
     });
   });
 
-  it("advertises MCP capabilities in initialize responses (v2)", () => {
+  it("does not advertise MCP transports until the bridge is implemented (v2)", () => {
     const { response } = handleInitializeV2(
-      { protocolVersion: 2 },
+      {
+        protocolVersion: 2,
+        info: { name: "test-client", version: "0.0.0" }
+      },
       "1.0.0"
     );
-    expect(response.capabilities.session.mcp).toEqual({});
+    expect(response.capabilities?.session).not.toHaveProperty("mcp");
   });
 
   it("handles mcp/message, mcp/connect, and mcp/disconnect RPC calls", async () => {

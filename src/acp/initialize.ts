@@ -60,9 +60,9 @@ export function handleInitializeV1(
           embeddedContext: true
         },
         mcpCapabilities: {
-          http: true,
-          sse: true,
-          acp: true
+          http: false,
+          sse: false,
+          acp: false
         },
         sessionCapabilities: {
           list: {},
@@ -100,8 +100,7 @@ export function handleInitializeV2(
             image: {},
             embeddedContext: {}
           },
-          additionalDirectories: {},
-          mcp: {}
+          additionalDirectories: {}
         },
         auth: {}
       },
