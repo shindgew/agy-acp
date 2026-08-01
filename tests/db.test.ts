@@ -1612,10 +1612,565 @@ describe("Translator", () => {
     expect(first).toHaveLength(1);
     expect(second).toHaveLength(0);
     const entries = (first[0] as { entries: Array<{ content: string; status: string }> }).entries;
-    expect(entries).toEqual([
+    expect(entries).toMatchObject([
       { content: "One", priority: "high", status: "pending" },
       { content: "Two", priority: "high", status: "completed" }
     ]);
+    // Entries have content-hash-based IDs
+    for (const e of entries) {
+      expect((e as Record<string, unknown>).id).toMatch(/^entry_[0-9a-f]+$/);
+    }
+  });
+
+  it("keeps plan entry ids stable when a duplicate task is inserted before an existing one", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan-dup-insert");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-dup-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "- [x] Deploy\n"
+            })
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-plan-dup-insert")!;
+
+    const first = translator.translate(conn.readAfter(0));
+    expect(first).toHaveLength(1);
+    const firstEntries = (first[0] as { entries: Array<{ id?: string; status: string }> }).entries;
+    expect(firstEntries).toHaveLength(1);
+    const deployId = firstEntries[0].id;
+    expect(deployId).toBeDefined();
+
+    // Next poll: an identical pending task is inserted before the completed row.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-dup-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: "- [ ] Deploy\n- [x] Deploy\n"
+            })
+          })
+        })
+      })
+    });
+
+    const second = translator.translate(conn.readAfter(1));
+    conn.close();
+    db.close();
+
+    expect(second).toHaveLength(1);
+    expect(second[0]).toMatchObject({ sessionUpdate: "plan" });
+    const entries = (second[0] as { entries: Array<{ id?: string; status: string }> }).entries;
+    expect(entries).toHaveLength(2);
+    // The existing completed row keeps its original id; the inserted pending
+    // row gets a fresh, distinct id (not the old row's occurrence hash).
+    expect(entries[0].status).toBe("pending");
+    expect(entries[0].id).toBeDefined();
+    expect(entries[0].id).not.toBe(deployId);
+    expect(entries[1].status).toBe("completed");
+    expect(entries[1].id).toBe(deployId);
+  });
+
+  it("does not replay prior plan states when a later row triggers a reread", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan-reread");
+    // Two rows update the same plan: v1, then v2.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-reread-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: "- [ ] One\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-reread-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: "- [ ] One\n- [ ] Two\n" })
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-plan-reread")!;
+
+    // First poll emits both successive plan states.
+    const first = translator.translate(conn.readAfter(0));
+    expect(first.map((u) => u.sessionUpdate)).toEqual(["plan", "plan"]);
+
+    // A later unrelated row makes the poller reread rows 1-2; the historical
+    // plan states must not be re-emitted (no rollback to v1, no repeat of v2).
+    insertStep(db, { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    const second = translator.translate(conn.readAfter(0));
+    expect(second).toEqual([
+      { sessionUpdate: "agent_message_chunk", messageId: "3", content: { type: "text", text: "done" } }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("derives one plan id for relative and absolute references to the same file", () => {
+    const absPlanPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-rel", "plan.md");
+    fs.mkdirSync(path.dirname(absPlanPath), { recursive: true });
+    fs.writeFileSync(absPlanPath, "- [ ] Keep\n");
+    const relPlanPath = path.relative(dir, absPlanPath);
+
+    const db = createConversationDb(dir, "conv-plan-rel");
+    // Write the plan via a relative path, then clear it via the absolute path.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-rel-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: relPlanPath, CodeContent: "- [ ] Keep\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-rel-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: absPlanPath, CodeContent: "" })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-rel")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    // Both updates reference the same canonical plan id, so the removal clears
+    // the plan the first update created instead of targeting a divergent id.
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((updates[0] as { _meta?: Record<string, unknown> })._meta?.["agy-acp/planId"]).toBe(
+      `file:${absPlanPath}`
+    );
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${absPlanPath}`
+    });
+  });
+
+  it("emits plan_removed session update when brain plan file is cleared", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, "");
+
+    const db = createConversationDb(dir, "conv-plan-empty");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-empty-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: ""
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-empty")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${planPath}`
+    });
+  });
+
+  it("does not emit plan_removed for empty plan writes that are not completed", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty-pending", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    fs.writeFileSync(planPath, "- [ ] Keep me\n");
+
+    // status 9 = permission pending, 7 = failed, 6 = cancelled
+    for (const { status, label, expectedStatus } of [
+      { status: 9, label: "pending", expectedStatus: "pending" },
+      { status: 7, label: "failed", expectedStatus: "failed" },
+      { status: 6, label: "cancelled", expectedStatus: "cancelled" }
+    ] as const) {
+      const convId = `conv-plan-empty-${label}`;
+      const db = createConversationDb(dir, convId);
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: `plan-empty-${label}`,
+              namePrimary: "write_to_file",
+              rawInputJson: JSON.stringify({
+                TargetFile: planPath,
+                CodeContent: ""
+              })
+            })
+          })
+        })
+      });
+      db.close();
+
+      const conn = ConversationDb.open(dir, convId)!;
+      const translator = new Translator({ mode: "stream", skipNarration: false });
+      const updates = translator.translate(conn.readAfter(-1));
+      conn.close();
+
+      expect(updates, label).toHaveLength(1);
+      expect(updates[0], label).toMatchObject({
+        sessionUpdate: "tool_call",
+        name: "write_to_file",
+        kind: "edit",
+        status: expectedStatus
+      });
+      expect((updates[0] as { sessionUpdate: string }).sessionUpdate, label).not.toBe("plan_removed");
+    }
+  });
+
+  it("emits plan_removed when a completed replace clears the plan file", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-clear", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n- [x] Done\n";
+    fs.writeFileSync(planPath, prior);
+
+    const db = createConversationDb(dir, "conv-plan-replace-clear");
+    // Seed cache via an earlier full write of the plan.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    // Completed replace that deletes the entire plan body.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-replace-clear",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              TargetContent: prior,
+              ReplacementContent: ""
+            })
+          })
+        })
+      })
+    });
+    // Mirror agy applying the edit on disk.
+    fs.writeFileSync(planPath, "");
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-clear")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${planPath}`
+    });
+  });
+
+  it("does not emit plan_removed for incomplete replace that would clear the plan", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-pending", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n";
+    fs.writeFileSync(planPath, prior);
+
+    const db = createConversationDb(dir, "conv-plan-replace-pending");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed-pending",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 9,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-replace-pending",
+            namePrimary: "replace_file_content",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              TargetContent: prior,
+              ReplacementContent: ""
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-pending")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "tool_call",
+      name: "replace_file_content",
+      status: "pending"
+    });
+  });
+
+  it("does not cache unsuccessful full plan writes for later replace derivation", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-write-cache", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const real = "- [ ] Real plan\n";
+    const rejected = "- [x] Speculative\n";
+    const bogusFromRejected = "- [ ] From rejected cache\n";
+    fs.writeFileSync(planPath, real);
+
+    const seedPayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-seed-cache",
+          namePrimary: "write_to_file",
+          rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: real })
+        })
+      })
+    });
+    const rejectedWritePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-write-rejected",
+          namePrimary: "write_to_file",
+          rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: rejected })
+        })
+      })
+    });
+    // Replace targets the rejected body. If the failed write poisoned the cache, this would
+    // succeed and emit a plan derived from the never-applied write. With a clean cache it
+    // cannot apply and falls back to the on-disk real plan.
+    const replacePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-replace-after-reject",
+          namePrimary: "replace_file_content",
+          rawInputJson: JSON.stringify({
+            TargetFile: planPath,
+            TargetContent: rejected,
+            ReplacementContent: bogusFromRejected
+          })
+        })
+      })
+    });
+
+    const db = createConversationDb(dir, "conv-plan-write-cache");
+    insertStep(db, { idx: 1, stepType: 5, status: 3, stepPayload: seedPayload });
+    insertStep(db, { idx: 2, stepType: 5, status: 9, stepPayload: rejectedWritePayload });
+
+    const conn = ConversationDb.open(dir, "conv-plan-write-cache")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+
+    const first = translator.translate(conn.readAfter(-1));
+    expect(first[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((first[0] as { entries: Array<{ content: string }> }).entries[0].content).toBe("Real plan");
+    // Pending write may still publish requested content for UX, but must not cache it.
+    expect(first[1]).toMatchObject({ sessionUpdate: "plan" });
+    expect((first[1] as { entries: Array<{ content: string }> }).entries[0].content).toBe("Speculative");
+
+    updateStep(db, 2, { status: 7, stepPayload: rejectedWritePayload });
+    // Re-translate the failed row only (status transition); plan snapshot stays speculative UX.
+    translator.translate(conn.readAfter(1));
+
+    insertStep(db, { idx: 3, stepType: 5, status: 3, stepPayload: replacePayload });
+    // File on disk never received the rejected write.
+    fs.writeFileSync(planPath, real);
+    // Translate only the new replace row so a prior failed write is not re-published.
+    const afterReplace = translator.translate(conn.readAfter(2));
+
+    // Poisoned cache would apply TargetContent=rejected and emit "From rejected cache".
+    // With a clean cache the replace cannot apply; disk fallback keeps the real plan
+    // (and progressive dedupe may emit nothing if the snapshot is unchanged).
+    const planUpdates = afterReplace.filter((u) => (u as { sessionUpdate: string }).sessionUpdate === "plan");
+    for (const u of planUpdates) {
+      const entries = (u as { entries: Array<{ content: string }> }).entries;
+      expect(entries.some((e) => e.content === "From rejected cache")).toBe(false);
+      expect(entries.map((e) => e.content)).toEqual(["Real plan"]);
+    }
+    // Even if no plan re-emit (deduped), we must not have published the rejected-derived body.
+    expect(planUpdates.some((u) =>
+      (u as { entries: Array<{ content: string }> }).entries.some((e) => e.content === "From rejected cache")
+    )).toBe(false);
+
+    conn.close();
+    db.close();
+  });
+
+  it("does not apply speculative plan updates for incomplete nonempty replaces", () => {
+    const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-replace-speculative", "plan.md");
+    fs.mkdirSync(path.dirname(planPath), { recursive: true });
+    const prior = "- [ ] Keep me\n";
+    const next = "- [x] Keep me\n";
+    fs.writeFileSync(planPath, prior);
+
+    const replacePayload = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "plan-replace-speculative",
+          namePrimary: "replace_file_content",
+          rawInputJson: JSON.stringify({
+            TargetFile: planPath,
+            TargetContent: prior,
+            ReplacementContent: next
+          })
+        })
+      })
+    });
+
+    const db = createConversationDb(dir, "conv-plan-replace-speculative");
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-seed-speculative",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({
+              TargetFile: planPath,
+              CodeContent: prior
+            })
+          })
+        })
+      })
+    });
+    // Permission-pending replace that would mark the task completed if applied.
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 9,
+      stepPayload: replacePayload
+    });
+
+    const conn = ConversationDb.open(dir, "conv-plan-replace-speculative")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+
+    const pending = translator.translate(conn.readAfter(-1));
+    expect(pending).toHaveLength(2);
+    expect(pending[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((pending[0] as { entries: Array<{ content: string; status: string }> }).entries).toMatchObject([
+      { content: "Keep me", status: "pending" }
+    ]);
+    expect(pending[1]).toMatchObject({
+      sessionUpdate: "tool_call",
+      name: "replace_file_content",
+      status: "pending"
+    });
+
+    // Denial/failure must not rewrite the plan or poison the content cache.
+    updateStep(db, 2, { status: 7, stepPayload: replacePayload });
+    const failed = translator.translate(conn.readAfter(-1));
+    expect(failed).toMatchObject([
+      { sessionUpdate: "tool_call_update", name: "replace_file_content", status: "failed" }
+    ]);
+    expect(failed.some((u) => (u as { sessionUpdate: string }).sessionUpdate === "plan")).toBe(false);
+
+    // A later successful replace still derives from the original cached plan body.
+    updateStep(db, 2, { status: 3, stepPayload: replacePayload });
+    fs.writeFileSync(planPath, next);
+    const completed = translator.translate(conn.readAfter(-1));
+    expect(completed).toMatchObject([
+      {
+        sessionUpdate: "plan",
+        entries: [{ content: "Keep me", status: "completed" }]
+      }
+    ]);
+
+    conn.close();
+    db.close();
   });
 
   it("buffers consecutive agent-text parts into one message in replay mode", () => {

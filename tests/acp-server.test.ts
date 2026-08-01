@@ -1601,9 +1601,12 @@ describe("ACP v2 (experimental draft)", () => {
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update.sessionUpdate).toBe("plan_update");
     expect(v2Update.plan).toEqual({
-      type: "markdown",
+      type: "items",
       planId: "file:/tmp/brain/plan.md",
-      content: markdown
+      entries: [
+        { content: "One", priority: "high", status: "pending" },
+        { content: "Two", priority: "high", status: "completed" }
+      ]
     });
 
     const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
@@ -1612,11 +1615,34 @@ describe("ACP v2 (experimental draft)", () => {
     expect(v1Wire._meta).toBeUndefined();
   });
 
+  it("maps classic plan to v2 plan_update markdown when entries is empty", () => {
+    const markdown = "# Plan\n\nNo items\n";
+    const update = {
+      sessionUpdate: "plan",
+      entries: [],
+      _meta: {
+        "agy-acp/planId": "file:/tmp/brain/plan.md",
+        "agy-acp/planPath": "/tmp/brain/plan.md",
+        "agy-acp/planMarkdown": markdown
+      }
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "markdown",
+        planId: "file:/tmp/brain/plan.md",
+        content: markdown
+      }
+    });
+  });
+
   it("maps classic plan to v2 plan_update items without markdown meta", () => {
     const update = {
       sessionUpdate: "plan",
-      entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
-    } as SessionUpdate;
+      entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
+    } as unknown as SessionUpdate;
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update).toEqual({
@@ -1624,9 +1650,33 @@ describe("ACP v2 (experimental draft)", () => {
       plan: {
         type: "items",
         planId: "agy-plan",
-        entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
+        entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
       }
     });
+  });
+
+  it("maps plan_removed to v2 plan_removed update with planId", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    });
+  });
+
+  it("translates plan_removed to empty plan on v1 wire", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
+    expect(v1Wire.sessionUpdate).toBe("plan");
+    expect(v1Wire.entries).toEqual([]);
   });
 
   it("expands execute tool calls into terminal_update + tool_call_update", () => {
