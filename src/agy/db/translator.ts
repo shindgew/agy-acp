@@ -94,7 +94,8 @@ export class Translator {
   private readonly thoughtTextLengths = new Map<string, number>();
   // Stream + replay: final provider-error messages already emitted.
   private readonly emittedProviderErrorMessageIds = new Set<string>();
-  // Stream + replay: last emitted snapshot keyed by tool call id / plan id (tool progressive lifecycle).
+  // Stream + replay: last emitted snapshot keyed by tool call id, or by plan id
+  // + source row for plans (progressive lifecycle without cross-row replay).
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
@@ -234,7 +235,10 @@ export class Translator {
         (typeof raw.planId === "string" && raw.planId) ||
         (typeof meta?.["agy-acp/planId"] === "string" && (meta["agy-acp/planId"] as string)) ||
         undefined;
-      const key = planId ? `plan:${planId}` : `plan:${stepIdx}`;
+      // Scope dedupe to the source row: StreamPoller rereads all rows since the
+      // turn began on every DB change, so a plan-level shared key would replay
+      // each historical state (rollback) whenever a later row changes.
+      const key = planId ? `plan:${planId}:${stepIdx}` : `plan:${stepIdx}`;
       const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
       this.toolSnapshots.set(key, snapshot);

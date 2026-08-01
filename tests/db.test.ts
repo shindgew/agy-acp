@@ -1594,6 +1594,115 @@ describe("Translator", () => {
     expect(entries[1].id).toBe(deployId);
   });
 
+  it("does not replay prior plan states when a later row triggers a reread", () => {
+    const planPath =
+      "/Users/me/.gemini/antigravity-cli/brain/abc/.system_generated/steps/1/implementation_plan.md";
+    const db = createConversationDb(dir, "conv-plan-reread");
+    // Two rows update the same plan: v1, then v2.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-reread-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: "- [ ] One\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-reread-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: planPath, CodeContent: "- [ ] One\n- [ ] Two\n" })
+          })
+        })
+      })
+    });
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const conn = ConversationDb.open(dir, "conv-plan-reread")!;
+
+    // First poll emits both successive plan states.
+    const first = translator.translate(conn.readAfter(0));
+    expect(first.map((u) => u.sessionUpdate)).toEqual(["plan", "plan"]);
+
+    // A later unrelated row makes the poller reread rows 1-2; the historical
+    // plan states must not be re-emitted (no rollback to v1, no repeat of v2).
+    insertStep(db, { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    const second = translator.translate(conn.readAfter(0));
+    expect(second).toEqual([
+      { sessionUpdate: "agent_message_chunk", messageId: "3", content: { type: "text", text: "done" } }
+    ]);
+
+    conn.close();
+    db.close();
+  });
+
+  it("derives one plan id for relative and absolute references to the same file", () => {
+    const absPlanPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-rel", "plan.md");
+    fs.mkdirSync(path.dirname(absPlanPath), { recursive: true });
+    fs.writeFileSync(absPlanPath, "- [ ] Keep\n");
+    const relPlanPath = path.relative(dir, absPlanPath);
+
+    const db = createConversationDb(dir, "conv-plan-rel");
+    // Write the plan via a relative path, then clear it via the absolute path.
+    insertStep(db, {
+      idx: 1,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-rel-1",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: relPlanPath, CodeContent: "- [ ] Keep\n" })
+          })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "plan-rel-2",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: absPlanPath, CodeContent: "" })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-plan-rel")!;
+    const translator = new Translator({ mode: "stream", skipNarration: false, cwd: dir });
+    const updates = translator.translate(conn.readAfter(-1));
+    conn.close();
+
+    // Both updates reference the same canonical plan id, so the removal clears
+    // the plan the first update created instead of targeting a divergent id.
+    expect(updates).toHaveLength(2);
+    expect(updates[0]).toMatchObject({ sessionUpdate: "plan" });
+    expect((updates[0] as { _meta?: Record<string, unknown> })._meta?.["agy-acp/planId"]).toBe(
+      `file:${absPlanPath}`
+    );
+    expect(updates[1]).toMatchObject({
+      sessionUpdate: "plan_removed",
+      planId: `file:${absPlanPath}`
+    });
+  });
+
   it("emits plan_removed session update when brain plan file is cleared", () => {
     const planPath = path.join(dir, ".gemini", "antigravity-cli", "brain", "conv-plan-empty", "plan.md");
     fs.mkdirSync(path.dirname(planPath), { recursive: true });

@@ -652,13 +652,16 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     }
 
     if (planBody !== null) {
-      const planId = planIdForPath(targetFile);
+      // Derive plan identity from the normalized absolute path so relative and
+      // absolute references to the same artifact share one plan id (and one
+      // entry-id lineage) instead of splitting into divergent plans.
+      const planId = planIdForPath(resolvedTarget);
       if (planBody.trim().length === 0) {
         if (status === "completed") {
           fileContents?.set(path.resolve(resolvedTarget), planBody);
           // Removal ends the plan's entry-id lineage; a re-created plan starts fresh.
           ctx?.planEntries?.delete(planId);
-          return planRemovedFromPath(targetFile);
+          return planRemovedFromPath(resolvedTarget);
         }
         // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
       } else if (!isReplaceEdit || status === "completed") {
@@ -668,7 +671,7 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
         }
         // Reconcile entry ids against the previous snapshot so duplicate-row
         // inserts/reorders do not reshuffle ids of surviving tasks.
-        const update = planUpdateFromMarkdown(targetFile, planBody, ctx?.planEntries?.get(planId));
+        const update = planUpdateFromMarkdown(resolvedTarget, planBody, ctx?.planEntries?.get(planId));
         ctx?.planEntries?.set(planId, (update as unknown as { entries: PlanEntry[] }).entries);
         return update;
       }
