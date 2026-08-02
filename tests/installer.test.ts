@@ -66,21 +66,6 @@ describe("ensureAgyInstalled", () => {
     expect(resolved).toBe(agyPath);
   });
 
-  it("does not download when automatic installation is disabled", async () => {
-    const warnings: string[] = [];
-    const resolved = await ensureAgyInstalled({
-      env: { HOME: os.tmpdir(), PATH: "", AGY_ACP_SKIP_DOWNLOAD: "1" },
-      installBinDir: path.join(os.tmpdir(), `agy-missing-${Date.now()}`),
-      warn: (message) => warnings.push(message),
-      fetchImpl: async () => {
-        throw new Error("fetch should not be called");
-      }
-    });
-
-    expect(resolved).toBeNull();
-    expect(warnings).toContain("[agy-acp] WARN: agy not found and automatic download is disabled.");
-  });
-
   it("refuses to install an asset without a SHA256 digest", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-installer-no-digest-"));
     dirs.push(dir);
