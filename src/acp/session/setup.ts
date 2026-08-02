@@ -23,6 +23,7 @@ export interface SessionBuildDeps {
   argv: string[];
   backend: AgyCliBackend;
   getModelOptions(config: AgyCliConfig): Promise<string[]>;
+  conversationsDir?: string;
 }
 
 /** Build a fresh session bound to `cwd` + ACP `additionalDirectories`. */
@@ -32,7 +33,13 @@ export async function buildSession(
   stored: StoredSession | null,
   deps: SessionBuildDeps
 ): Promise<SessionState> {
-  const config = configFromEnv({ cwd, additionalDirectories, env: deps.env, argv: deps.argv });
+  const config = configFromEnv({
+    cwd,
+    additionalDirectories,
+    env: deps.env,
+    argv: deps.argv,
+    conversationsDir: deps.conversationsDir
+  });
   const modelOptions = await deps.getModelOptions(config);
   const catalog = buildModelCatalog(modelOptions);
   const agy = await deps.backend.startSession(config);

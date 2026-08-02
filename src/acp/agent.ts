@@ -133,6 +133,10 @@ export interface AcpAgentOptions {
   spawnProcess?: SpawnFactory;
   ptyFactory?: PtyFactory;
   argv?: string[];
+  stateDir?: string;
+  conversationsDir?: string;
+  maxActiveSessions?: number;
+  modelCacheEnabled?: boolean;
 }
 
 export class AcpAgent {
@@ -147,6 +151,7 @@ export class AcpAgent {
   readonly #modelOptionsCache = new Map<string, { models: string[]; updatedAt: number }>();
   readonly #modelRefreshes = new Map<string, Promise<void>>();
   readonly #maxActiveSessions: number;
+  readonly #conversationsDir: string | undefined;
   #modelCacheWrite: Promise<void> = Promise.resolve();
   #ensureAgyPromise: Promise<string | null> | undefined;
   /** v1 client's `fs` capability, set from `initialize`. Draft v2 has no fs/* client methods. */
@@ -158,16 +163,17 @@ export class AcpAgent {
     this.#env = options.env ?? process.env;
     this.#argv = options.argv ?? [];
     this.#backend = new AgyCliBackend(options.spawnProcess, options.ptyFactory);
-    const stateDir = defaultStateDir(this.#env);
+    const stateDir = options.stateDir ?? defaultStateDir();
     this.#store = new SessionStore(stateDir);
     this.#modelCacheFile = path.join(stateDir, "models.json");
-    this.#modelCacheEnabled =
-      this.#env.AGY_ACP_MODEL_CACHE !== "0" &&
-      (this.#env.NODE_ENV !== "test" || this.#env.AGY_ACP_MODEL_CACHE === "1");
-    this.#maxActiveSessions = positiveInteger(
-      this.#env.AGY_ACP_MAX_ACTIVE_SESSIONS,
-      DEFAULT_MAX_ACTIVE_SESSIONS
-    );
+    this.#modelCacheEnabled = options.modelCacheEnabled ?? (this.#env.NODE_ENV !== "test");
+    this.#maxActiveSessions =
+      options.maxActiveSessions !== undefined &&
+      Number.isInteger(options.maxActiveSessions) &&
+      options.maxActiveSessions > 0
+        ? options.maxActiveSessions
+        : DEFAULT_MAX_ACTIVE_SESSIONS;
+    this.#conversationsDir = options.conversationsDir;
     this.loadModelCache();
   }
 
@@ -198,7 +204,12 @@ export class AcpAgent {
 
   /** Probe config for auth checks (cwd only; no workspace roots required). */
   private authProbeConfig(cwd = process.cwd()): AgyCliConfig {
-    return configFromEnv({ cwd, env: this.#env, argv: this.#argv });
+    return configFromEnv({
+      cwd,
+      env: this.#env,
+      argv: this.#argv,
+      conversationsDir: this.#conversationsDir
+    });
   }
 
   /**
@@ -459,7 +470,8 @@ export class AcpAgent {
       env: this.#env,
       argv: this.#argv,
       backend: this.#backend,
-      getModelOptions: (config) => this.modelOptionsForConfig(config)
+      getModelOptions: (config) => this.modelOptionsForConfig(config),
+      conversationsDir: this.#conversationsDir
     };
   }
 
@@ -625,8 +637,3 @@ export function runAcp(options: AcpAgentOptions = {}) {
 export { contentBlocksToPrompt, contentBlocksToText } from "./content/index.js";
 export { buildModelCatalog, modelConfigOption, reasoningEffortConfigOption, toModelSlug, prettifyModelSlug } from "../agy/model/catalog.js";
 export { sessionModeState, modeConfigOption } from "./session/modes.js";
-
-function positiveInteger(value: string | undefined, fallback: number): number {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
