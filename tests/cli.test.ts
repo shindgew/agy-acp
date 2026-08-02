@@ -1392,25 +1392,12 @@ describe("configFromEnv", () => {
     expect(config.interactivePermissions).toBe(true);
   });
 
-  it("configures mode from argv and env", () => {
+  it("configures mode from argv", () => {
     expect(configFromEnv({ cwd: "/repo" }).mode).toBe("default");
     expect(configFromEnv({ cwd: "/repo", argv: ["--mode", "accept-edits"] }).mode).toBe("accept-edits");
-    expect(
-      configFromEnv({
-        cwd: "/repo",
-        env: { AGY_ACP_MODE: "plan" }
-      }).mode
-    ).toBe("plan");
-    expect(
-      configFromEnv({
-        cwd: "/repo",
-        env: { AGY_ACP_MODE: "plan" },
-        argv: ["--mode", "accept-edits"]
-      }).mode
-    ).toBe("accept-edits");
   });
 
-  it("configures sandbox and skipPermissions based on argv and env", () => {
+  it("configures sandbox and skipPermissions based on argv", () => {
     const config1 = configFromEnv({
       cwd: "/repo",
       argv: ["--no-sandbox", "--dangerously-skip-permissions"]
@@ -1419,31 +1406,9 @@ describe("configFromEnv", () => {
     expect(config1.skipPermissions).toBe(true);
     expect(config1.interactivePermissions).toBe(false);
 
-    const config2 = configFromEnv({
-      cwd: "/repo",
-      env: {
-        AGY_ACP_NO_SANDBOX: "1",
-        AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1"
-      }
-    });
-    expect(config2.sandbox).toBe(false);
-    expect(config2.skipPermissions).toBe(true);
-    expect(config2.interactivePermissions).toBe(false);
-
-    const config3 = configFromEnv({
-      cwd: "/repo",
-      env: {
-        AGY_ACP_SANDBOX: "false"
-      }
-    });
-    expect(config3.sandbox).toBe(false);
-
     const config4 = configFromEnv({
       cwd: "/repo",
-      argv: ["--sandbox"],
-      env: {
-        AGY_ACP_NO_SANDBOX: "1"
-      }
+      argv: ["--sandbox"]
     });
     expect(config4.sandbox).toBe(true);
   });
@@ -1451,8 +1416,6 @@ describe("configFromEnv", () => {
   it("enables interactive permissions by default and lets the dangerous bypass select print mode", () => {
     expect(configFromEnv({ cwd: "/repo" }).interactivePermissions).toBe(true);
     expect(configFromEnv({ cwd: "/repo", argv: ["--dangerously-skip-permissions"] }).interactivePermissions).toBe(false);
-    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1" } }).interactivePermissions).toBe(false);
-    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_INTERACTIVE_PERMISSIONS: "0" } }).interactivePermissions).toBe(false);
     expect(configFromEnv({ cwd: "/repo", argv: ["--no-interactive-permissions"] }).interactivePermissions).toBe(false);
   });
 });

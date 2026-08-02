@@ -191,6 +191,8 @@ export interface AgyCliConfigInput {
   additionalDirectories?: string[];
   env?: NodeJS.ProcessEnv;
   argv?: string[];
+  /** Override the conversations directory (defaults to ~/.gemini/antigravity-cli/conversations). */
+  conversationsDir?: string;
 }
 
 export class AgyCliError extends Error {
@@ -1250,9 +1252,6 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const argv = input.argv ?? [];
 
   let sandbox = true;
-  if (env.AGY_ACP_SANDBOX === "false" || env.AGY_ACP_NO_SANDBOX) {
-    sandbox = false;
-  }
   if (argv.includes("--no-sandbox")) {
     sandbox = false;
   }
@@ -1261,21 +1260,16 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   }
 
   let skipPermissions = false;
-  if (env.AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS || argv.includes("--dangerously-skip-permissions")) {
+  if (argv.includes("--dangerously-skip-permissions")) {
     skipPermissions = true;
   }
   // Interactive permission forwarding is the normal execution path. The
   // explicit dangerous bypass selects print mode because there is no
   // permission request to forward when agy auto-approves everything.
-  const interactiveSetting = env.AGY_ACP_INTERACTIVE_PERMISSIONS?.trim().toLowerCase();
-  const interactiveDisabled = interactiveSetting === "0" || interactiveSetting === "false" || argv.includes("--no-interactive-permissions");
+  const interactiveDisabled = argv.includes("--no-interactive-permissions");
   const interactivePermissions = !skipPermissions && !interactiveDisabled;
 
   let mode: SessionModeId = "default";
-  const modeFromEnv = optional(env.AGY_ACP_MODE);
-  if (modeFromEnv && isSessionModeId(modeFromEnv)) {
-    mode = modeFromEnv;
-  }
   const modeFlagIdx = argv.indexOf("--mode");
   if (modeFlagIdx >= 0) {
     const modeArg = argv[modeFlagIdx + 1];
@@ -1303,7 +1297,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     modelList: [],
     discoverModels: true,
     modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
-    conversationsDir: optional(env.AGY_ACP_CONVERSATIONS_DIR) ?? DEFAULT_CONVERSATIONS_DIR,
+    conversationsDir: input.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR,
     env
   };
 }
