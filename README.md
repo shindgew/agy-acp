@@ -49,11 +49,7 @@ Add `agy-acp` as a custom agent in Zed:
 | Variable | Default / notes |
 |---|---|
 | `PATH` | Must include `agy` if the editor doesn't inherit your shell `PATH` |
-| `AGY_ACP_CONVERSATIONS_DIR` | `~/.gemini/antigravity-cli/conversations` |
-| `AGY_ACP_STATE_DIR` | `~/.agy-acp-state` (session bindings for load/resume) |
-| `AGY_ACP_MODE` | `default` · `accept-edits` · `plan` |
-| `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS` | Auto-approve tools; switches to non-interactive print mode |
-| `AGY_ACP_INTERACTIVE_PERMISSIONS=0` | Disable permission bridge (print mode, no auto-approve). Flag: `--no-interactive-permissions` |
+| `AGY_ACP_AGY_BIN` | Override the `agy` binary path (also accepts `AGY_BIN`) |
 
 ## Architecture
 
@@ -72,7 +68,7 @@ Zed / ACP client
 - Steps come from agy's conversation SQLite DB (structured protobuf records), not stdout.
 - Config options: `mode` → `--mode`, `model` → `--model`, `reasoningEffort` → `--effort`
 - Cancel: `SIGINT` then `SIGKILL`. `--sandbox` on by default; skip-permissions is opt-in.
-- Session bindings persist under `AGY_ACP_STATE_DIR` so list/load/resume survive restarts.
+- Session bindings persist under `~/.agy-acp-state` so list/load/resume survive restarts.
 - **v1:** `session/load` replays history; `session/resume` reattaches without replay.
   **v2:** only `session/resume` — pass `replayFrom: { "type": "start" }` to replay.
 
