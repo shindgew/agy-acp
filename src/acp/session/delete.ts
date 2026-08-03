@@ -3,6 +3,8 @@
 
 import type { DeleteSessionRequest, DeleteSessionResponse } from "@agentclientprotocol/sdk";
 import type { SessionStore } from "./store.js";
+import type { SessionState } from "./types.js";
+import { cancelQueuedPrompts } from "./cancel.js";
 
 export interface SessionDeleteTarget {
   promptAbort?: AbortController | null;
@@ -22,6 +24,9 @@ export async function handleDeleteSession(
 ): Promise<DeleteSessionResponse> {
   const session = activeSessions.get(params.sessionId);
   activeSessions.delete(params.sessionId);
+  if (session) {
+    await cancelQueuedPrompts(session as SessionState);
+  }
   session?.promptAbort?.abort();
   await session?.agy.close();
   await store.delete(params.sessionId);

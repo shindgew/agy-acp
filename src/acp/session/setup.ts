@@ -14,6 +14,7 @@ import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
+import { cancelQueuedPrompts } from "./cancel.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -55,6 +56,7 @@ export async function buildSession(
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
     activePrompt: false,
+    promptQueue: [],
     v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
 }
@@ -69,6 +71,7 @@ export async function registerSession(
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
+    await cancelQueuedPrompts(replaced);
     replaced.promptAbort?.abort();
     await replaced.agy.close().catch(() => {});
   }
@@ -78,6 +81,7 @@ export async function registerSession(
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
+    await cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(
         `[agy-acp] WARN: failed to close evicted session ${evictedId}: ${(error as Error).message}`
