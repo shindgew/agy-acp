@@ -8,6 +8,8 @@ import * as acp from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { createAcpApp, createAcpV2App } from "../src/agent.js";
+import { handlePromptV1, type PromptV1Deps } from "../src/acp/session/prompt.js";
+import type { SessionState } from "../src/acp/session/types.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload } from "./fixtures/step-encoder.js";
 import type { SpawnFactory } from "../src/agy/cli.js";
@@ -607,6 +609,68 @@ describe("queue and steer-by-cancel", () => {
         connection.close();
       }
     });
+  });
+
+  it("stops an aborted v1 steer before launching the replacement", async () => {
+    let promptCalls = 0;
+    let wakeIdle: (() => void) | undefined;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      activePrompt: true,
+      promptQueue: [],
+      steerClaims: 0,
+      v2UserMessageIdsByStep: {},
+      catalog: { models: [], byBase: new Map() },
+      selectedBaseModel: "m",
+      selectedReasoningEffort: "",
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {
+          // Keep activePrompt true until the steer is waiting on idle.
+        },
+        prompt: async () => {
+          promptCalls++;
+          return { stopReason: "end_turn" };
+        }
+      }
+    } as unknown as SessionState;
+
+    const deps: PromptV1Deps = {
+      requireSession: () => session,
+      applyConfigOption: async () => {},
+      persistSession: async () => {},
+      notifyCurrentModeUpdate: async () => {},
+      notifyConfigOptionUpdateV1: async () => {},
+      clientFileSystemV1: () => undefined
+    };
+
+    const controller = new AbortController();
+    const steerPromise = handlePromptV1(
+      {
+        sessionId: "s1",
+        prompt: [{ type: "text", text: "replacement" }],
+        _meta: { "agy-acp/turnIntent": "steer" }
+      } as any,
+      { notify: async () => {} } as any,
+      controller.signal,
+      deps
+    );
+
+    // Wait until the steer has registered its idle waiter.
+    await waitFor(() => session.promptIdleNotify !== undefined);
+    wakeIdle = session.promptIdleNotify;
+
+    // Abort while still waiting for the prior turn to settle.
+    controller.abort();
+    session.activePrompt = false;
+    wakeIdle?.();
+
+    const result = await steerPromise;
+    expect(result.stopReason).toBe("cancelled");
+    expect(promptCalls).toBe(0);
+    expect(session.steerClaims ?? 0).toBe(0);
   });
 
   it("rejects a non-intent prompt while a steer replacement is in progress", async () => {

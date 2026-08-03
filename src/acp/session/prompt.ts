@@ -232,6 +232,7 @@ export async function handlePromptV1(
   // Own the steer claim (if any) for the full replacement path — including
   // setup failures and slash-only turns — so release + queue drain always run.
   let releaseSteer: (() => void) | undefined;
+  const cancelled = () => Boolean(signal?.aborted || session.closed);
   try {
     if (sessionTurnBusy(session)) {
       // Reserve before any await so a queued follow-up cannot claim the session.
@@ -248,12 +249,16 @@ export async function handlePromptV1(
       session.promptAbort?.abort();
       await session.agy.cancel();
       await waitForIdle;
-      if (session.closed) {
+      // Request may have been cancelled while waiting on the prior turn/steer.
+      if (cancelled()) {
         return { stopReason: "cancelled" };
       }
     }
 
     const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
+    if (cancelled()) {
+      return { stopReason: "cancelled" };
+    }
 
     // Curated slash commands → config options; do not spawn agy for those.
     // Only intercept pure client text blocks (not resource/image payloads whose
@@ -278,7 +283,11 @@ export async function handlePromptV1(
         deps
       ));
     if (handled) {
-      return { stopReason: signal?.aborted ? "cancelled" : "end_turn" };
+      return { stopReason: cancelled() ? "cancelled" : "end_turn" };
+    }
+
+    if (cancelled()) {
+      return { stopReason: "cancelled" };
     }
 
     session.activePrompt = true;
@@ -288,6 +297,12 @@ export async function handlePromptV1(
       });
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
+    // Listener only fires for future aborts; honor an already-aborted signal.
+    if (signal?.aborted) {
+      signal.removeEventListener("abort", cancelPrompt);
+      session.activePrompt = false;
+      return { stopReason: "cancelled" };
+    }
 
     try {
       const tracker = createTerminalOutputTracker();
@@ -310,15 +325,19 @@ export async function handlePromptV1(
           clientToolCallName
         );
       }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
-      await deps.persistSession(params.sessionId, session);
+      if (!session.closed) {
+        await deps.persistSession(params.sessionId, session);
+      }
       return {
-        stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
+        stopReason: outcome.stopReason === "cancelled" || cancelled() ? "cancelled" : "end_turn"
       };
     } catch (error) {
       // Persist even on failure: agy's conversation id/step position may have
       // advanced before it errored out, and that partial progress is worth
       // resuming from on the next prompt.
-      await deps.persistSession(params.sessionId, session).catch(() => {});
+      if (!session.closed && !signal?.aborted) {
+        await deps.persistSession(params.sessionId, session).catch(() => {});
+      }
       throw error;
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
