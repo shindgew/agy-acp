@@ -9,13 +9,20 @@ import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
 import type { StepRow } from "./db/types.js";
-import { revertEditToolCall } from "./edit/revert.js";
+import { diffBlocks, revertEditToolCall } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
   type ClientFileSystem
 } from "./edit/bridge.js";
+import {
+  buildReconcileEditUpdate,
+  reconcileWorkingTree,
+  snapshotWorkingTree,
+  toDisplayPath,
+  type WorkingTreeSnapshot
+} from "./edit/reconcile.js";
 import {
   canBridgeInteraction,
   interactionKeys,
@@ -317,6 +324,20 @@ export class AgyCliSession {
   ): Promise<PromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
+    // Paths reflected through a recognized edit this turn; excluded from the
+    // end-of-turn working-tree reconciliation (see #76) so we don't double-emit.
+    const reflectedPaths = new Set<string>();
+    // Snapshot the pre-edit working tree while the client can consume writes,
+    // so edits agy makes outside recognized structured-edit tool-calls (shell
+    // commands, unrecognized payloads) still get reflected through ACP.
+    let editBaseline: WorkingTreeSnapshot | null = null;
+    if (fsBridge) {
+      try {
+        editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
+      } catch {
+        editBaseline = null;
+      }
+    }
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
@@ -521,6 +542,9 @@ export class AgyCliSession {
           // live gate above and agy applied it. Either way, if the client can
           // take the write itself, hand it off so its native diff/review UI
           // (e.g. Zed's Review Changes panel) tracks it.
+          // Recognized edit: record its paths so end-of-turn reconciliation
+          // doesn't re-emit them as unstructured changes.
+          for (const block of diffBlocks(toolCall)) reflectedPaths.add(path.resolve(block.path));
           if (fsBridge) {
             const routed = gatedIds.has(id)
               // Pre-edit state was already primed above (race-free) — just
@@ -554,6 +578,9 @@ export class AgyCliSession {
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
+      if (fsBridge && editBaseline && !this.#cancelled) {
+        await this.reflectUnstructuredEdits(editBaseline, reflectedPaths, fsBridge, onUpdate, deadline);
+      }
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } catch (error) {
       failed = true;
@@ -585,6 +612,43 @@ export class AgyCliSession {
       return await Promise.race([guarded, this.#cancelWait.then(() => "cancelled" as const), timedOut]);
     } finally {
       if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * After a turn, diff the working tree against the pre-edit snapshot and
+   * reflect any change agy made that never surfaced as a recognized structured
+   * edit (shell edits, unrecognized payloads) through ACP: emit a synthetic
+   * edit update and hand the write to the client. Changes that can't be shown
+   * as a text diff (binary/oversized/deletions) are reported, not dropped (#76).
+   */
+  private async reflectUnstructuredEdits(
+    baseline: WorkingTreeSnapshot,
+    reflectedPaths: Set<string>,
+    fsBridge: ClientFileSystem,
+    onUpdate: (update: SessionUpdate) => Promise<void>,
+    deadline: number
+  ): Promise<void> {
+    try {
+      const roots = [this.config.cwd, ...this.config.additionalDirectories];
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, roots, reflectedPaths);
+      let index = 0;
+      for (const edit of reflected) {
+        if (this.#cancelled) return;
+        const update = buildReconcileEditUpdate(edit, index++, this.config.cwd);
+        await this.raceTurnCallback(onUpdate(update), deadline);
+        await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
+      }
+      if (unsupported.length > 0) {
+        const detail = unsupported
+          .map((change) => `${toDisplayPath(change.path, this.config.cwd)} (${change.reason})`)
+          .join(", ");
+        console.error(
+          `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${detail}`
+        );
+      }
+    } catch (error) {
+      console.error(`[agy-acp] WARN: working-tree reconciliation failed: ${(error as Error).message}`);
     }
   }
 
