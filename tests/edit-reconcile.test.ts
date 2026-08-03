@@ -206,6 +206,29 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("still reflects an unrelated creation when ignore rules also change", async () => {
+    const dir = gitRepo();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const createdFile = path.join(dir, "src", "new.ts");
+    fs.writeFileSync(ignoreFile, "", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(ignoreFile, "dist/\n", "utf8");
+    fs.mkdirSync(path.dirname(createdFile), { recursive: true });
+    fs.writeFileSync(createdFile, "export {};\n", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toHaveLength(2);
+    expect(reflected).toEqual(expect.arrayContaining([
+      { path: ignoreFile, oldText: "", newText: "dist/\n" },
+      { path: createdFile, oldText: null, newText: "export {};\n" }
+    ]));
+    expect(unsupported).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("does not report a baseline file as deleted when a new ignore rule hides it", async () => {
     const dir = gitRepo();
     const ignoreFile = path.join(dir, ".gitignore");
@@ -377,6 +400,31 @@ describe("reconcileWorkingTree", () => {
     // must not be walked via symlink-following.
     expect([...baseline.keys()].some((p) => p.includes("secret.txt"))).toBe(false);
     expect(baseline.has(path.join(dir, "linkdir"))).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("does not follow a baseline file replaced by a symlink during direct resnapshot", async () => {
+    const dir = gitRepo();
+    const outside = tmpDir();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const file = path.join(dir, "hidden.txt");
+    const target = path.join(outside, "target.txt");
+    fs.writeFileSync(ignoreFile, "", "utf8");
+    fs.writeFileSync(file, "inside", "utf8");
+    fs.writeFileSync(target, "outside secret", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.rmSync(file);
+    fs.symlinkSync(target, file);
+    fs.writeFileSync(ignoreFile, "hidden.txt\n", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([{ path: ignoreFile, oldText: "", newText: "hidden.txt\n" }]);
+    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+    expect(fs.readFileSync(target, "utf8")).toBe("outside secret");
 
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(outside, { recursive: true, force: true });

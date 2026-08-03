@@ -16,6 +16,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { createReadStream, promises as fs } from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -37,6 +38,8 @@ export interface FileSnapshot {
   candidate?: boolean;
   /** Original listed fingerprint, retained when structured diffs advance sha1. */
   initialSha1?: string;
+  /** Original listed text, retained to evaluate pre-turn ignore rules. */
+  initialText?: string | null;
 }
 
 /** Absolute file path -> snapshot. */
@@ -148,7 +151,9 @@ async function walk(dir: string): Promise<string[]> {
 async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   let st: import("node:fs").Stats;
   try {
-    st = await fs.stat(abs);
+    // Do not follow a regular-file path that was replaced with a symlink after
+    // the baseline listing, especially during direct candidate resnapshot.
+    st = await fs.lstat(abs);
   } catch {
     return null;
   }
@@ -161,7 +166,7 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
       const hash = createHash("sha1");
       for await (const chunk of createReadStream(abs)) hash.update(chunk);
       const sha1 = `oversized:${st.size}:${hash.digest("hex")}`;
-      return { sha1, size: st.size, text: null, candidate: true, initialSha1: sha1 };
+      return { sha1, size: st.size, text: null, candidate: true, initialSha1: sha1, initialText: null };
     } catch {
       return null;
     }
@@ -178,14 +183,19 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   // the client's text write-through (which would rewrite U+FFFD replacements).
   const isBinary = buf.includes(0) || !isValidUtf8(buf);
   const text = !isBinary ? buf.toString("utf8") : null;
-  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1 };
+  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1, initialText: text };
 }
 
-function snapshotFromText(text: string, candidate: boolean, initialSha1?: string): FileSnapshot {
+function snapshotFromText(
+  text: string,
+  candidate: boolean,
+  initialSha1?: string,
+  initialText?: string | null
+): FileSnapshot {
   const buf = Buffer.from(text, "utf8");
   if (buf.length > MAX_TEXT_BYTES) {
     const sha1 = `oversized:${buf.length}:${createHash("sha1").update(buf).digest("hex")}`;
-    return { sha1, size: buf.length, text: null, candidate, initialSha1 };
+    return { sha1, size: buf.length, text: null, candidate, initialSha1, initialText };
   }
   const sha1 = createHash("sha1").update(buf).digest("hex");
   return {
@@ -193,7 +203,8 @@ function snapshotFromText(text: string, candidate: boolean, initialSha1?: string
     size: buf.length,
     text,
     candidate,
-    initialSha1
+    initialSha1,
+    initialText
   };
 }
 
@@ -314,7 +325,15 @@ export function applyDiffBlocksToSnapshot(
   for (const op of ops) {
     result = result.slice(0, op.idx) + op.newText + result.slice(op.idx + op.oldLen);
   }
-  snapshot.set(abs, snapshotFromText(result, before.candidate !== false, before.initialSha1 ?? before.sha1));
+  snapshot.set(
+    abs,
+    snapshotFromText(
+      result,
+      before.candidate !== false,
+      before.initialSha1 ?? before.sha1,
+      before.initialText ?? before.text
+    )
+  );
 }
 
 function applySingleDiffBlock(
@@ -347,7 +366,12 @@ function applySingleDiffBlock(
 
   snapshot.set(
     abs,
-    snapshotFromText(post, before?.candidate ?? false, before ? (before.initialSha1 ?? before.sha1) : undefined)
+    snapshotFromText(
+      post,
+      before?.candidate ?? false,
+      before ? (before.initialSha1 ?? before.sha1) : undefined,
+      before ? (before.initialText ?? before.text) : undefined
+    )
   );
 }
 
@@ -362,6 +386,59 @@ export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeS
     }
   }
   return snapshot;
+}
+
+/**
+ * Use Git's own matcher to determine which newly listed paths were ignored by
+ * the pre-turn .gitignore contents. Reconstructing only ignore files in a
+ * temporary repository avoids mutating the real worktree and avoids a partial
+ * reimplementation of gitignore pattern/negation semantics.
+ */
+async function ignoredByBaselineRules(
+  baseline: WorkingTreeSnapshot,
+  roots: string[],
+  candidates: string[]
+): Promise<Set<string>> {
+  const ignored = new Set<string>();
+  for (const root of dedupeRoots(roots)) {
+    const underRoot = candidates.filter((abs) => abs.startsWith(root + path.sep));
+    if (underRoot.length === 0) continue;
+    try {
+      await execFileAsync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"]);
+    } catch {
+      // Non-git roots use the recursive walker, where .gitignore never changes
+      // candidate visibility.
+      continue;
+    }
+
+    const temp = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-ignore-"));
+    try {
+      await execFileAsync("git", ["-C", temp, "init", "-q"]);
+      for (const [ignoreFile, snapshot] of baseline) {
+        if (path.basename(ignoreFile) !== ".gitignore" || !ignoreFile.startsWith(root + path.sep)) continue;
+        const text = snapshot.initialText ?? snapshot.text;
+        if (text == null) continue;
+        const relative = path.relative(root, ignoreFile);
+        const target = path.join(temp, relative);
+        await fs.mkdir(path.dirname(target), { recursive: true });
+        await fs.writeFile(target, text, "utf8");
+      }
+
+      for (const abs of underRoot) {
+        const relative = path.relative(root, abs);
+        try {
+          await execFileAsync("git", ["-C", temp, "check-ignore", "-q", "--no-index", "--", relative]);
+          ignored.add(abs);
+        } catch {
+          // Exit 1 means the path was visible under the baseline rules. Other
+          // matcher failures conservatively leave it eligible for reflection.
+        }
+      }
+    } finally {
+      await fs.rm(temp, { recursive: true, force: true });
+    }
+  }
+  return ignored;
 }
 
 /**
@@ -403,7 +480,7 @@ export async function reconcileWorkingTree(
     const before = baseline.get(abs);
     if ((before?.initialSha1 ?? before?.sha1) !== current.get(abs)?.sha1) changedIgnoreRules.add(abs);
   }
-  const becameVisibleAfterIgnoreChange = (abs: string): boolean => {
+  const couldBeAffectedByIgnoreChange = (abs: string): boolean => {
     if (path.basename(abs) === ".gitignore") return false;
     for (const ignoreFile of changedIgnoreRules) {
       const dir = path.dirname(ignoreFile);
@@ -411,11 +488,15 @@ export async function reconcileWorkingTree(
     }
     return false;
   };
+  const newlyListedAfterIgnoreChange = [...current.keys()].filter(
+    (abs) => !baseline.has(abs) && couldBeAffectedByIgnoreChange(abs)
+  );
+  const ignoredBeforeTurn = await ignoredByBaselineRules(baseline, roots, newlyListedAfterIgnoreChange);
 
   for (const [abs, now] of current) {
     const before = baseline.get(abs);
     if (before && before.sha1 === now.sha1) continue; // unchanged
-    if (!before && becameVisibleAfterIgnoreChange(abs)) {
+    if (!before && ignoredBeforeTurn.has(abs)) {
       unsupported.push({ path: abs, reason: "ignore-rules-changed" });
       continue;
     }
