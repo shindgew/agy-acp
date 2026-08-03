@@ -402,6 +402,29 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(outside, { recursive: true, force: true });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "ignores files a root retargeted mid-turn exposes from outside the workspace",
+    async () => {
+      const dir = gitRepo();
+      const extraRoot = tmpDir();
+      const outside = tmpDir();
+      fs.writeFileSync(path.join(outside, "secret.txt"), "outside secret", "utf8");
+
+      const baseline = await snapshotWorkingTree([dir, extraRoot]);
+      // The additional root is replaced by a symlink pointing out of the
+      // workspace; its listing now reaches files no root ever contained.
+      fs.rmSync(extraRoot, { recursive: true });
+      fs.symlinkSync(outside, extraRoot, "dir");
+
+      expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+      expect(fs.readFileSync(path.join(outside, "secret.txt"), "utf8")).toBe("outside secret");
+
+      fs.rmSync(extraRoot, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  );
+
   it("reports deletion of an in-root file created by a structured edit", async () => {
     const dir = gitRepo();
     const createdDir = path.join(dir, "created");

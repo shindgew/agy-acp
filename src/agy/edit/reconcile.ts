@@ -331,22 +331,35 @@ function isUnder(target: string, prefixes: readonly string[]): boolean {
   return false;
 }
 
+/** List and read every file the given roots currently expose. */
+async function collectFiles(roots: WorkspaceRoot[]): Promise<{ files: Map<string, FileRecord>; excluded: string[] }> {
+  const files = new Map<string, FileRecord>();
+  const excluded: string[] = [];
+  for (const root of roots) {
+    const listing = await listRoot(root.display);
+    excluded.push(...listing.excluded);
+    for (const abs of listing.files) {
+      const record = await readFileRecord(abs);
+      if (!record) continue;
+      // A root spelling replaced or retargeted mid-turn (a directory swapped
+      // for a symlink) lists files whose physical location is outside every
+      // root captured at turn start. Those must never reach an ACP update or a
+      // write-through, however the listing reached them.
+      if (!rootFor(record.canonicalPath, roots)) continue;
+      // Overlapping roots list one physical file under several spellings; keep
+      // the first configured one so emitted paths stay stable.
+      if (files.has(record.canonicalPath)) continue;
+      files.set(record.canonicalPath, record);
+    }
+  }
+  return { files, excluded };
+}
+
 /** Snapshot the working tree across one or more configured roots. */
 export async function snapshotWorkingTree(rootPaths: string[]): Promise<WorkingTreeSnapshot> {
   const roots = await resolveRoots(rootPaths);
-  const snapshot: WorkingTreeSnapshot = { roots, files: new Map(), excluded: [] };
-  for (const root of roots) {
-    const listing = await listRoot(root.display);
-    snapshot.excluded.push(...listing.excluded);
-    for (const abs of listing.files) {
-      const record = await readFileRecord(abs);
-      // Overlapping roots list one physical file under several spellings; keep
-      // the first configured one so emitted paths stay stable.
-      if (!record || snapshot.files.has(record.canonicalPath)) continue;
-      snapshot.files.set(record.canonicalPath, record);
-    }
-  }
-  return snapshot;
+  const { files, excluded } = await collectFiles(roots);
+  return { roots, files, excluded };
 }
 
 /**
@@ -383,14 +396,7 @@ export async function observeEditedPaths(snapshot: WorkingTreeSnapshot, paths: s
  * edits; anything we cannot represent as a text diff becomes `unsupported`.
  */
 export async function reconcileWorkingTree(snapshot: WorkingTreeSnapshot): Promise<ReconcileResult> {
-  const current = new Map<string, FileRecord>();
-  for (const root of snapshot.roots) {
-    for (const abs of (await listRoot(root.display)).files) {
-      const record = await readFileRecord(abs);
-      if (!record || current.has(record.canonicalPath)) continue;
-      current.set(record.canonicalPath, record);
-    }
-  }
+  const { files: current } = await collectFiles(snapshot.roots);
 
   const reflected: ReflectedEdit[] = [];
   const unsupported: UnsupportedChange[] = [];
