@@ -1323,6 +1323,59 @@ describe("prompt", () => {
     }
   });
 
+  it("does not re-emit a structured edit whose reported text no longer matches the pre-turn file", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-reconcile-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-conv-"));
+    try {
+      const file = path.join(dir, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+      const rawInputJson = JSON.stringify({
+        TargetFile: file,
+        TargetContent: "shell",
+        ReplacementContent: "final"
+      });
+      const updates: SessionUpdate[] = [];
+      const session = new AgyCliSession(
+        { ...defaultConfig(), cwd: dir, conversationsDir: conversations },
+        (command, args, options) => {
+          // A shell command edited the file first, so the structured replace's
+          // reported oldText ("shell") never existed in the pre-turn file.
+          fs.writeFileSync(file, "shell", "utf8");
+          fs.writeFileSync(file, "final", "utf8");
+          const db = createConversationDb(conversations, "structured-reconcile");
+          insertStep(db, {
+            idx: 1,
+            stepType: 5,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+              })
+            })
+          });
+          db.close();
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      const outcome = await session.prompt("edit it", async (update) => { updates.push(update); });
+
+      expect(outcome).toEqual({ stopReason: "end_turn" });
+      // The structured edit alone: reconciliation must not add a second,
+      // contradictory before→final edit for the same file.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toMatchObject({ kind: "edit", status: "completed" });
+      const reconciled = updates.filter((update) =>
+        String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+      );
+      expect(reconciled).toEqual([]);
+      expect(fs.readFileSync(file, "utf8")).toBe("final");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(conversations, { recursive: true, force: true });
+    }
+  });
+
   it("can write prompt through stdin", async () => {
     const fake = new FakeProcess(["ok"]);
     const calls: SpawnCall[] = [];

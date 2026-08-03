@@ -5,18 +5,38 @@
 // cover recognized edits; without this, Zed/Git can show files agy modified
 // while ACP emits no corresponding diff update or fs/write-through (see #76).
 //
-// Strategy: snapshot the working tree at turn start, advance the baseline when
-// a recognized edit lands, diff the remainder at turn end, and for every
-// changed file synthesize an ACP `tool_call` edit update the caller can emit +
-// hand to the client's fs write-through. Changes we can't represent as a text
-// diff (binary/oversized/deletions) are reported to the caller so it can
-// surface the limitation instead of silently dropping them.
+// The snapshot models one thing only: *the content the client has already been
+// told each file holds*. Two invariants keep that model honest and keep this
+// module out of the business of reimplementing agy's edit semantics or Git's
+// ignore semantics:
+//
+//  1. Content only ever enters the snapshot by reading disk — never by
+//     replaying a structured diff onto a remembered body. When a recognized
+//     edit is reported to the client, the caller calls
+//     {@link observeEditedPaths} for its paths and the on-disk bytes at that
+//     moment become the new "client knows this" state. A snippet matcher can
+//     never reliably reproduce what agy actually wrote (the file may already
+//     carry a later shell edit, the snippet may repeat, a chunk may not
+//     apply), and a wrong guess produces a duplicate or destructive synthetic
+//     edit. The tradeoff is that an unrecognized change made to the *same*
+//     path *earlier in the same turn* is folded into the structured edit
+//     instead of being emitted separately; the client's final view still
+//     matches disk, which is what #76 asks for.
+//  2. Files are keyed by physical identity (`fs.realpath`), and every path
+//     comparison happens between strings produced by the *same* root spelling.
+//     Aliased/overlapping workspace roots therefore collapse to one entry
+//     instead of producing two ACP edits for one physical change, and no
+//     lexical `startsWith` ever has to compare a symlinked spelling against a
+//     canonical one.
+//
+// Changes we can't represent as a text diff (binary/oversized/deleted, or a
+// file whose pre-turn content was never captured) are reported to the caller
+// so it can surface the limitation instead of silently dropping them.
 
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createReadStream, promises as fs, realpathSync } from "node:fs";
-import * as os from "node:os";
+import { createReadStream, promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -24,28 +44,43 @@ const execFileAsync = promisify(execFile);
 
 /** Files larger than this are treated as out-of-scope (reported, not diffed). */
 export const MAX_TEXT_BYTES = 1024 * 1024;
-/** Directories never worth scanning for agy edits. */
+/** Directories never worth scanning for agy edits (non-git roots only). */
 const SKIP_DIRS = new Set([".git", "node_modules"]);
+const LS_FILES_MAX_BUFFER = 64 * 1024 * 1024;
 
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
-export interface FileSnapshot {
+export interface FileRecord {
+  /** Absolute path in the first configured root spelling — what we emit. */
+  path: string;
+  /** Physical identity (`fs.realpath`); the snapshot's map key. */
+  canonicalPath: string;
   sha1: string;
   size: number;
   /** utf-8 contents, or null when binary or oversized (out of scope for a diff). */
   text: string | null;
-  /** False when added by structured-diff advancement rather than root listing. */
-  candidate?: boolean;
-  /** Original listed fingerprint, retained when structured diffs advance sha1. */
-  initialSha1?: string;
-  /** Original listed text, retained to evaluate pre-turn ignore rules. */
-  initialText?: string | null;
-  /** Physical file identity used to match structured paths across aliases. */
-  canonicalPath?: string;
 }
 
-/** Absolute file path -> snapshot. */
-export type WorkingTreeSnapshot = Map<string, FileSnapshot>;
+/** A configured workspace root, in both the configured and physical spelling. */
+export interface WorkspaceRoot {
+  display: string;
+  canonical: string;
+}
+
+export interface WorkingTreeSnapshot {
+  /** Deduplicated by physical identity, in configured order (cwd first). */
+  roots: WorkspaceRoot[];
+  /** canonical path -> content the client has been told the file holds. */
+  files: Map<string, FileRecord>;
+  /**
+   * Absolute paths (files or directories) the listing deliberately skipped:
+   * gitignored entries, symlinks, and the non-git walker's skip list. Recorded
+   * in the same root spelling as {@link files}, so a path that only becomes
+   * visible later (agy edited an ignore rule) is recognizable as pre-existing
+   * rather than invented as a creation whose pre-turn content we never had.
+   */
+  excluded: string[];
+}
 
 export interface ReflectedEdit {
   path: string;
@@ -54,7 +89,7 @@ export interface ReflectedEdit {
   newText: string;
 }
 
-export type UnsupportedReason = "binary" | "oversized" | "deleted" | "ignore-rules-changed";
+export type UnsupportedReason = "binary" | "oversized" | "deleted" | "previously-excluded";
 
 export interface UnsupportedChange {
   path: string;
@@ -66,27 +101,7 @@ export interface ReconcileResult {
   unsupported: UnsupportedChange[];
 }
 
-async function dedupeRoots(roots: string[]): Promise<string[]> {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const root of roots) {
-    const resolved = path.resolve(root);
-    let canonical = resolved;
-    try {
-      canonical = await fs.realpath(resolved);
-    } catch {
-      // Preserve the unresolved root so the existing git/walk fallback can
-      // decide whether it is readable.
-    }
-    if (seen.has(canonical)) continue;
-    seen.add(canonical);
-    // Keep the first configured spelling (normally cwd) for emitted paths.
-    out.push(resolved);
-  }
-  return out;
-}
-
-/** True when `buf` is valid UTF-8 (and not empty of encoding errors). */
+/** True when `buf` decodes as UTF-8 without replacement. */
 export function isValidUtf8(buf: Buffer): boolean {
   try {
     utf8Decoder.decode(buf);
@@ -97,99 +112,158 @@ export function isValidUtf8(buf: Buffer): boolean {
 }
 
 /**
+ * Resolve configured roots to `{ display, canonical }`, dropping roots that
+ * alias a root already listed. The first configured spelling (normally the
+ * session cwd) is what emitted paths use.
+ */
+async function resolveRoots(rootPaths: string[]): Promise<WorkspaceRoot[]> {
+  const seen = new Set<string>();
+  const roots: WorkspaceRoot[] = [];
+  for (const rootPath of rootPaths) {
+    const display = path.resolve(rootPath);
+    let canonical = display;
+    try {
+      canonical = await fs.realpath(display);
+    } catch {
+      // Keep the unresolved spelling; listing decides whether it is readable.
+    }
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    roots.push({ display, canonical });
+  }
+  return roots;
+}
+
+interface Listing {
+  files: string[];
+  excluded: string[];
+}
+
+function splitNulList(stdout: string): string[] {
+  return stdout.split("\0").filter((entry) => entry.length > 0);
+}
+
+/**
  * List candidate files under a root. Prefers git (tracked + untracked but not
  * gitignored, so build output and node_modules stay out); falls back to a
  * bounded recursive walk for non-git roots. Checked-out submodules appear as
- * gitlink directories in the parent listing — expand them by listing inside.
- * Symlinks are never followed (a tracked symlink to a directory is not a
- * gitlink; following it can loop or walk outside the configured roots).
+ * gitlink directories in the parent listing — expand them by listing inside,
+ * which also keeps the parent's ignore rules and index from governing the
+ * nested repository. Symlinks are never followed (a tracked symlink to a
+ * directory is not a gitlink; following it can loop or leave the roots).
  */
-async function listFiles(root: string): Promise<string[]> {
+async function listRoot(root: string): Promise<Listing> {
+  let entries: string[];
   try {
     const { stdout } = await execFileAsync(
       "git",
       ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-      { maxBuffer: 64 * 1024 * 1024 }
+      { maxBuffer: LS_FILES_MAX_BUFFER }
     );
-    const out: string[] = [];
-    for (const rel of stdout.split("\0")) {
-      if (rel.length === 0) continue;
-      const abs = path.resolve(root, rel);
+    entries = splitNulList(stdout);
+  } catch {
+    return await walkRoot(root);
+  }
+
+  const listing: Listing = { files: [], excluded: [] };
+  try {
+    // `--directory` collapses a wholly ignored directory into one entry, so
+    // this stays cheap even next to a populated node_modules.
+    const { stdout } = await execFileAsync(
+      "git",
+      ["-C", root, "ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory"],
+      { maxBuffer: LS_FILES_MAX_BUFFER }
+    );
+    for (const rel of splitNulList(stdout)) listing.excluded.push(path.resolve(root, rel));
+  } catch {
+    // Advisory: without it a newly visible ignored file looks like a creation.
+  }
+
+  for (const rel of entries) {
+    const abs = path.resolve(root, rel);
+    let stats: import("node:fs").Stats;
+    try {
       // lstat: do not follow symlinks. Gitlinks (mode 160000) show up as a
       // single path; when checked out that path is a real directory.
-      let st: import("node:fs").Stats | null = null;
-      try {
-        st = await fs.lstat(abs);
-      } catch {
-        // vanished between ls-files and lstat — skip
-        continue;
-      }
-      if (st.isSymbolicLink()) continue;
-      if (st.isDirectory()) {
-        out.push(...(await listFiles(abs)));
-      } else if (st.isFile()) {
-        out.push(abs);
-      }
+      stats = await fs.lstat(abs);
+    } catch {
+      continue; // vanished between ls-files and lstat
     }
-    return out;
-  } catch {
-    return await walk(root);
+    if (stats.isSymbolicLink()) {
+      listing.excluded.push(abs);
+    } else if (stats.isDirectory()) {
+      const nested = await listRoot(abs);
+      listing.files.push(...nested.files);
+      listing.excluded.push(...nested.excluded);
+    } else if (stats.isFile()) {
+      listing.files.push(abs);
+    }
   }
+  return listing;
 }
 
-async function walk(dir: string): Promise<string[]> {
-  const out: string[] = [];
+async function walkRoot(dir: string): Promise<Listing> {
+  const listing: Listing = { files: [], excluded: [] };
   let entries: import("node:fs").Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
   } catch {
-    return out;
+    return listing;
   }
   for (const entry of entries) {
-    if (entry.isSymbolicLink()) continue;
     const abs = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (SKIP_DIRS.has(entry.name)) continue;
-      out.push(...(await walk(abs)));
+    if (entry.isSymbolicLink()) {
+      listing.excluded.push(abs);
+    } else if (entry.isDirectory()) {
+      if (SKIP_DIRS.has(entry.name)) {
+        listing.excluded.push(abs);
+        continue;
+      }
+      const nested = await walkRoot(abs);
+      listing.files.push(...nested.files);
+      listing.excluded.push(...nested.excluded);
     } else if (entry.isFile()) {
-      out.push(abs);
+      listing.files.push(abs);
     }
   }
-  return out;
+  return listing;
 }
 
-async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
-  let st: import("node:fs").Stats;
+/**
+ * Read one path into a {@link FileRecord}, or null when it is not a readable
+ * regular file. `expectedCanonicalPath` refuses a path whose physical identity
+ * moved since it was recorded (any component replaced by a symlink): the file
+ * we tracked is gone, and whatever the spelling now points at must not be read
+ * into an ACP update or a write-through.
+ */
+async function readFileRecord(abs: string, expectedCanonicalPath?: string): Promise<FileRecord | null> {
+  let stats: import("node:fs").Stats;
   try {
-    // Do not follow a regular-file path that was replaced with a symlink after
-    // the baseline listing, especially during direct candidate resnapshot.
-    st = await fs.lstat(abs);
+    stats = await fs.lstat(abs);
   } catch {
     return null;
   }
-  if (!st.isFile()) return null;
+  if (!stats.isFile()) return null;
   let canonicalPath: string;
   try {
     canonicalPath = await fs.realpath(abs);
   } catch {
     return null;
   }
+  if (expectedCanonicalPath !== undefined && canonicalPath !== expectedCanonicalPath) return null;
 
   // Never buffer multi-megabyte blobs into memory. Hash them as a stream so a
-  // same-size replacement with a preserved/coarse mtime is still reported.
-  if (st.size > MAX_TEXT_BYTES) {
+  // same-size replacement with a preserved/coarse mtime is still detected.
+  if (stats.size > MAX_TEXT_BYTES) {
     try {
       const hash = createHash("sha1");
       for await (const chunk of createReadStream(abs)) hash.update(chunk);
-      const sha1 = `oversized:${st.size}:${hash.digest("hex")}`;
       return {
-        sha1,
-        size: st.size,
-        text: null,
-        candidate: true,
-        initialSha1: sha1,
-        initialText: null,
-        canonicalPath
+        path: abs,
+        canonicalPath,
+        sha1: `oversized:${stats.size}:${hash.digest("hex")}`,
+        size: stats.size,
+        text: null
       };
     } catch {
       return null;
@@ -200,469 +274,168 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   try {
     buf = await fs.readFile(abs);
   } catch {
-    return null; // unreadable / vanished / not a regular file
+    return null;
   }
-  const sha1 = createHash("sha1").update(buf).digest("hex");
   // NUL byte *or* invalid UTF-8 => binary. Invalid UTF-8 must not be handed to
   // the client's text write-through (which would rewrite U+FFFD replacements).
   const isBinary = buf.includes(0) || !isValidUtf8(buf);
-  const text = !isBinary ? buf.toString("utf8") : null;
-  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1, initialText: text, canonicalPath };
-}
-
-function snapshotFromText(
-  text: string,
-  candidate: boolean,
-  initialSha1?: string,
-  initialText?: string | null,
-  canonicalPath?: string
-): FileSnapshot {
-  const buf = Buffer.from(text, "utf8");
-  if (buf.length > MAX_TEXT_BYTES) {
-    const sha1 = `oversized:${buf.length}:${createHash("sha1").update(buf).digest("hex")}`;
-    return { sha1, size: buf.length, text: null, candidate, initialSha1, initialText, canonicalPath };
-  }
-  const sha1 = createHash("sha1").update(buf).digest("hex");
   return {
-    sha1,
+    path: abs,
+    canonicalPath,
+    sha1: createHash("sha1").update(buf).digest("hex"),
     size: buf.length,
-    text,
-    candidate,
-    initialSha1,
-    initialText,
-    canonicalPath
+    text: isBinary ? null : buf.toString("utf8")
   };
 }
 
-/** Match a structured path to the spelling retained by the working-tree scan. */
-function snapshotKeyForPath(snapshot: WorkingTreeSnapshot, filePath: string): string {
-  const abs = path.resolve(filePath);
-  if (snapshot.has(abs)) return abs;
-  let canonical: string;
-  try {
-    canonical = realpathSync(abs);
-  } catch {
-    return abs;
-  }
-  for (const [key, file] of snapshot) {
-    if (file.canonicalPath === canonical) return key;
-  }
-  return abs;
-}
-
-/**
- * Byte offset of the start of 1-based line `line` in `text`, or null if the
- * file has fewer lines.
- */
-function offsetOfLine(text: string, line: number): number | null {
-  if (line < 1) return null;
-  if (line === 1) return 0;
-  let offset = 0;
-  for (let current = 1; current < line; current++) {
-    const nl = text.indexOf("\n", offset);
-    if (nl === -1) return null;
-    offset = nl + 1;
-  }
-  return offset;
-}
-
-/**
- * Replace one occurrence of `oldText` with `newText`. When `line` is set
- * (1-based), search starts at that line so a later repeated snippet is chosen
- * over the first match — matching agy `StartLine` on replace chunks.
- */
-export function replaceOccurrence(
-  text: string,
-  oldText: string,
-  newText: string,
-  line?: number
-): string | null {
-  const from = line !== undefined ? offsetOfLine(text, line) : 0;
-  if (from === null) return null;
-  const idx = text.indexOf(oldText, from);
-  if (idx === -1) return null;
-  return text.slice(0, idx) + newText + text.slice(idx + oldText.length);
-}
-
-export interface DiffBlockSpec {
-  oldText: string | null;
-  newText: string;
-  /** 1-based start line in the *pre-edit* file (agy StartLine). */
-  line?: number;
-}
-
-/**
- * Advance a snapshot entry to the post-edit content described by a structured
- * diff block, without reading disk. Disk may already include later shell edits
- * by the time the structured tool-call is polled; rereading would advance past
- * those too and suppress the synthetic update for them.
- *
- * `oldText`/`newText` may be whole-file bodies (`write_to_file`) or replacement
- * snippets (`replace_file_content`). Optional `line` (1-based) selects which
- * occurrence of a repeated snippet was replaced.
- */
-export function applyDiffBlockToSnapshot(
-  snapshot: WorkingTreeSnapshot,
-  filePath: string,
-  oldText: string | null,
-  newText: string,
-  line?: number
-): void {
-  applyDiffBlocksToSnapshot(snapshot, filePath, [{ oldText, newText, line }]);
-}
-
-/**
- * Apply one or more structured diff blocks for a single path. Multi-replace
- * chunks carry `StartLine` against the *original* file; applying them left-to-
- * right on a mutating buffer can invalidate later line numbers when an earlier
- * chunk changes the line count. Instead, locate every match on the original
- * text and apply from end to start so indices stay valid.
- */
-export function applyDiffBlocksToSnapshot(
-  snapshot: WorkingTreeSnapshot,
-  filePath: string,
-  blocks: DiffBlockSpec[]
-): void {
-  if (blocks.length === 0) return;
-
-  const abs = snapshotKeyForPath(snapshot, filePath);
-  const before = snapshot.get(abs);
-
-  // Full-file writes (oldText null) and missing/binary baselines cannot use
-  // multi-match positioning — fall back to sequential single-block rules.
-  if (blocks.some((b) => b.oldText === null) || before?.text == null) {
-    for (const block of blocks) {
-      applySingleDiffBlock(snapshot, abs, snapshot.get(abs), block);
+/** Canonicalize a path that may no longer exist, without following a symlink
+ *  that replaced any missing component. */
+async function canonicalizeMissing(abs: string): Promise<string> {
+  const suffix: string[] = [];
+  let ancestor = path.resolve(abs);
+  while (true) {
+    try {
+      return path.join(await fs.realpath(ancestor), ...suffix.reverse());
+    } catch {
+      const parent = path.dirname(ancestor);
+      if (parent === ancestor) return path.resolve(abs);
+      suffix.push(path.basename(ancestor));
+      ancestor = parent;
     }
-    return;
   }
-
-  const original = before.text;
-  type Op = { idx: number; oldLen: number; newText: string };
-  const ops: Op[] = [];
-
-  for (const block of blocks) {
-    const oldText = block.oldText!;
-    if (original === oldText) {
-      ops.push({ idx: 0, oldLen: original.length, newText: block.newText });
-      continue;
-    }
-    const from = block.line !== undefined ? offsetOfLine(original, block.line) : 0;
-    if (from === null) continue;
-    const idx = original.indexOf(oldText, from);
-    if (idx === -1) continue;
-    ops.push({ idx, oldLen: oldText.length, newText: block.newText });
-  }
-
-  if (ops.length === 0) {
-    // Nothing matched — same best-effort as a single failed apply.
-    const last = blocks[blocks.length - 1]!;
-    if (original === last.newText || original.includes(last.newText)) return;
-    return;
-  }
-
-  // End-to-start so earlier replacements do not shift later indices.
-  ops.sort((a, b) => b.idx - a.idx || b.oldLen - a.oldLen);
-  let result = original;
-  for (const op of ops) {
-    result = result.slice(0, op.idx) + op.newText + result.slice(op.idx + op.oldLen);
-  }
-  snapshot.set(
-    abs,
-    snapshotFromText(
-      result,
-      before.candidate !== false,
-      before.initialSha1 ?? before.sha1,
-      before.initialText ?? before.text,
-      before.canonicalPath
-    )
-  );
 }
 
-function applySingleDiffBlock(
-  snapshot: WorkingTreeSnapshot,
-  abs: string,
-  before: FileSnapshot | undefined,
-  block: DiffBlockSpec
-): void {
-  const { oldText, newText, line } = block;
-  let post: string;
-
-  if (oldText === null) {
-    post = newText;
-  } else if (before?.text != null) {
-    if (before.text === oldText) {
-      post = newText;
-    } else {
-      const applied = replaceOccurrence(before.text, oldText, newText, line);
-      if (applied !== null) {
-        post = applied;
-      } else if (before.text === newText || before.text.includes(newText)) {
-        return;
-      } else {
-        return;
-      }
-    }
-  } else {
-    post = newText;
+function rootFor(canonicalPath: string, roots: WorkspaceRoot[]): WorkspaceRoot | undefined {
+  for (const root of roots) {
+    const relative = path.relative(root.canonical, canonicalPath);
+    if (relative === "") return root;
+    if (path.isAbsolute(relative)) continue;
+    if (relative === ".." || relative.startsWith(`..${path.sep}`)) continue;
+    return root;
   }
-
-  snapshot.set(
-    abs,
-    snapshotFromText(
-      post,
-      before?.candidate ?? false,
-      before ? (before.initialSha1 ?? before.sha1) : undefined,
-      before ? (before.initialText ?? before.text) : undefined,
-      before?.canonicalPath ?? (() => {
-        try { return realpathSync(abs); } catch { return undefined; }
-      })()
-    )
-  );
+  return undefined;
 }
 
-/** Snapshot the working tree across one or more roots. */
-export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeSnapshot> {
-  const snapshot: WorkingTreeSnapshot = new Map();
-  const seenFiles = new Set<string>();
-  for (const root of await dedupeRoots(roots)) {
-    for (const abs of await listFiles(root)) {
-      if (snapshot.has(abs)) continue;
-      const file = await snapshotFile(abs);
-      if (!file || (file.canonicalPath && seenFiles.has(file.canonicalPath))) continue;
-      if (file.canonicalPath) seenFiles.add(file.canonicalPath);
-      // Keep the first configured spelling while deduplicating overlapping
-      // roots that list the same physical file through different paths.
-      snapshot.set(abs, file);
+/** Absolute path in the configured spelling of whichever root contains it. */
+function displayPathFor(canonicalPath: string, roots: WorkspaceRoot[]): string | undefined {
+  const root = rootFor(canonicalPath, roots);
+  if (!root) return undefined;
+  const relative = path.relative(root.canonical, canonicalPath);
+  return relative === "" ? root.display : path.join(root.display, relative);
+}
+
+function isUnder(target: string, prefixes: readonly string[]): boolean {
+  for (const prefix of prefixes) {
+    if (target === prefix || target.startsWith(prefix + path.sep)) return true;
+  }
+  return false;
+}
+
+/** Snapshot the working tree across one or more configured roots. */
+export async function snapshotWorkingTree(rootPaths: string[]): Promise<WorkingTreeSnapshot> {
+  const roots = await resolveRoots(rootPaths);
+  const snapshot: WorkingTreeSnapshot = { roots, files: new Map(), excluded: [] };
+  for (const root of roots) {
+    const listing = await listRoot(root.display);
+    snapshot.excluded.push(...listing.excluded);
+    for (const abs of listing.files) {
+      const record = await readFileRecord(abs);
+      // Overlapping roots list one physical file under several spellings; keep
+      // the first configured one so emitted paths stay stable.
+      if (!record || snapshot.files.has(record.canonicalPath)) continue;
+      snapshot.files.set(record.canonicalPath, record);
     }
   }
   return snapshot;
 }
 
-async function pathIsWithinRoots(
-  filePath: string,
-  roots: string[],
-  recordedCanonicalPath?: string
-): Promise<boolean> {
-  // The file and newly-created parent directories may have been deleted. Walk
-  // up to the deepest surviving ancestor, canonicalize it, then restore the
-  // missing suffix without following any replacement symlink.
-  let canonicalFile = recordedCanonicalPath;
-  if (!canonicalFile) {
-    const suffix: string[] = [];
-    let ancestor = path.resolve(filePath);
-    while (true) {
-      try {
-        canonicalFile = path.join(await fs.realpath(ancestor), ...suffix.reverse());
-        break;
-      } catch {
-        const parent = path.dirname(ancestor);
-        if (parent === ancestor) return false;
-        suffix.push(path.basename(ancestor));
-        ancestor = parent;
-      }
-    }
-  }
-  for (const root of await dedupeRoots(roots)) {
-    let canonicalRoot: string;
-    try {
-      canonicalRoot = await fs.realpath(root);
-    } catch {
+/**
+ * Record the current on-disk content of paths whose change has *already* been
+ * reported to the client (a recognized structured edit, or a synthetic one this
+ * module produced), so end-of-turn reconciliation only emits what is still
+ * unreflected. Call it while disk holds the reported content — before any
+ * write-through revert/replay dance, and again after a rejected edit is
+ * reverted. Paths outside the configured roots are ignored, which keeps the
+ * snapshot to files this workspace is responsible for.
+ */
+export async function observeEditedPaths(snapshot: WorkingTreeSnapshot, paths: string[]): Promise<void> {
+  for (const filePath of paths) {
+    const abs = path.resolve(filePath);
+    const record = await readFileRecord(abs);
+    const canonicalPath = record?.canonicalPath ?? (await canonicalizeMissing(abs));
+    if (!rootFor(canonicalPath, snapshot.roots)) continue;
+    if (!record) {
+      // The reported edit removed the file (a reverted creation, a delete).
+      // Forgetting it keeps a later recreation reportable as a creation.
+      snapshot.files.delete(canonicalPath);
       continue;
     }
-    const relative = path.relative(canonicalRoot, canonicalFile);
-    if (relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))) {
-      return true;
-    }
+    const retained = snapshot.files.get(canonicalPath)?.path
+      ?? displayPathFor(canonicalPath, snapshot.roots)
+      ?? abs;
+    snapshot.files.set(canonicalPath, { ...record, path: retained });
   }
-  return false;
 }
 
 /**
- * Use Git's own matcher to determine which newly listed paths were ignored by
- * the pre-turn .gitignore contents. Reconstructing only ignore files in a
- * temporary repository avoids mutating the real worktree and avoids a partial
- * reimplementation of gitignore pattern/negation semantics.
+ * Diff the working tree against what the client has been told (see
+ * {@link observeEditedPaths}). Added/modified text files become `reflected`
+ * edits; anything we cannot represent as a text diff becomes `unsupported`.
  */
-async function ignoredByBaselineRules(
-  baseline: WorkingTreeSnapshot,
-  candidates: string[]
-): Promise<Set<string>> {
-  const ignored = new Set<string>();
-  const byRepository = new Map<string, Array<{ abs: string; canonical: string }>>();
-  for (const abs of candidates) {
-    try {
-      const canonical = path.join(await fs.realpath(path.dirname(abs)), path.basename(abs));
-      const { stdout } = await execFileAsync(
-        "git",
-        ["-C", path.dirname(abs), "rev-parse", "--show-toplevel"]
-      );
-      const repository = path.resolve(stdout.trim());
-      const existing = byRepository.get(repository);
-      const candidate = { abs, canonical };
-      if (existing) existing.push(candidate);
-      else byRepository.set(repository, [candidate]);
-    } catch {
-      // Non-git roots use the recursive walker, where .gitignore never changes
-      // candidate visibility.
+export async function reconcileWorkingTree(snapshot: WorkingTreeSnapshot): Promise<ReconcileResult> {
+  const current = new Map<string, FileRecord>();
+  for (const root of snapshot.roots) {
+    for (const abs of (await listRoot(root.display)).files) {
+      const record = await readFileRecord(abs);
+      if (!record || current.has(record.canonicalPath)) continue;
+      current.set(record.canonicalPath, record);
     }
   }
 
-  for (const [repository, repositoryCandidates] of byRepository) {
-    const temp = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-ignore-"));
-    try {
-      await execFileAsync("git", ["-C", temp, "init", "-q"]);
-      for (const [ignoreFile, snapshot] of baseline) {
-        let canonicalIgnoreFile: string;
-        try {
-          canonicalIgnoreFile = path.join(
-            await fs.realpath(path.dirname(ignoreFile)),
-            path.basename(ignoreFile)
-          );
-        } catch {
-          continue;
-        }
-        if (
-          path.basename(ignoreFile) !== ".gitignore" ||
-          (canonicalIgnoreFile !== path.join(repository, ".gitignore") &&
-            !canonicalIgnoreFile.startsWith(repository + path.sep))
-        ) continue;
-        const text = snapshot.initialText ?? snapshot.text;
-        if (text == null) continue;
-        const relative = path.relative(repository, canonicalIgnoreFile);
-        const target = path.join(temp, relative);
-        await fs.mkdir(path.dirname(target), { recursive: true });
-        await fs.writeFile(target, text, "utf8");
-      }
-
-      for (const { abs, canonical } of repositoryCandidates) {
-        const relative = path.relative(repository, canonical);
-        try {
-          await execFileAsync("git", ["-C", temp, "check-ignore", "-q", "--no-index", "--", relative]);
-          ignored.add(abs);
-        } catch {
-          // Exit 1 means the path was visible under the baseline rules. Other
-          // matcher failures conservatively leave it eligible for reflection.
-        }
-      }
-    } finally {
-      await fs.rm(temp, { recursive: true, force: true });
-    }
-  }
-  return ignored;
-}
-
-/**
- * Diff the current working tree against a baseline snapshot. Callers that have
- * already reflected a recognized edit should {@link applyDiffBlockToSnapshot}
- * the baseline for that path first so only *further* changes are emitted.
- * Added/modified text files become `reflected` edits; binary/oversized/deleted
- * changes (and binary→text replacements we can't represent) become `unsupported`.
- */
-export async function reconcileWorkingTree(
-  baseline: WorkingTreeSnapshot,
-  roots: string[]
-): Promise<ReconcileResult> {
-  const current = await snapshotWorkingTree(roots);
   const reflected: ReflectedEdit[] = [];
   const unsupported: UnsupportedChange[] = [];
-  const structuredCandidates = new Set<string>();
-  const baselineByCanonical = new Map<string, FileSnapshot>();
-  const currentByCanonical = new Map<string, string>();
-  for (const file of baseline.values()) {
-    if (file.canonicalPath) baselineByCanonical.set(file.canonicalPath, file);
-  }
-  for (const [abs, file] of current) {
-    if (file.canonicalPath) currentByCanonical.set(file.canonicalPath, abs);
-  }
-  const currentKeyFor = (abs: string, before: FileSnapshot): string | undefined =>
-    current.has(abs) ? abs : before.canonicalPath ? currentByCanonical.get(before.canonicalPath) : undefined;
-  const baselineFor = (abs: string, now: FileSnapshot): FileSnapshot | undefined =>
-    baseline.get(abs) ?? (now.canonicalPath ? baselineByCanonical.get(now.canonicalPath) : undefined);
-
-  // A newly added ignore rule can remove a still-existing baseline candidate
-  // from `git ls-files --others --exclude-standard`. Snapshot those paths
-  // directly so an eligibility change is not misreported as a deletion.
-  for (const [abs, before] of baseline) {
-    if (currentKeyFor(abs, before)) continue;
-    // Structured baseline advancement can add an absolute path outside the
-    // configured roots. Only pull structured-only entries into reconciliation
-    // when their physical location belongs to this workspace.
-    if (before.candidate === false) {
-      if (!(await pathIsWithinRoots(abs, roots, before.canonicalPath))) continue;
-      structuredCandidates.add(abs);
-      // Do not read through an intermediate symlink that now redirects the
-      // same spelling outside the workspace. The recorded in-root file is a
-      // deletion; any replacement target is unrelated and must remain unread.
-      if (!(await pathIsWithinRoots(abs, roots))) continue;
-    }
-    const now = await snapshotFile(abs);
-    if (now) {
-      current.set(abs, now);
-      if (now.canonicalPath) currentByCanonical.set(now.canonicalPath, abs);
-    }
-  }
-
-  // Conversely, removing an ignore rule can expose a pre-existing file that
-  // was absent from the baseline. We cannot reconstruct its pre-turn content,
-  // so report it rather than inventing a creation and routing a destructive
-  // empty→content write-through. Nested .gitignore changes affect descendants.
-  const changedIgnoreRules = new Set<string>();
-  const paths = new Set([...baseline.keys(), ...current.keys()]);
-  for (const abs of paths) {
-    if (path.basename(abs) !== ".gitignore") continue;
-    const before = baseline.get(abs);
-    const now = current.get(abs);
-    const alignedBefore = before ?? (now ? baselineFor(abs, now) : undefined);
-    const alignedNow = now ?? (before ? current.get(currentKeyFor(abs, before) ?? "") : undefined);
-    if ((alignedBefore?.initialSha1 ?? alignedBefore?.sha1) !== alignedNow?.sha1) {
-      changedIgnoreRules.add(abs);
-    }
-  }
-  const couldBeAffectedByIgnoreChange = (abs: string): boolean => {
-    if (path.basename(abs) === ".gitignore") return false;
-    for (const ignoreFile of changedIgnoreRules) {
-      const dir = path.dirname(ignoreFile);
-      if (abs.startsWith(dir + path.sep)) return true;
-    }
-    return false;
+  const unrepresentable = (record: FileRecord): UnsupportedReason =>
+    record.size > MAX_TEXT_BYTES ? "oversized" : "binary";
+  const pushChange = (before: FileRecord, after: FileRecord): void => {
+    // No representable oldText (or newText): treating a binary/oversized file
+    // as a text create would mislead the client and corrupt write-through.
+    if (before.text === null) unsupported.push({ path: before.path, reason: unrepresentable(before) });
+    else if (after.text === null) unsupported.push({ path: before.path, reason: unrepresentable(after) });
+    else reflected.push({ path: before.path, oldText: before.text, newText: after.text });
   };
-  const newlyListedAfterIgnoreChange = [...current.keys()].filter(
-    (abs) => !baselineFor(abs, current.get(abs)!) && couldBeAffectedByIgnoreChange(abs)
-  );
-  const ignoredBeforeTurn = await ignoredByBaselineRules(baseline, newlyListedAfterIgnoreChange);
 
-  for (const [abs, now] of current) {
-    const before = baselineFor(abs, now);
-    if (before && before.sha1 === now.sha1) continue; // unchanged
-    if (!before && ignoredBeforeTurn.has(abs)) {
-      unsupported.push({ path: abs, reason: "ignore-rules-changed" });
+  for (const [canonicalPath, after] of current) {
+    const before = snapshot.files.get(canonicalPath);
+    if (before) {
+      if (before.sha1 !== after.sha1) pushChange(before, after);
       continue;
     }
-    if (now.text === null) {
-      unsupported.push({ path: abs, reason: now.size > MAX_TEXT_BYTES ? "oversized" : "binary" });
-      continue;
+    // Absent from the pre-turn snapshot: a genuine creation, unless the
+    // pre-turn listing deliberately skipped it (gitignored, symlinked, skip
+    // list) and an edit to those rules has now exposed it. Both spellings come
+    // from listings over the same root, so this comparison never crosses
+    // aliases.
+    if (isUnder(after.path, snapshot.excluded)) {
+      unsupported.push({ path: after.path, reason: "previously-excluded" });
+    } else if (after.text === null) {
+      unsupported.push({ path: after.path, reason: unrepresentable(after) });
+    } else {
+      reflected.push({ path: after.path, oldText: null, newText: after.text });
     }
-    // File existed before but was binary/oversized: we have no representable
-    // oldText, and treating it as a create would mislead the client + corrupt
-    // write-through. Report rather than invent a creation.
-    if (before && before.text === null) {
-      unsupported.push({
-        path: abs,
-        reason: before.size > MAX_TEXT_BYTES ? "oversized" : "binary"
-      });
-      continue;
-    }
-    reflected.push({ path: abs, oldText: before?.text ?? null, newText: now.text });
   }
 
-  for (const [abs, before] of baseline) {
-    if (currentKeyFor(abs, before)) continue;
-    // Structured edits can introduce entries absent from the initial listing.
-    // Report a later deletion when that physical path belongs to a configured
-    // root, while continuing to ignore structured edits outside the workspace.
-    if (before.candidate === false && !structuredCandidates.has(abs)) continue;
-    unsupported.push({ path: abs, reason: "deleted" });
+  for (const [canonicalPath, before] of snapshot.files) {
+    if (current.has(canonicalPath)) continue;
+    // Missing from the listing is not the same as missing from disk: a new
+    // ignore rule hides a file that is still there, and observed structured
+    // edits can target paths the listing never covered. Read the recorded
+    // path directly, refusing any spelling whose physical identity moved.
+    const after = await readFileRecord(before.path, canonicalPath);
+    if (!after) {
+      unsupported.push({ path: before.path, reason: "deleted" });
+    } else if (before.sha1 !== after.sha1) {
+      pushChange(before, { ...after, path: before.path });
+    }
   }
 
   return { reflected, unsupported };

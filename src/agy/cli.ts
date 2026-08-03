@@ -18,8 +18,8 @@ import {
   type ClientFileSystem
 } from "./edit/bridge.js";
 import {
-  applyDiffBlocksToSnapshot,
   buildReconcileEditUpdate,
+  observeEditedPaths,
   reconcileWorkingTree,
   snapshotWorkingTree,
   toDisplayPath,
@@ -52,27 +52,13 @@ function permissionSignature(row: StepRow): string {
   return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
 }
 
-/**
- * Advance the edit baseline from a completed structured-edit tool-call.
- * Groups multi-replace chunks by path so StartLine values stay relative to the
- * pre-edit file (see {@link applyDiffBlocksToSnapshot}).
- */
-function noteStructuredEditOnBaseline(
-  baseline: WorkingTreeSnapshot,
-  cwd: string,
-  toolCall: SessionUpdate
-): void {
-  const byPath = new Map<string, ReturnType<typeof diffBlocks>>();
-  for (const block of diffBlocks(toolCall)) {
-    const abs = path.resolve(cwd, block.path);
-    const list = byPath.get(abs);
-    if (list) list.push(block);
-    else byPath.set(abs, [block]);
-  }
-  for (const [abs, blocks] of byPath) {
-    applyDiffBlocksToSnapshot(baseline, abs, blocks);
-  }
+/** Absolute paths a tool-call's diff reported. Targets may be session-relative. */
+function editedPaths(cwd: string, toolCall: SessionUpdate): string[] {
+  return [...new Set(diffBlocks(toolCall).map((block) => path.resolve(cwd, block.path)))];
 }
+
+/** How many unsupported changes to name individually in the warning line. */
+const UNSUPPORTED_DETAIL_LIMIT = 10;
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
 
@@ -359,23 +345,14 @@ export class AgyCliSession {
     // get reflected through ACP. Emitting the synthetic session/update needs no
     // client fs capability, so do this for every client (v1 and v2); the client
     // write-through is layered on later only when a bridge is available.
-    // When a recognized edit lands we advance the baseline for that path (see
-    // noteRecognizedEdit below) so a later shell change to the same file is
-    // still reconciled rather than suppressed for the rest of the turn.
     let editBaseline: WorkingTreeSnapshot | null = null;
     try {
       editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
     } catch {
       editBaseline = null;
     }
-    // Advance baseline from the structured diff content (not disk): by the time
-    // we observe the tool-call, a later shell edit may already be on disk.
-    // Multi-replace chunks for one path are applied together so StartLine stays
-    // relative to the pre-edit text.
-    const noteRecognizedEdit = (toolCall: SessionUpdate): void => {
-      if (!editBaseline) return;
-      noteStructuredEditOnBaseline(editBaseline, this.config.cwd, toolCall);
-    };
+    const observeReportedEdit = (toolCall: SessionUpdate): Promise<void> =>
+      this.observeReportedEdit(editBaseline, toolCall);
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
@@ -579,10 +556,13 @@ export class AgyCliSession {
           // (accept-edits / skip-permissions), or it just passed through the
           // live gate above and agy applied it. Either way, if the client can
           // take the write itself, hand it off so its native diff/review UI
-          // (e.g. Zed's Review Changes panel) tracks it. On keep, advance the
-          // edit baseline from the structured diff so end-of-turn reconciliation
-          // only picks up *further* unstructured changes (and is not fooled by
-          // disk that already includes a later shell edit).
+          // (e.g. Zed's Review Changes panel) tracks it.
+          //
+          // Disk holds exactly the content this update reports, right now:
+          // record it before any write-through revert/replay so end-of-turn
+          // reconciliation cannot mistake the client's own write (or the
+          // intermediate revert) for an unreflected change.
+          await observeReportedEdit(toolCall);
           let rejected = false;
           try {
             if (fsBridge) {
@@ -616,9 +596,10 @@ export class AgyCliSession {
               rejected = true;
             }
           } finally {
-            // Reject leaves disk (and baseline) at the pre-edit state — do not
-            // advance. Diff-block paths may be session-relative.
-            if (!rejected) noteRecognizedEdit(toolCall);
+            // A reject put the pre-edit text back on disk; that restoration is
+            // the answer the client already has, so re-record it rather than
+            // reporting it again as an unstructured change.
+            if (rejected) await observeReportedEdit(toolCall);
           }
         }
         if (this.#cancelled) break;
@@ -665,14 +646,33 @@ export class AgyCliSession {
   }
 
   /**
-   * After a turn, diff the working tree against the (possibly advanced)
-   * baseline and reflect any change agy made that never surfaced as a
-   * recognized structured edit (shell edits, unrecognized payloads) through
-   * ACP: emit a synthetic edit update for every client, and additionally hand
-   * the write to the client when it advertises fs capabilities. Discovery
-   * failures are best-effort (logged); notification failures propagate so the
-   * caller does not go idle after a dropped update. Changes that can't be
-   * shown as a text diff (binary/oversized/deletions) are reported, not
+   * Record the on-disk content of the paths a reported edit covers, so
+   * end-of-turn reconciliation only emits changes the client has *not* been
+   * told about. Best effort: a snapshot we fail to refresh at worst re-reports
+   * a change the client already has, which is preferable to failing the turn.
+   */
+  private async observeReportedEdit(
+    baseline: WorkingTreeSnapshot | null,
+    toolCall: SessionUpdate
+  ): Promise<void> {
+    if (!baseline) return;
+    try {
+      await observeEditedPaths(baseline, editedPaths(this.config.cwd, toolCall));
+    } catch (error) {
+      console.error(`[agy-acp] WARN: could not record reported edit state: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * After a turn, diff the working tree against what the client has been told
+   * (see {@link observeReportedEdit}) and reflect any change agy made that
+   * never surfaced as a recognized structured edit (shell edits, unrecognized
+   * payloads) through ACP: emit a synthetic edit update for every client, and
+   * additionally hand the write to the client when it advertises fs
+   * capabilities. Discovery failures are best-effort (logged); notification
+   * failures propagate so the caller does not go idle after a dropped update.
+   * Changes that can't be shown as a text diff (binary/oversized/deletions,
+   * files whose pre-turn content was never captured) are reported, not
    * dropped (#76).
    */
   private async reflectUnstructuredEdits(
@@ -680,11 +680,10 @@ export class AgyCliSession {
     fsBridge: ClientFileSystem | undefined,
     onUpdate: (update: SessionUpdate) => Promise<void>
   ): Promise<void> {
-    const roots = [this.config.cwd, ...this.config.additionalDirectories];
     let reflected: Awaited<ReturnType<typeof reconcileWorkingTree>>["reflected"];
     let unsupported: Awaited<ReturnType<typeof reconcileWorkingTree>>["unsupported"];
     try {
-      ({ reflected, unsupported } = await reconcileWorkingTree(baseline, roots));
+      ({ reflected, unsupported } = await reconcileWorkingTree(baseline));
     } catch (error) {
       // Filesystem scan is best-effort — a transient stat failure shouldn't
       // fail the whole turn after agy already finished.
@@ -718,11 +717,16 @@ export class AgyCliSession {
       }
     }
     if (unsupported.length > 0) {
-      const detail = unsupported
+      // One removed ignore rule can expose a whole directory; name a bounded
+      // sample instead of a line with thousands of paths on it.
+      const named = unsupported
+        .slice(0, UNSUPPORTED_DETAIL_LIMIT)
         .map((change) => `${toDisplayPath(change.path, this.config.cwd)} (${change.reason})`)
         .join(", ");
+      const rest = unsupported.length - Math.min(unsupported.length, UNSUPPORTED_DETAIL_LIMIT);
       console.error(
-        `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${detail}`
+        `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${named}` +
+          (rest > 0 ? `, and ${rest} more` : "")
       );
     }
   }
@@ -791,13 +795,13 @@ export class AgyCliSession {
       const pollOnce = async () => {
         for (const update of poller.poll()) {
           await onUpdate(update);
-          // Advance the baseline from the structured diff (not disk): a shell
-          // edit may already have landed before this poll observes the tool-call.
-          // Only completed edits — pending/failed lifecycle updates must not
-          // move the baseline to proposed content that never landed on disk.
+          // Record what disk holds for the reported paths, so end-of-turn
+          // reconciliation only reports what the client has *not* been told.
+          // Only completed edits: pending/failed lifecycle updates describe
+          // proposed content that may never land.
           const rawUpdate = update as unknown as { status?: string };
-          if (editBaseline && isEditToolCall(update) && rawUpdate.status === "completed") {
-            noteStructuredEditOnBaseline(editBaseline, this.config.cwd, update);
+          if (isEditToolCall(update) && rawUpdate.status === "completed") {
+            await this.observeReportedEdit(editBaseline, update);
           }
         }
       };

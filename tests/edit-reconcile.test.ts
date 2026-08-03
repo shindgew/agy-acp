@@ -5,13 +5,12 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   MAX_TEXT_BYTES,
-  applyDiffBlockToSnapshot,
-  applyDiffBlocksToSnapshot,
   buildReconcileEditUpdate,
   isValidUtf8,
+  observeEditedPaths,
   reconcileWorkingTree,
-  replaceOccurrence,
-  snapshotWorkingTree
+  snapshotWorkingTree,
+  type WorkingTreeSnapshot
 } from "../src/agy/edit/reconcile.js";
 import { diffBlocks } from "../src/agy/edit/revert.js";
 
@@ -27,6 +26,11 @@ function gitRepo(): string {
   return dir;
 }
 
+/** Absolute path each snapshot entry would emit, in listing order. */
+function emittedPaths(snapshot: WorkingTreeSnapshot): string[] {
+  return [...snapshot.files.values()].map((file) => file.path);
+}
+
 describe("reconcileWorkingTree", () => {
   it("reflects a modified tracked file with the pre-edit content as oldText", async () => {
     const dir = gitRepo();
@@ -37,7 +41,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "after", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(unsupported).toEqual([]);
     expect(reflected).toEqual([{ path: file, oldText: "before", newText: "after" }]);
 
@@ -50,13 +54,13 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "new.txt");
     fs.writeFileSync(file, "created", "utf8");
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([{ path: file, oldText: null, newText: "created" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not re-emit a path after the baseline is advanced past a recognized edit", async () => {
+  it("does not re-emit a path whose reported content was observed", async () => {
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
     fs.writeFileSync(file, "before", "utf8");
@@ -64,11 +68,9 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "after-structured", "utf8");
-    // Advance from the structured diff content (not a disk reread).
-    applyDiffBlockToSnapshot(baseline, file, "before", "after-structured");
+    await observeEditedPaths(baseline, [file]);
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -80,77 +82,54 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    // Structured edit mid, then a shell edit to final — both may be on disk
-    // before the structured tool-call is observed. Baseline must advance from
-    // the diff content, not a disk reread (which would see "final").
-    fs.writeFileSync(file, "final", "utf8");
-    applyDiffBlockToSnapshot(baseline, file, "before", "mid");
+    fs.writeFileSync(file, "structured", "utf8");
+    await observeEditedPaths(baseline, [file]);
+    fs.writeFileSync(file, "shell", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(unsupported).toEqual([]);
-    expect(reflected).toEqual([{ path: file, oldText: "mid", newText: "final" }]);
+    expect(reflected).toEqual([{ path: file, oldText: "structured", newText: "shell" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("applies partial replace snippets to the baseline without reading disk", async () => {
+  it("observes disk instead of replaying a reported diff that no longer matches", async () => {
+    // A shell command changed the file before the structured write completed,
+    // so the reported oldText ("shell") is not the pre-turn text ("before").
+    // Observing disk keeps the client's view consistent; replaying the reported
+    // snippet against the pre-turn text would fail and emit a second,
+    // contradictory before→final edit.
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
-    fs.writeFileSync(file, "before\nOLD\nafter", "utf8");
+    fs.writeFileSync(file, "before", "utf8");
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    // Disk already has a later shell edit; structured replace was OLD→NEW.
-    fs.writeFileSync(file, "before\nSHELL\nafter", "utf8");
-    applyDiffBlockToSnapshot(baseline, file, "OLD", "NEW");
-    expect(baseline.get(file)?.text).toBe("before\nNEW\nafter");
+    fs.writeFileSync(file, "shell", "utf8");
+    fs.writeFileSync(file, "final", "utf8");
+    await observeEditedPaths(baseline, [file]);
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([{ path: file, oldText: "before\nNEW\nafter", newText: "before\nSHELL\nafter" }]);
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("replaces the StartLine-targeted occurrence when a snippet repeats", () => {
-    const text = "x\nOLD\ny\nOLD\nz";
-    // First occurrence (default) — line 2.
-    expect(replaceOccurrence(text, "OLD", "NEW")).toBe("x\nNEW\ny\nOLD\nz");
-    // Second occurrence via StartLine 4.
-    expect(replaceOccurrence(text, "OLD", "NEW", 4)).toBe("x\nOLD\ny\nNEW\nz");
-    // applyDiffBlockToSnapshot carries the same line disambiguation.
-    const snap = new Map([
-      ["/r/a.txt", { sha1: "x", size: text.length, text }]
-    ]);
-    applyDiffBlockToSnapshot(snap, "/r/a.txt", "OLD", "NEW", 4);
-    expect(snap.get("/r/a.txt")?.text).toBe("x\nOLD\ny\nNEW\nz");
-  });
+  it("re-observing a reverted edit does not report the restoration as a change", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
 
-  it("applies multi-replace StartLines against the original text, not intermediate state", () => {
-    // Line 2 is a 3-line block; replacing it with one line shifts later lines up.
-    // Chunk 2's StartLine 6 is relative to the *original* file.
-    const original = "keep\nAAA\nBBB\nCCC\nmid\nOLD\nend";
-    // lines: 1 keep, 2 AAA, 3 BBB, 4 CCC, 5 mid, 6 OLD, 7 end
-    const snap = new Map([
-      ["/r/a.txt", { sha1: "x", size: original.length, text: original }]
-    ]);
-    applyDiffBlocksToSnapshot(snap, "/r/a.txt", [
-      { oldText: "AAA\nBBB\nCCC", newText: "X", line: 2 },
-      { oldText: "OLD", newText: "NEW", line: 6 }
-    ]);
-    expect(snap.get("/r/a.txt")?.text).toBe("keep\nX\nmid\nNEW\nend");
-  });
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "edited", "utf8");
+    await observeEditedPaths(baseline, [file]);
+    // Local review rejected the edit: revert put the pre-edit text back.
+    fs.writeFileSync(file, "before", "utf8");
+    await observeEditedPaths(baseline, [file]);
 
-  it("round-trips StartLine through diffBlocks when present on the content block", () => {
-    const update = {
-      sessionUpdate: "tool_call",
-      toolCallId: "t1",
-      kind: "edit",
-      status: "completed",
-      content: [{ type: "diff", path: "/r/a.txt", oldText: "OLD", newText: "NEW", line: 4 }]
-    };
-    expect(diffBlocks(update as never)).toEqual([
-      { path: "/r/a.txt", oldText: "OLD", newText: "NEW", line: 4 }
-    ]);
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("ignores gitignored files", async () => {
@@ -161,9 +140,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(path.join(dir, "ignored.txt"), "secret", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([]);
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -177,17 +154,19 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", ".gitignore"]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    expect(baseline.has(ignoredFile)).toBe(false);
+    expect(emittedPaths(baseline)).not.toContain(ignoredFile);
+    expect(baseline.excluded).toContain(ignoredFile);
     fs.writeFileSync(ignoreFile, "", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([{ path: ignoreFile, oldText: "ignored.txt\n", newText: "" }]);
-    expect(unsupported).toEqual([{ path: ignoredFile, reason: "ignore-rules-changed" }]);
+    expect(unsupported).toEqual([{ path: ignoredFile, reason: "previously-excluded" }]);
+    expect(fs.readFileSync(ignoredFile, "utf8")).toBe("pre-existing");
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("retains ignore-change detection after a structured edit advances the baseline", async () => {
+  it("keeps pre-turn exclusions intact after observing a structured ignore-rule edit", async () => {
     const dir = gitRepo();
     const ignoreFile = path.join(dir, ".gitignore");
     const ignoredFile = path.join(dir, "ignored.txt");
@@ -196,12 +175,12 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", ".gitignore"]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    applyDiffBlockToSnapshot(baseline, ignoreFile, "ignored.txt\n", "");
     fs.writeFileSync(ignoreFile, "", "utf8");
+    await observeEditedPaths(baseline, [ignoreFile]);
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([{ path: ignoredFile, reason: "ignore-rules-changed" }]);
+    expect(unsupported).toEqual([{ path: ignoredFile, reason: "previously-excluded" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -218,7 +197,7 @@ describe("reconcileWorkingTree", () => {
     fs.mkdirSync(path.dirname(createdFile), { recursive: true });
     fs.writeFileSync(createdFile, "export {};\n", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toHaveLength(2);
     expect(reflected).toEqual(expect.arrayContaining([
       { path: ignoreFile, oldText: "", newText: "dist/\n" },
@@ -238,12 +217,34 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", ".gitignore"]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    expect(baseline.has(file)).toBe(true);
+    expect(emittedPaths(baseline)).toContain(file);
     fs.writeFileSync(ignoreFile, "later-ignored.txt\n", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([{ path: ignoreFile, oldText: "", newText: "later-ignored.txt\n" }]);
     expect(unsupported).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reflects a change to a file a new ignore rule hides", async () => {
+    const dir = gitRepo();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const file = path.join(dir, "later-ignored.txt");
+    fs.writeFileSync(ignoreFile, "", "utf8");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(ignoreFile, "later-ignored.txt\n", "utf8");
+    fs.writeFileSync(file, "after", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual(expect.arrayContaining([
+      { path: ignoreFile, oldText: "", newText: "later-ignored.txt\n" },
+      { path: file, oldText: "before", newText: "after" }
+    ]));
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -254,7 +255,7 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "blob.bin");
     fs.writeFileSync(file, Buffer.from([0x00, 0x01, 0x02, 0x00]));
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
 
@@ -265,11 +266,12 @@ describe("reconcileWorkingTree", () => {
     const dir = gitRepo();
     const baseline = await snapshotWorkingTree([dir]);
     const file = path.join(dir, "bad.bin");
-    // Lone 0xff is not valid UTF-8 and has no NUL — previously misclassified as text.
+    // Lone 0xff is not valid UTF-8 and has no NUL — text write-through would
+    // rewrite it as U+FFFD.
     fs.writeFileSync(file, Buffer.from([0xff]));
 
     expect(isValidUtf8(Buffer.from([0xff]))).toBe(false);
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
 
@@ -283,10 +285,10 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    expect(baseline.get(file)?.text).toBeNull();
+    expect(baseline.files.get(fs.realpathSync(file))?.text).toBeNull();
     fs.writeFileSync(file, "now text", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
 
@@ -299,7 +301,7 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "big.txt");
     fs.writeFileSync(file, "a".repeat(MAX_TEXT_BYTES + 1), "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "oversized" }]);
 
@@ -309,17 +311,15 @@ describe("reconcileWorkingTree", () => {
   it("does not buffer an oversized baseline file into memory as text", async () => {
     const dir = gitRepo();
     const file = path.join(dir, "huge.bin");
-    // Write just over the limit; snapshot must record size+null text without
-    // treating it as routable text content.
     fs.writeFileSync(file, Buffer.alloc(MAX_TEXT_BYTES + 1, 1));
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    const snap = baseline.get(file);
-    expect(snap).toBeDefined();
-    expect(snap!.text).toBeNull();
-    expect(snap!.size).toBe(MAX_TEXT_BYTES + 1);
-    expect(snap!.sha1.startsWith("oversized:")).toBe(true);
+    const record = baseline.files.get(fs.realpathSync(file));
+    expect(record).toBeDefined();
+    expect(record!.text).toBeNull();
+    expect(record!.size).toBe(MAX_TEXT_BYTES + 1);
+    expect(record!.sha1.startsWith("oversized:")).toBe(true);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -335,7 +335,7 @@ describe("reconcileWorkingTree", () => {
     fs.writeFileSync(file, Buffer.alloc(MAX_TEXT_BYTES + 1, 2));
     fs.utimesSync(file, originalTimes.atime, originalTimes.mtime);
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "oversized" }]);
 
@@ -351,7 +351,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.rmSync(file);
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
 
@@ -364,9 +364,7 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([]);
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -381,10 +379,92 @@ describe("reconcileWorkingTree", () => {
     // A change under node_modules must be skipped by the walk.
     fs.writeFileSync(path.join(dir, "node_modules", "dep.js"), "changed", "utf8");
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
+    const { reflected } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([{ path: path.join(dir, "src.txt"), oldText: null, newText: "hello" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("ignores observed paths outside the configured roots", async () => {
+    const dir = gitRepo();
+    const outside = tmpDir();
+    const file = path.join(outside, "structured.txt");
+    fs.writeFileSync(file, "created", "utf8");
+
+    const baseline = await snapshotWorkingTree([dir]);
+    await observeEditedPaths(baseline, [file]);
+    expect(baseline.files.size).toBe(0);
+    fs.rmSync(file);
+
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
+
+  it("reports deletion of an in-root file created by a structured edit", async () => {
+    const dir = gitRepo();
+    const createdDir = path.join(dir, "created");
+    const file = path.join(createdDir, "structured.txt");
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.mkdirSync(createdDir);
+    fs.writeFileSync(file, "created", "utf8");
+    await observeEditedPaths(baseline, [file]);
+    fs.rmSync(createdDir, { recursive: true });
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not report a surviving ignored structured creation as deleted", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "ignored.txt");
+    fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "created", "utf8");
+    await observeEditedPaths(baseline, [file]);
+
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reflects a later change to an ignored file a structured edit created", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "ignored.txt");
+    fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "created", "utf8");
+    await observeEditedPaths(baseline, [file]);
+    fs.writeFileSync(file, "changed by shell", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual([{ path: file, oldText: "created", newText: "changed by shell" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not follow a tracked symlink to a directory", async () => {
+    const dir = gitRepo();
+    const outside = tmpDir();
+    fs.writeFileSync(path.join(outside, "secret.txt"), "nope", "utf8");
+    fs.symlinkSync(outside, path.join(dir, "linkdir"));
+    execFileSync("git", ["-C", dir, "add", "-A"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    expect(emittedPaths(baseline).some((p) => p.includes("secret.txt"))).toBe(false);
+    expect(emittedPaths(baseline)).not.toContain(path.join(dir, "linkdir"));
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 
   it.skipIf(process.platform === "win32")(
@@ -401,15 +481,14 @@ describe("reconcileWorkingTree", () => {
 
       // Keep the first spelling (cwd) while deduplicating by physical root.
       const baseline = await snapshotWorkingTree([alias, dir]);
-      expect([...baseline.keys()].filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
+      expect(baseline.roots).toHaveLength(1);
+      expect(emittedPaths(baseline)).toEqual([aliasedFile]);
       fs.writeFileSync(file, "after", "utf8");
       // A structured tool may report the canonical absolute path even though
       // the workspace scan retained the cwd alias.
-      applyDiffBlockToSnapshot(baseline, file, "before", "after");
+      await observeEditedPaths(baseline, [file]);
 
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
-      expect(unsupported).toEqual([]);
-      expect(reflected).toEqual([]);
+      expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
       fs.rmSync(aliasParent, { recursive: true, force: true });
       fs.rmSync(dir, { recursive: true, force: true });
@@ -431,10 +510,10 @@ describe("reconcileWorkingTree", () => {
       execFileSync("git", ["-C", dir, "add", "."]);
 
       const baseline = await snapshotWorkingTree([alias, dir]);
-      expect([...baseline.keys()].filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
+      expect(emittedPaths(baseline).filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
       fs.writeFileSync(file, "after", "utf8");
 
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
       expect(unsupported).toEqual([]);
       expect(reflected).toEqual([{ path: aliasedFile, oldText: "before", newText: "after" }]);
 
@@ -456,12 +535,12 @@ describe("reconcileWorkingTree", () => {
       const aliasedFile = path.join(alias, "new.txt");
       const baseline = await snapshotWorkingTree([alias, dir]);
       fs.writeFileSync(file, "structured", "utf8");
-      applyDiffBlockToSnapshot(baseline, file, null, "structured");
+      await observeEditedPaths(baseline, [file]);
 
-      expect(await reconcileWorkingTree(baseline, [alias, dir])).toEqual({ reflected: [], unsupported: [] });
+      expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
       fs.writeFileSync(file, "later", "utf8");
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
       expect(unsupported).toEqual([]);
       expect(reflected).toEqual([{ path: aliasedFile, oldText: "structured", newText: "later" }]);
 
@@ -470,42 +549,38 @@ describe("reconcileWorkingTree", () => {
     }
   );
 
-  it("reports deletion of an in-root file created by a structured edit", async () => {
-    const dir = gitRepo();
-    const createdDir = path.join(dir, "created");
-    const file = path.join(createdDir, "structured.txt");
-    const baseline = await snapshotWorkingTree([dir]);
-    fs.mkdirSync(createdDir);
-    fs.writeFileSync(file, "created", "utf8");
-    applyDiffBlockToSnapshot(baseline, file, null, "created");
-    expect(baseline.get(file)?.candidate).toBe(false);
-    fs.rmSync(createdDir, { recursive: true });
+  it.skipIf(process.platform === "win32")(
+    "matches ignore-rule exposure across a symlinked root and its canonical parent",
+    async () => {
+      const dir = gitRepo();
+      const subdir = path.join(dir, "subdir");
+      const aliasParent = tmpDir();
+      const alias = path.join(aliasParent, "alias");
+      const ignoreFile = path.join(dir, ".gitignore");
+      const hidden = path.join(subdir, "hidden.txt");
+      fs.mkdirSync(subdir);
+      fs.symlinkSync(subdir, alias, "dir");
+      fs.writeFileSync(ignoreFile, "subdir/hidden.txt\n", "utf8");
+      fs.writeFileSync(hidden, "pre-existing", "utf8");
+      execFileSync("git", ["-C", dir, "add", ".gitignore"]);
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+      // cwd is the symlinked subdirectory; the extra root is its canonical parent.
+      const baseline = await snapshotWorkingTree([alias, dir]);
+      expect(emittedPaths(baseline).some((p) => p.endsWith("hidden.txt"))).toBe(false);
+      fs.writeFileSync(ignoreFile, "", "utf8");
 
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+      expect(reflected).toEqual([{ path: ignoreFile, oldText: "subdir/hidden.txt\n", newText: "" }]);
+      expect(unsupported).toEqual([{ path: path.join(alias, "hidden.txt"), reason: "previously-excluded" }]);
+      expect(fs.readFileSync(hidden, "utf8")).toBe("pre-existing");
 
-  it("does not report a surviving ignored structured creation as deleted", async () => {
-    const dir = gitRepo();
-    const file = path.join(dir, "ignored.txt");
-    fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n", "utf8");
-    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
-    const baseline = await snapshotWorkingTree([dir]);
-    fs.writeFileSync(file, "created", "utf8");
-    applyDiffBlockToSnapshot(baseline, file, null, "created");
-
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([]);
-
-    fs.rmSync(dir, { recursive: true, force: true });
-  });
+      fs.rmSync(aliasParent, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  );
 
   it.skipIf(process.platform === "win32")(
-    "uses structured physical identity after an in-root symlink to outside is removed",
+    "ignores a structured path that resolves outside the roots through a symlink",
     async () => {
       const dir = gitRepo();
       const outside = tmpDir();
@@ -514,11 +589,11 @@ describe("reconcileWorkingTree", () => {
       fs.symlinkSync(outside, link, "dir");
       const baseline = await snapshotWorkingTree([dir]);
       fs.writeFileSync(file, "created", "utf8");
-      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      await observeEditedPaths(baseline, [file]);
       fs.rmSync(file);
       fs.rmSync(link);
 
-      expect(await reconcileWorkingTree(baseline, [dir])).toEqual({ reflected: [], unsupported: [] });
+      expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
       fs.rmSync(dir, { recursive: true, force: true });
       fs.rmSync(outside, { recursive: true, force: true });
@@ -526,7 +601,7 @@ describe("reconcileWorkingTree", () => {
   );
 
   it.skipIf(process.platform === "win32")(
-    "reports an in-root structured file replaced by an outside symlink as deleted",
+    "reports an in-root observed file replaced by an outside symlink as deleted",
     async () => {
       const dir = gitRepo();
       const outside = tmpDir();
@@ -535,11 +610,11 @@ describe("reconcileWorkingTree", () => {
       const baseline = await snapshotWorkingTree([dir]);
       fs.writeFileSync(file, "created", "utf8");
       fs.writeFileSync(target, "outside", "utf8");
-      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      await observeEditedPaths(baseline, [file]);
       fs.rmSync(file);
       fs.symlinkSync(target, file);
 
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
       expect(reflected).toEqual([]);
       expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
       expect(fs.readFileSync(target, "utf8")).toBe("outside");
@@ -560,12 +635,12 @@ describe("reconcileWorkingTree", () => {
       const baseline = await snapshotWorkingTree([dir]);
       fs.mkdirSync(createdDir);
       fs.writeFileSync(file, "created", "utf8");
-      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      await observeEditedPaths(baseline, [file]);
       fs.rmSync(createdDir, { recursive: true });
       fs.writeFileSync(target, "outside secret", "utf8");
       fs.symlinkSync(outside, createdDir, "dir");
 
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
       expect(reflected).toEqual([]);
       expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
       expect(fs.readFileSync(target, "utf8")).toBe("outside secret");
@@ -575,66 +650,33 @@ describe("reconcileWorkingTree", () => {
     }
   );
 
-  it("does not report structured-only baseline entries as deletions", async () => {
-    const dir = gitRepo();
-    const outside = tmpDir();
-    const file = path.join(outside, "structured.txt");
-    fs.writeFileSync(file, "created", "utf8");
+  it.skipIf(process.platform === "win32")(
+    "does not follow a baseline file replaced by a symlink during direct resnapshot",
+    async () => {
+      const dir = gitRepo();
+      const outside = tmpDir();
+      const ignoreFile = path.join(dir, ".gitignore");
+      const file = path.join(dir, "hidden.txt");
+      const target = path.join(outside, "target.txt");
+      fs.writeFileSync(ignoreFile, "", "utf8");
+      fs.writeFileSync(file, "inside", "utf8");
+      fs.writeFileSync(target, "outside secret", "utf8");
+      execFileSync("git", ["-C", dir, "add", ".gitignore"]);
 
-    const baseline = await snapshotWorkingTree([dir]);
-    applyDiffBlockToSnapshot(baseline, file, null, "created");
-    expect(baseline.get(file)?.candidate).toBe(false);
+      const baseline = await snapshotWorkingTree([dir]);
+      fs.rmSync(file);
+      fs.symlinkSync(target, file);
+      fs.writeFileSync(ignoreFile, "hidden.txt\n", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([]);
-    expect(unsupported).toEqual([]);
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+      expect(reflected).toEqual([{ path: ignoreFile, oldText: "", newText: "hidden.txt\n" }]);
+      expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+      expect(fs.readFileSync(target, "utf8")).toBe("outside secret");
 
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(outside, { recursive: true, force: true });
-  });
-
-  it("does not follow a tracked symlink to a directory", async () => {
-    const dir = gitRepo();
-    const outside = tmpDir();
-    fs.writeFileSync(path.join(outside, "secret.txt"), "nope", "utf8");
-    // Symlink into the repo that points at an external directory.
-    fs.symlinkSync(outside, path.join(dir, "linkdir"));
-    execFileSync("git", ["-C", dir, "add", "-A"]);
-
-    const baseline = await snapshotWorkingTree([dir]);
-    // The symlink itself is not a regular file snapshot; external contents
-    // must not be walked via symlink-following.
-    expect([...baseline.keys()].some((p) => p.includes("secret.txt"))).toBe(false);
-    expect(baseline.has(path.join(dir, "linkdir"))).toBe(false);
-
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(outside, { recursive: true, force: true });
-  });
-
-  it("does not follow a baseline file replaced by a symlink during direct resnapshot", async () => {
-    const dir = gitRepo();
-    const outside = tmpDir();
-    const ignoreFile = path.join(dir, ".gitignore");
-    const file = path.join(dir, "hidden.txt");
-    const target = path.join(outside, "target.txt");
-    fs.writeFileSync(ignoreFile, "", "utf8");
-    fs.writeFileSync(file, "inside", "utf8");
-    fs.writeFileSync(target, "outside secret", "utf8");
-    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
-
-    const baseline = await snapshotWorkingTree([dir]);
-    fs.rmSync(file);
-    fs.symlinkSync(target, file);
-    fs.writeFileSync(ignoreFile, "hidden.txt\n", "utf8");
-
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
-    expect(reflected).toEqual([{ path: ignoreFile, oldText: "", newText: "hidden.txt\n" }]);
-    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
-    expect(fs.readFileSync(target, "utf8")).toBe("outside secret");
-
-    fs.rmSync(dir, { recursive: true, force: true });
-    fs.rmSync(outside, { recursive: true, force: true });
-  });
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  );
 
   it("recurses into a checked-out submodule without applying parent ignore rules", async () => {
     const root = tmpDir();
@@ -671,14 +713,14 @@ describe("reconcileWorkingTree", () => {
     const inside = path.join(parent, "vendor", "inside.txt");
     const created = path.join(parent, "vendor", "new.txt");
     const baseline = await snapshotWorkingTree([parent]);
-    expect(baseline.has(inside)).toBe(true);
+    expect(emittedPaths(baseline)).toContain(inside);
 
     // Parent ignore rules do not cross the nested repository boundary. Changing
     // the parent rule must not make the submodule creation look newly exposed.
     fs.writeFileSync(parentIgnore, "*.log\n", "utf8");
     fs.writeFileSync(inside, "sub-after", "utf8");
     fs.writeFileSync(created, "sub-created", "utf8");
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [parent]);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(unsupported).toEqual([]);
     expect(reflected).toHaveLength(3);
     expect(reflected).toEqual(expect.arrayContaining([
