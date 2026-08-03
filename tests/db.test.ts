@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationDb } from "../src/agy/db/database.js";
-import { ReplayCache } from "../src/agy/db/replay.js";
+import { ConversationDb, type DbStat, statConversation } from "../src/agy/db/database.js";
+import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
@@ -2766,6 +2766,150 @@ describe("ReplayCache", () => {
     expect(cache.get(dir, "conv-replay-mutation", { skipNarration: false })?.updates).toMatchObject([
       { content: { text: "complete result" } }
     ]);
+  });
+
+  it("rebuilds cached replay after an in-place step update the (mtime,size) check misses", () => {
+    const dbPath = path.join(dir, "conv-replay-same-size.db");
+    const db = createConversationDb(dir, "conv-replay-same-size");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) });
+
+    // Pin the main-file mtime to a fixed, ms-precision value so we can restore it
+    // exactly after the update and defeat the old (mtime, size) staleness check.
+    const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
+    fs.utimesSync(dbPath, pinnedTime, pinnedTime);
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
+    expect(first?.updates).toMatchObject([{ content: { text: "hello" } }]);
+    const sizeBefore = fs.statSync(dbPath).size;
+
+    // Same string length ("hello" vs "world") keeps the main-file byte size unchanged.
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "world" }));
+    db.close();
+
+    // Restore the exact mtime the cache recorded: with size also unchanged, only the
+    // SQLite header change counter differs, so this fails unless the widened
+    // fingerprint (change counter / WAL / journal) is doing the work.
+    fs.utimesSync(dbPath, pinnedTime, pinnedTime);
+    expect(fs.statSync(dbPath).size).toBe(sizeBefore);
+
+    const second = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
+    expect(second?.updates).toMatchObject([{ content: { text: "world" } }]);
+    expect(second?.updates).not.toBe(first?.updates);
+  });
+
+  it("detects committed WAL state changes via the wal-index when WAL metadata is unchanged", () => {
+    const db = createConversationDb(dir, "conv-wal-committed");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
+    db.close();
+
+    // Synthesize WAL + wal-index sidecars. A commit publishes mxFrame and the
+    // cumulative frame checksum in the wal-index; that publication is the same
+    // event that makes new rows visible to SQLite readers, so keying the
+    // fingerprint on it catches commits even when the WAL file's size/mtime
+    // (same-tick write, reused spill frames) and the main-file change counter
+    // (pre-checkpoint) all stay fixed.
+    const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
+    fs.writeFileSync(path.join(dir, "conv-wal-committed.db-wal"), Buffer.alloc(64));
+    fs.utimesSync(path.join(dir, "conv-wal-committed.db-wal"), pinnedTime, pinnedTime);
+
+    const shmPath = path.join(dir, "conv-wal-committed.db-shm");
+    const shm = Buffer.alloc(48);
+    shm.writeUInt32LE(3007000, 0); // wal-index iVersion
+    shm.writeUInt32LE(10, 16); // mxFrame
+    shm.writeUInt32LE(0x11111111, 24); // aFrameCksum[0]
+    shm.writeUInt32LE(0x22222222, 28); // aFrameCksum[1]
+    fs.writeFileSync(shmPath, shm);
+    fs.utimesSync(shmPath, pinnedTime, pinnedTime);
+
+    const before = statConversation(dir, "conv-wal-committed");
+    expect(before?.walMxFrame).toBe(10);
+    expect(before?.walFrameCksum0).toBe(0x11111111);
+    expect(before?.walFrameCksum1).toBe(0x22222222);
+
+    // Publish a new commit: mxFrame advances and the checksum chain moves,
+    // while every other tracked field stays identical.
+    shm.writeUInt32LE(12, 16);
+    shm.writeUInt32LE(0x33333333, 24);
+    shm.writeUInt32LE(0x44444444, 28);
+    fs.writeFileSync(shmPath, shm);
+    fs.utimesSync(shmPath, pinnedTime, pinnedTime);
+
+    const after = statConversation(dir, "conv-wal-committed");
+    expect(after?.mtimeMs).toBe(before?.mtimeMs);
+    expect(after?.walMtimeMs).toBe(before?.walMtimeMs);
+    expect(after?.walSize).toBe(before?.walSize);
+    expect(after?.changeCounter).toBe(before?.changeCounter);
+    expect(after?.walMxFrame).toBe(12);
+    expect(after?.walFrameCksum0).toBe(0x33333333);
+    expect(isDbStatUnchanged(before as DbStat, after as DbStat)).toBe(false);
+  });
+
+  it("parses big-endian wal-index headers", () => {
+    const db = createConversationDb(dir, "conv-wal-be");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
+    db.close();
+    fs.writeFileSync(path.join(dir, "conv-wal-be.db-wal"), Buffer.alloc(64));
+
+    const shm = Buffer.alloc(48);
+    shm.writeUInt32BE(3007000, 0);
+    shm.writeUInt32BE(7, 16);
+    shm.writeUInt32BE(0xaaaaaaaa, 24);
+    shm.writeUInt32BE(0xbbbbbbbb, 28);
+    fs.writeFileSync(path.join(dir, "conv-wal-be.db-shm"), shm);
+
+    const stat = statConversation(dir, "conv-wal-be");
+    expect(stat?.walMxFrame).toBe(7);
+    expect(stat?.walFrameCksum0).toBe(0xaaaaaaaa);
+    expect(stat?.walFrameCksum1).toBe(0xbbbbbbbb);
+  });
+
+  it("isDbStatUnchanged treats any single fingerprint field as significant", () => {
+    const base: DbStat = {
+      mtimeMs: 100,
+      size: 4096,
+      walMtimeMs: 200,
+      walSize: 32,
+      walMxFrame: 10,
+      walFrameCksum0: 0x11111111,
+      walFrameCksum1: 0x22222222,
+      journalMtimeMs: undefined,
+      journalSize: undefined,
+      changeCounter: 7
+    };
+    expect(isDbStatUnchanged(base, { ...base })).toBe(true);
+
+    const fields: Array<[keyof DbStat, number]> = [
+      ["mtimeMs", 101],
+      ["size", 4097],
+      ["walMtimeMs", 201],
+      ["walSize", 33],
+      ["walMxFrame", 11],
+      ["walFrameCksum0", 0x33333333],
+      ["walFrameCksum1", 0x44444444],
+      ["changeCounter", 8]
+    ];
+    for (const [field, value] of fields) {
+      expect(isDbStatUnchanged(base, { ...base, [field]: value })).toBe(false);
+    }
+  });
+
+  it("allows manual invalidation via invalidate() and clear()", () => {
+    const db = createConversationDb(dir, "conv-replay-inv");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "v1" }) });
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(first?.updates).toMatchObject([{ content: { text: "v1" } }]);
+
+    cache.invalidate("conv-replay-inv");
+    const second = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(second?.updates).not.toBe(first?.updates);
+
+    cache.clear();
+    const third = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(third?.updates).not.toBe(second?.updates);
+    db.close();
   });
 
   it("rebuilds cached locations when a referenced file is deleted", () => {

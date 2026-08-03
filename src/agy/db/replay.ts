@@ -1,9 +1,10 @@
 // Full conversation-history replay for session/load, with a validated cache.
 //
-// Replays are cached per conversation and validated by file (mtime, size). On
-// an exact cache hit the result is returned without touching SQLite. Any file
-// change triggers a full rebuild so replay message grouping and mutable step
-// snapshots do not depend on prior cache state.
+// Replays are cached per conversation and validated by a file fingerprint
+// (main-file mtime/size/change counter, journal stats, and committed wal-index
+// state). On an exact cache hit the result is returned without touching
+// SQLite. Any fingerprint change triggers a full rebuild so replay message
+// grouping and mutable step snapshots do not depend on prior cache state.
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb, type DbStat, statConversation } from "./database.js";
@@ -50,6 +51,22 @@ function buildReplay(dir: string, id: string, opts: ReplayOptions): BuiltReplay 
   }
 }
 
+/** True when two DB fingerprints are identical across every tracked field. */
+export function isDbStatUnchanged(a: DbStat, b: DbStat): boolean {
+  return (
+    a.mtimeMs === b.mtimeMs &&
+    a.size === b.size &&
+    a.walMtimeMs === b.walMtimeMs &&
+    a.walSize === b.walSize &&
+    a.walMxFrame === b.walMxFrame &&
+    a.walFrameCksum0 === b.walFrameCksum0 &&
+    a.walFrameCksum1 === b.walFrameCksum1 &&
+    a.journalMtimeMs === b.journalMtimeMs &&
+    a.journalSize === b.journalSize &&
+    a.changeCounter === b.changeCounter
+  );
+}
+
 /**
  * Replays conversations into ACP updates, caching results so repeat loads of an
  * unchanged conversation are cheap.
@@ -74,7 +91,7 @@ export class ReplayCache {
       const locationStateUnchanged = [...entry.locationReadability].every(
         ([filePath, wasReadable]) => isReadableFile(filePath) === wasReadable
       );
-      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size && locationStateUnchanged) {
+      if (isDbStatUnchanged(entry.stat, stat) && locationStateUnchanged) {
         return { updates: entry.updates, maxIdx: entry.maxIdx };
       }
     }
@@ -84,5 +101,15 @@ export class ReplayCache {
     if (!built) return null;
     this.cache.set(id, { ...built, stat, skipNarration: opts.skipNarration, cwd: opts.cwd });
     return { updates: built.updates, maxIdx: built.maxIdx };
+  }
+
+  /** Manually invalidate cache for a specific conversation ID. */
+  invalidate(id: string): void {
+    this.cache.delete(id);
+  }
+
+  /** Clear all cached conversations. */
+  clear(): void {
+    this.cache.clear();
   }
 }

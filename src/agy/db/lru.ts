@@ -25,6 +25,14 @@ export class Lru<K, V> {
     }
   }
 
+  delete(key: K): boolean {
+    return this.map.delete(key);
+  }
+
+  clear(): void {
+    this.map.clear();
+  }
+
   get size(): number {
     return this.map.size;
   }
