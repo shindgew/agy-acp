@@ -397,6 +397,75 @@ describe("queue and steer-by-cancel", () => {
     });
   });
 
+  it("serializes competing steer requests", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const executedPrompts: string[] = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const promptIdx = args.indexOf("--print");
+        executedPrompts.push(promptIdx >= 0 ? args[promptIdx + 1] : "");
+        const db = createConversationDb(dir, `conv-steer-serial-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        () => {}
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const p2 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer 1" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+        const p3 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer 2" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        await waitFor(() => processes.length === 2);
+        expect(executedPrompts).toEqual(["prompt 1", "steer 1"]);
+        processes[1].finish();
+        await p1;
+        await p2;
+
+        await waitFor(() => processes.length === 3);
+        expect(executedPrompts).toEqual(["prompt 1", "steer 1", "steer 2"]);
+        processes[2].finish();
+        await p3;
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   // The ACP SDK request helper does not currently expose a request-abort
   // option, so queued request cancellation is covered by session close below.
   it.skip("cancels a specific queued prompt via signal abort", async () => {
