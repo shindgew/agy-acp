@@ -2798,43 +2798,70 @@ describe("ReplayCache", () => {
     expect(second?.updates).not.toBe(first?.updates);
   });
 
-  it("detects a same-size, same-mtime WAL rewrite that keeps the WAL generation", () => {
-    const db = createConversationDb(dir, "conv-wal-rewrite");
+  it("detects committed WAL state changes via the wal-index when WAL metadata is unchanged", () => {
+    const db = createConversationDb(dir, "conv-wal-committed");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
     db.close();
 
-    // Synthesize a WAL sidecar. When a spilled WAL transaction rolls back, its
-    // uncommitted frames stay allocated; a later smaller commit overwrites that
-    // tail without restarting the WAL, so the size, mtime (same tick), header
-    // salts, and checkpoint sequence all stay fixed while committed content
-    // changes. Only a content fingerprint catches this.
-    const walPath = path.join(dir, "conv-wal-rewrite.db-wal");
-    const wal = Buffer.alloc(64);
-    wal.writeUInt32BE(0x377f0682, 0); // WAL magic (little-endian variant)
-    wal.writeUInt32BE(1, 12); // checkpoint sequence
-    wal.writeUInt32BE(0xaaaaaaaa, 16); // salt-1
-    wal.writeUInt32BE(0x00000001, 20); // salt-2
-    wal.fill(0x11, 32); // frame bytes
-    fs.writeFileSync(walPath, wal);
+    // Synthesize WAL + wal-index sidecars. A commit publishes mxFrame and the
+    // cumulative frame checksum in the wal-index; that publication is the same
+    // event that makes new rows visible to SQLite readers, so keying the
+    // fingerprint on it catches commits even when the WAL file's size/mtime
+    // (same-tick write, reused spill frames) and the main-file change counter
+    // (pre-checkpoint) all stay fixed.
     const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
-    fs.utimesSync(walPath, pinnedTime, pinnedTime);
+    fs.writeFileSync(path.join(dir, "conv-wal-committed.db-wal"), Buffer.alloc(64));
+    fs.utimesSync(path.join(dir, "conv-wal-committed.db-wal"), pinnedTime, pinnedTime);
 
-    const before = statConversation(dir, "conv-wal-rewrite");
-    expect(before?.walHash).toBeDefined();
+    const shmPath = path.join(dir, "conv-wal-committed.db-shm");
+    const shm = Buffer.alloc(48);
+    shm.writeUInt32LE(3007000, 0); // wal-index iVersion
+    shm.writeUInt32LE(10, 16); // mxFrame
+    shm.writeUInt32LE(0x11111111, 24); // aFrameCksum[0]
+    shm.writeUInt32LE(0x22222222, 28); // aFrameCksum[1]
+    fs.writeFileSync(shmPath, shm);
+    fs.utimesSync(shmPath, pinnedTime, pinnedTime);
 
-    // Overwrite the frame tail in place: same length, same header generation.
-    wal.fill(0x22, 32);
-    fs.writeFileSync(walPath, wal);
-    fs.utimesSync(walPath, pinnedTime, pinnedTime);
+    const before = statConversation(dir, "conv-wal-committed");
+    expect(before?.walMxFrame).toBe(10);
+    expect(before?.walFrameCksum0).toBe(0x11111111);
+    expect(before?.walFrameCksum1).toBe(0x22222222);
 
-    const after = statConversation(dir, "conv-wal-rewrite");
-    // Every metadata field the fingerprint previously relied on is identical...
+    // Publish a new commit: mxFrame advances and the checksum chain moves,
+    // while every other tracked field stays identical.
+    shm.writeUInt32LE(12, 16);
+    shm.writeUInt32LE(0x33333333, 24);
+    shm.writeUInt32LE(0x44444444, 28);
+    fs.writeFileSync(shmPath, shm);
+    fs.utimesSync(shmPath, pinnedTime, pinnedTime);
+
+    const after = statConversation(dir, "conv-wal-committed");
+    expect(after?.mtimeMs).toBe(before?.mtimeMs);
     expect(after?.walMtimeMs).toBe(before?.walMtimeMs);
     expect(after?.walSize).toBe(before?.walSize);
     expect(after?.changeCounter).toBe(before?.changeCounter);
-    // ...but the content hash moved, so the fingerprint reports a change.
-    expect(after?.walHash).not.toBe(before?.walHash);
+    expect(after?.walMxFrame).toBe(12);
+    expect(after?.walFrameCksum0).toBe(0x33333333);
     expect(isDbStatUnchanged(before as DbStat, after as DbStat)).toBe(false);
+  });
+
+  it("parses big-endian wal-index headers", () => {
+    const db = createConversationDb(dir, "conv-wal-be");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
+    db.close();
+    fs.writeFileSync(path.join(dir, "conv-wal-be.db-wal"), Buffer.alloc(64));
+
+    const shm = Buffer.alloc(48);
+    shm.writeUInt32BE(3007000, 0);
+    shm.writeUInt32BE(7, 16);
+    shm.writeUInt32BE(0xaaaaaaaa, 24);
+    shm.writeUInt32BE(0xbbbbbbbb, 28);
+    fs.writeFileSync(path.join(dir, "conv-wal-be.db-shm"), shm);
+
+    const stat = statConversation(dir, "conv-wal-be");
+    expect(stat?.walMxFrame).toBe(7);
+    expect(stat?.walFrameCksum0).toBe(0xaaaaaaaa);
+    expect(stat?.walFrameCksum1).toBe(0xbbbbbbbb);
   });
 
   it("isDbStatUnchanged treats any single fingerprint field as significant", () => {
@@ -2843,19 +2870,23 @@ describe("ReplayCache", () => {
       size: 4096,
       walMtimeMs: 200,
       walSize: 32,
-      walHash: "aaa",
+      walMxFrame: 10,
+      walFrameCksum0: 0x11111111,
+      walFrameCksum1: 0x22222222,
       journalMtimeMs: undefined,
       journalSize: undefined,
       changeCounter: 7
     };
     expect(isDbStatUnchanged(base, { ...base })).toBe(true);
 
-    const fields: Array<[keyof DbStat, number | string]> = [
+    const fields: Array<[keyof DbStat, number]> = [
       ["mtimeMs", 101],
       ["size", 4097],
       ["walMtimeMs", 201],
       ["walSize", 33],
-      ["walHash", "bbb"],
+      ["walMxFrame", 11],
+      ["walFrameCksum0", 0x33333333],
+      ["walFrameCksum1", 0x44444444],
       ["changeCounter", 8]
     ];
     for (const [field, value] of fields) {

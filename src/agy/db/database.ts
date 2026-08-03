@@ -6,7 +6,6 @@
 // that's needed.
 
 import Database from "better-sqlite3";
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeErrorDetails, decodePermissions, decodeTaskDetails } from "./columns.js";
@@ -65,25 +64,48 @@ export interface DbStat {
   journalSize?: number;
   changeCounter: number;
   /**
-   * Hash of the full WAL file content. In WAL mode the main-file change
-   * counter only advances on checkpoint, and WAL metadata alone cannot prove
-   * the content is unchanged: a RESTART checkpoint can leave the file at the
-   * same size/mtime while frames are rewritten, and a rolled-back transaction's
-   * spilled frames stay allocated so a later smaller commit overwrites that
-   * tail without even bumping the header salts or checkpoint sequence. Hashing
-   * the content catches any such same-size, same-mtime, same-generation rewrite.
-   * A torn read while a writer is mid-append only causes a spurious rebuild
-   * (safe direction), never a stale hit.
+   * Committed WAL state from the wal-index (`-shm`) header: the committed frame
+   * count (mxFrame) and the cumulative checksum chain through that frame. In
+   * WAL mode the main-file change counter only advances on checkpoint, and WAL
+   * file metadata/content cannot prove the committed state is unchanged: commit
+   * frames reach the file before mxFrame is published, RESTART checkpoints
+   * leave the file allocated, and rolled-back spill frames are reused without
+   * bumping header salts. The wal-index is the same publication point SQLite
+   * readers consult, so keying on it ties the fingerprint to exactly the
+   * snapshot a replay build reads. A torn shm read only causes a spurious
+   * rebuild (safe direction), never a stale hit.
    */
-  walHash?: string;
+  walMxFrame?: number;
+  walFrameCksum0?: number;
+  walFrameCksum1?: number;
 }
 
-/** Hash the WAL file's full content, or undefined when absent/unreadable. */
-function readWalContentHash(walPath: string): string | undefined {
+/** Known wal-index format version (WalIndexHdr.iVersion). */
+const WAL_INDEX_VERSION = 3007000;
+
+/** Read committed WAL state from the wal-index (`-shm`) header, or null when
+ *  absent/short/unparseable. Fixed 48-byte read; never reads the WAL itself. */
+function readWalIndexState(shmPath: string): {
+  mxFrame: number;
+  frameCksum0: number;
+  frameCksum1: number;
+} | null {
   try {
-    return createHash("sha256").update(fs.readFileSync(walPath)).digest("hex");
+    const fd = fs.openSync(shmPath, "r");
+    try {
+      const buf = Buffer.alloc(48);
+      if (fs.readSync(fd, buf, 0, 48, 0) !== 48) return null;
+      // The wal-index uses the writer's native byte order; detect it via the
+      // known iVersion constant at offset 0.
+      const little = buf.readUInt32LE(0) === WAL_INDEX_VERSION;
+      if (!little && buf.readUInt32BE(0) !== WAL_INDEX_VERSION) return null;
+      const u32 = (off: number): number => (little ? buf.readUInt32LE(off) : buf.readUInt32BE(off));
+      return { mxFrame: u32(16), frameCksum0: u32(24), frameCksum1: u32(28) };
+    } finally {
+      fs.closeSync(fd);
+    }
   } catch {
-    return undefined;
+    return null;
   }
 }
 
@@ -95,13 +117,19 @@ export function statConversation(dir: string, id: string): DbStat | null {
 
     let walMtimeMs: number | undefined;
     let walSize: number | undefined;
-    let walHash: string | undefined;
+    let walMxFrame: number | undefined;
+    let walFrameCksum0: number | undefined;
+    let walFrameCksum1: number | undefined;
     try {
-      const walPath = `${dbPath}-wal`;
-      const ws = fs.statSync(walPath);
+      const ws = fs.statSync(`${dbPath}-wal`);
       walMtimeMs = ws.mtimeMs;
       walSize = ws.size;
-      walHash = readWalContentHash(walPath);
+      const walIndex = readWalIndexState(`${dbPath}-shm`);
+      if (walIndex) {
+        walMxFrame = walIndex.mxFrame;
+        walFrameCksum0 = walIndex.frameCksum0;
+        walFrameCksum1 = walIndex.frameCksum1;
+      }
     } catch {
       // no wal file
     }
@@ -136,7 +164,9 @@ export function statConversation(dir: string, id: string): DbStat | null {
       size: s.size,
       walMtimeMs,
       walSize,
-      walHash,
+      walMxFrame,
+      walFrameCksum0,
+      walFrameCksum1,
       journalMtimeMs,
       journalSize,
       changeCounter

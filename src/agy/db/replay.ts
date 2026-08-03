@@ -1,9 +1,10 @@
 // Full conversation-history replay for session/load, with a validated cache.
 //
-// Replays are cached per conversation and validated by file (mtime, size). On
-// an exact cache hit the result is returned without touching SQLite. Any file
-// change triggers a full rebuild so replay message grouping and mutable step
-// snapshots do not depend on prior cache state.
+// Replays are cached per conversation and validated by a file fingerprint
+// (main-file mtime/size/change counter, journal stats, and committed wal-index
+// state). On an exact cache hit the result is returned without touching
+// SQLite. Any fingerprint change triggers a full rebuild so replay message
+// grouping and mutable step snapshots do not depend on prior cache state.
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb, type DbStat, statConversation } from "./database.js";
@@ -57,7 +58,9 @@ export function isDbStatUnchanged(a: DbStat, b: DbStat): boolean {
     a.size === b.size &&
     a.walMtimeMs === b.walMtimeMs &&
     a.walSize === b.walSize &&
-    a.walHash === b.walHash &&
+    a.walMxFrame === b.walMxFrame &&
+    a.walFrameCksum0 === b.walFrameCksum0 &&
+    a.walFrameCksum1 === b.walFrameCksum1 &&
     a.journalMtimeMs === b.journalMtimeMs &&
     a.journalSize === b.journalSize &&
     a.changeCounter === b.changeCounter
