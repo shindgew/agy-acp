@@ -403,15 +403,36 @@ describe("reconcileWorkingTree", () => {
       const baseline = await snapshotWorkingTree([alias, dir]);
       expect([...baseline.keys()].filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
       fs.writeFileSync(file, "after", "utf8");
+      // A structured tool may report the canonical absolute path even though
+      // the workspace scan retained the cwd alias.
+      applyDiffBlockToSnapshot(baseline, file, "before", "after");
 
       const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
       expect(unsupported).toEqual([]);
-      expect(reflected).toEqual([{ path: aliasedFile, oldText: "before", newText: "after" }]);
+      expect(reflected).toEqual([]);
 
       fs.rmSync(aliasParent, { recursive: true, force: true });
       fs.rmSync(dir, { recursive: true, force: true });
     }
   );
+
+  it("does not report structured-only baseline entries as deletions", async () => {
+    const dir = gitRepo();
+    const outside = tmpDir();
+    const file = path.join(outside, "structured.txt");
+    fs.writeFileSync(file, "created", "utf8");
+
+    const baseline = await snapshotWorkingTree([dir]);
+    applyDiffBlockToSnapshot(baseline, file, null, "created");
+    expect(baseline.get(file)?.candidate).toBe(false);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  });
 
   it("does not follow a tracked symlink to a directory", async () => {
     const dir = gitRepo();

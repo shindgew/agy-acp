@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createReadStream, promises as fs } from "node:fs";
+import { createReadStream, promises as fs, realpathSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
@@ -40,6 +40,8 @@ export interface FileSnapshot {
   initialSha1?: string;
   /** Original listed text, retained to evaluate pre-turn ignore rules. */
   initialText?: string | null;
+  /** Physical file identity used to match structured paths across aliases. */
+  canonicalPath?: string;
 }
 
 /** Absolute file path -> snapshot. */
@@ -166,6 +168,12 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
     return null;
   }
   if (!st.isFile()) return null;
+  let canonicalPath: string;
+  try {
+    canonicalPath = await fs.realpath(abs);
+  } catch {
+    return null;
+  }
 
   // Never buffer multi-megabyte blobs into memory. Hash them as a stream so a
   // same-size replacement with a preserved/coarse mtime is still reported.
@@ -174,7 +182,15 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
       const hash = createHash("sha1");
       for await (const chunk of createReadStream(abs)) hash.update(chunk);
       const sha1 = `oversized:${st.size}:${hash.digest("hex")}`;
-      return { sha1, size: st.size, text: null, candidate: true, initialSha1: sha1, initialText: null };
+      return {
+        sha1,
+        size: st.size,
+        text: null,
+        candidate: true,
+        initialSha1: sha1,
+        initialText: null,
+        canonicalPath
+      };
     } catch {
       return null;
     }
@@ -191,19 +207,20 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   // the client's text write-through (which would rewrite U+FFFD replacements).
   const isBinary = buf.includes(0) || !isValidUtf8(buf);
   const text = !isBinary ? buf.toString("utf8") : null;
-  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1, initialText: text };
+  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1, initialText: text, canonicalPath };
 }
 
 function snapshotFromText(
   text: string,
   candidate: boolean,
   initialSha1?: string,
-  initialText?: string | null
+  initialText?: string | null,
+  canonicalPath?: string
 ): FileSnapshot {
   const buf = Buffer.from(text, "utf8");
   if (buf.length > MAX_TEXT_BYTES) {
     const sha1 = `oversized:${buf.length}:${createHash("sha1").update(buf).digest("hex")}`;
-    return { sha1, size: buf.length, text: null, candidate, initialSha1, initialText };
+    return { sha1, size: buf.length, text: null, candidate, initialSha1, initialText, canonicalPath };
   }
   const sha1 = createHash("sha1").update(buf).digest("hex");
   return {
@@ -212,8 +229,25 @@ function snapshotFromText(
     text,
     candidate,
     initialSha1,
-    initialText
+    initialText,
+    canonicalPath
   };
+}
+
+/** Match a structured path to the spelling retained by the working-tree scan. */
+function snapshotKeyForPath(snapshot: WorkingTreeSnapshot, filePath: string): string {
+  const abs = path.resolve(filePath);
+  if (snapshot.has(abs)) return abs;
+  let canonical: string;
+  try {
+    canonical = realpathSync(abs);
+  } catch {
+    return abs;
+  }
+  for (const [key, file] of snapshot) {
+    if (file.canonicalPath === canonical) return key;
+  }
+  return abs;
 }
 
 /**
@@ -291,7 +325,7 @@ export function applyDiffBlocksToSnapshot(
 ): void {
   if (blocks.length === 0) return;
 
-  const abs = path.resolve(filePath);
+  const abs = snapshotKeyForPath(snapshot, filePath);
   const before = snapshot.get(abs);
 
   // Full-file writes (oldText null) and missing/binary baselines cannot use
@@ -339,7 +373,8 @@ export function applyDiffBlocksToSnapshot(
       result,
       before.candidate !== false,
       before.initialSha1 ?? before.sha1,
-      before.initialText ?? before.text
+      before.initialText ?? before.text,
+      before.canonicalPath
     )
   );
 }
@@ -378,7 +413,10 @@ function applySingleDiffBlock(
       post,
       before?.candidate ?? false,
       before ? (before.initialSha1 ?? before.sha1) : undefined,
-      before ? (before.initialText ?? before.text) : undefined
+      before ? (before.initialText ?? before.text) : undefined,
+      before?.canonicalPath ?? (() => {
+        try { return realpathSync(abs); } catch { return undefined; }
+      })()
     )
   );
 }
@@ -546,7 +584,8 @@ export async function reconcileWorkingTree(
     reflected.push({ path: abs, oldText: before?.text ?? null, newText: now.text });
   }
 
-  for (const [abs] of baseline) {
+  for (const [abs, before] of baseline) {
+    if (before.candidate === false) continue;
     if (!current.has(abs)) unsupported.push({ path: abs, reason: "deleted" });
   }
 
