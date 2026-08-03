@@ -1366,11 +1366,16 @@ describe("prompt", () => {
 
 describe("cancel", () => {
   it("sends SIGINT (not SIGTERM) so agy can flush its conversation database", async () => {
+    const calls: SpawnCall[] = [];
     const fake = new FakeProcess([], { blockStdout: true, exitCode: null });
-    const session = new AgyCliSession(defaultConfig(), fake.spawnFactory([]));
+    const session = new AgyCliSession(defaultConfig(), fake.spawnFactory(calls));
     const pending = collectUpdates(session, "hello");
 
-    await new Promise((resolve) => setImmediate(resolve));
+    // Print-mode turns snapshot the working tree before spawn; wait until the
+    // child exists so cancel has a process to signal.
+    await vi.waitFor(() => {
+      expect(calls.length).toBeGreaterThan(0);
+    });
     await session.cancel();
 
     expect(fake.killedWith).toBe("SIGINT");

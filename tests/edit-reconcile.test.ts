@@ -6,7 +6,9 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_TEXT_BYTES,
   buildReconcileEditUpdate,
+  isValidUtf8,
   reconcileWorkingTree,
+  refreshSnapshotPath,
   snapshotWorkingTree
 } from "../src/agy/edit/reconcile.js";
 import { diffBlocks } from "../src/agy/edit/revert.js";
@@ -33,7 +35,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "after", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(unsupported).toEqual([]);
     expect(reflected).toEqual([{ path: file, oldText: "before", newText: "after" }]);
 
@@ -46,23 +48,45 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "new.txt");
     fs.writeFileSync(file, "created", "utf8");
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([{ path: file, oldText: null, newText: "created" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("skips a path already reflected by a recognized edit", async () => {
+  it("does not re-emit a path after the baseline is advanced past a recognized edit", async () => {
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
     fs.writeFileSync(file, "before", "utf8");
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    fs.writeFileSync(file, "after", "utf8");
+    fs.writeFileSync(file, "after-structured", "utf8");
+    // Simulate a recognized edit landing: advance baseline to post-edit content.
+    await refreshSnapshotPath(baseline, file);
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir], [file]);
+    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("still reflects a later unstructured change after a recognized edit on the same path", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    // Structured edit lands first.
+    fs.writeFileSync(file, "mid", "utf8");
+    await refreshSnapshotPath(baseline, file);
+    // Then a shell / unrecognized edit further changes the same file.
+    fs.writeFileSync(file, "final", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual([{ path: file, oldText: "mid", newText: "final" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -75,7 +99,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(path.join(dir, "ignored.txt"), "secret", "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([]);
 
@@ -88,7 +112,39 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "blob.bin");
     fs.writeFileSync(file, Buffer.from([0x00, 0x01, 0x02, 0x00]));
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports invalid UTF-8 (NUL-free) as binary, not as text", async () => {
+    const dir = gitRepo();
+    const baseline = await snapshotWorkingTree([dir]);
+    const file = path.join(dir, "bad.bin");
+    // Lone 0xff is not valid UTF-8 and has no NUL — previously misclassified as text.
+    fs.writeFileSync(file, Buffer.from([0xff]));
+
+    expect(isValidUtf8(Buffer.from([0xff]))).toBe(false);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reports a binary-to-text replacement as unsupported, not as a create", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "blob.bin");
+    fs.writeFileSync(file, Buffer.from([0x00, 0x01]));
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    expect(baseline.get(file)?.text).toBeNull();
+    fs.writeFileSync(file, "now text", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "binary" }]);
 
@@ -101,9 +157,27 @@ describe("reconcileWorkingTree", () => {
     const file = path.join(dir, "big.txt");
     fs.writeFileSync(file, "a".repeat(MAX_TEXT_BYTES + 1), "utf8");
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "oversized" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not buffer an oversized baseline file into memory as text", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "huge.bin");
+    // Write just over the limit; snapshot must record size+null text without
+    // treating it as routable text content.
+    fs.writeFileSync(file, Buffer.alloc(MAX_TEXT_BYTES + 1, 1));
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    const snap = baseline.get(file);
+    expect(snap).toBeDefined();
+    expect(snap!.text).toBeNull();
+    expect(snap!.size).toBe(MAX_TEXT_BYTES + 1);
+    expect(snap!.sha1.startsWith("oversized:")).toBe(true);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -117,7 +191,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.rmSync(file);
 
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
 
@@ -130,7 +204,7 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
     expect(unsupported).toEqual([]);
 
@@ -147,10 +221,51 @@ describe("reconcileWorkingTree", () => {
     // A change under node_modules must be skipped by the walk.
     fs.writeFileSync(path.join(dir, "node_modules", "dep.js"), "changed", "utf8");
 
-    const { reflected } = await reconcileWorkingTree(baseline, [dir], []);
+    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([{ path: path.join(dir, "src.txt"), oldText: null, newText: "hello" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("recurses into a checked-out git submodule", async () => {
+    const root = tmpDir();
+    const subSrc = path.join(root, "sub-src");
+    const parent = path.join(root, "parent");
+    fs.mkdirSync(subSrc);
+    fs.mkdirSync(parent);
+
+    execFileSync("git", ["-C", subSrc, "init", "-q"]);
+    execFileSync("git", ["-C", subSrc, "config", "user.email", "t@t"]);
+    execFileSync("git", ["-C", subSrc, "config", "user.name", "t"]);
+    fs.writeFileSync(path.join(subSrc, "inside.txt"), "sub-before", "utf8");
+    execFileSync("git", ["-C", subSrc, "add", "."]);
+    execFileSync("git", ["-C", subSrc, "commit", "-qm", "sub"]);
+
+    execFileSync("git", ["-C", parent, "init", "-q"]);
+    execFileSync("git", ["-C", parent, "config", "user.email", "t@t"]);
+    execFileSync("git", ["-C", parent, "config", "user.name", "t"]);
+    fs.writeFileSync(path.join(parent, "root.txt"), "root", "utf8");
+    execFileSync("git", ["-C", parent, "add", "."]);
+    execFileSync("git", ["-C", parent, "commit", "-qm", "root"]);
+    // protocol.file.allow must be on the invoking process (-c), not only the
+    // repo config — submodule add clones via the file transport.
+    execFileSync("git", [
+      "-C", parent,
+      "-c", "protocol.file.allow=always",
+      "submodule", "add", subSrc, "vendor"
+    ]);
+    execFileSync("git", ["-C", parent, "commit", "-qm", "add vendor"]);
+
+    const inside = path.join(parent, "vendor", "inside.txt");
+    const baseline = await snapshotWorkingTree([parent]);
+    expect(baseline.has(inside)).toBe(true);
+
+    fs.writeFileSync(inside, "sub-after", "utf8");
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [parent]);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual([{ path: inside, oldText: "sub-before", newText: "sub-after" }]);
+
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });
 

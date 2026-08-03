@@ -19,6 +19,7 @@ import {
 import {
   buildReconcileEditUpdate,
   reconcileWorkingTree,
+  refreshSnapshotPath,
   snapshotWorkingTree,
   toDisplayPath,
   type WorkingTreeSnapshot
@@ -308,11 +309,11 @@ export class AgyCliSession {
     }
     const command = this.commandForPrompt(prompt);
     try {
-      return await this.runPromptCommand(command, prompt, onUpdate);
+      return await this.runPromptCommand(command, prompt, onUpdate, fsBridge);
     } catch (error) {
       if (this.shouldInstallAfterError(error)) {
         await this.installAgy();
-        return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate);
+        return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate, fsBridge);
       }
       throw error;
     }
@@ -327,20 +328,26 @@ export class AgyCliSession {
   ): Promise<PromptOutcome> {
     this.#cancelled = false;
     this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
-    // Paths reflected through a recognized edit this turn; excluded from the
-    // end-of-turn working-tree reconciliation (see #76) so we don't double-emit.
-    const reflectedPaths = new Set<string>();
     // Snapshot the pre-edit working tree so edits agy makes outside recognized
     // structured-edit tool-calls (shell commands, unrecognized payloads) still
     // get reflected through ACP. Emitting the synthetic session/update needs no
     // client fs capability, so do this for every client (v1 and v2); the client
     // write-through is layered on later only when a bridge is available.
+    // When a recognized edit lands we advance the baseline for that path (see
+    // noteRecognizedEdit below) so a later shell change to the same file is
+    // still reconciled rather than suppressed for the rest of the turn.
     let editBaseline: WorkingTreeSnapshot | null = null;
     try {
       editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
     } catch {
       editBaseline = null;
     }
+    const noteRecognizedEdit = async (toolCall: SessionUpdate): Promise<void> => {
+      if (!editBaseline) return;
+      for (const block of diffBlocks(toolCall)) {
+        await refreshSnapshotPath(editBaseline, path.resolve(this.config.cwd, block.path));
+      }
+    };
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
@@ -544,39 +551,42 @@ export class AgyCliSession {
           // (accept-edits / skip-permissions), or it just passed through the
           // live gate above and agy applied it. Either way, if the client can
           // take the write itself, hand it off so its native diff/review UI
-          // (e.g. Zed's Review Changes panel) tracks it.
-          // Recognized edit: record its paths so end-of-turn reconciliation
-          // doesn't re-emit them as unstructured changes. Diff-block paths may
-          // be session-relative, so resolve against the session cwd (not the
-          // adapter process cwd) to match the snapshot's absolute keys.
-          for (const block of diffBlocks(toolCall)) reflectedPaths.add(path.resolve(this.config.cwd, block.path));
-          if (fsBridge) {
-            const routed = gatedIds.has(id)
-              // Pre-edit state was already primed above (race-free) — just
-              // hand over the final content, no local revert needed.
-              ? await this.raceTurnCallback(writeEditThroughClient(toolCall, fsBridge), deadline)
-              // No prior gate — this is the only chance we get, so fall back
-              // to revert-then-replay (races the client's file watcher if
-              // the file happens to be open there, but it's the best we can
-              // do after the fact).
-              : await this.raceTurnCallback(routeEditThroughClient(toolCall, fsBridge), deadline);
-            if (routed === true) continue;
-          }
-          if (gatedIds.has(id)) {
-            // Already approved through the live gate above and the client
-            // has no write-through — nothing more to do here.
-            continue;
-          }
+          // (e.g. Zed's Review Changes panel) tracks it. After disk settles,
+          // advance the edit baseline for this path so end-of-turn
+          // reconciliation only picks up *further* unstructured changes.
+          try {
+            if (fsBridge) {
+              const routed = gatedIds.has(id)
+                // Pre-edit state was already primed above (race-free) — just
+                // hand over the final content, no local revert needed.
+                ? await this.raceTurnCallback(writeEditThroughClient(toolCall, fsBridge), deadline)
+                // No prior gate — this is the only chance we get, so fall back
+                // to revert-then-replay (races the client's file watcher if
+                // the file happens to be open there, but it's the best we can
+                // do after the fact).
+                : await this.raceTurnCallback(routeEditThroughClient(toolCall, fsBridge), deadline);
+              if (routed === true) continue;
+            }
+            if (gatedIds.has(id)) {
+              // Already approved through the live gate above and the client
+              // has no write-through — nothing more to do here.
+              continue;
+            }
 
-          // Genuinely ungated (no live agy gate ever asked) and no client
-          // write-through available — offer local review: keep is a no-op,
-          // reject restores prior text.
-          const choice = await this.raceTurnCallback(
-            onPermission(toolCall, { toolName: interaction.toolName })
-          );
-          deadline = Date.now() + timeoutMs;
-          if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+            // Genuinely ungated (no live agy gate ever asked) and no client
+            // write-through available — offer local review: keep is a no-op,
+            // reject restores prior text.
+            const choice = await this.raceTurnCallback(
+              onPermission(toolCall, { toolName: interaction.toolName })
+            );
+            deadline = Date.now() + timeoutMs;
+            if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
+            if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+          } finally {
+            // Diff-block paths may be session-relative — resolve against the
+            // session cwd so the baseline key matches the snapshot.
+            await noteRecognizedEdit(toolCall);
+          }
         }
         if (this.#cancelled) break;
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
@@ -584,7 +594,7 @@ export class AgyCliSession {
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
       if (editBaseline && !this.#cancelled) {
-        await this.reflectUnstructuredEdits(editBaseline, reflectedPaths, fsBridge, onUpdate, deadline);
+        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate, deadline);
       }
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } catch (error) {
@@ -621,48 +631,59 @@ export class AgyCliSession {
   }
 
   /**
-   * After a turn, diff the working tree against the pre-edit snapshot and
-   * reflect any change agy made that never surfaced as a recognized structured
-   * edit (shell edits, unrecognized payloads) through ACP: emit a synthetic
-   * edit update for every client, and additionally hand the write to the client
-   * when it advertises fs capabilities. Changes that can't be shown as a text
-   * diff (binary/oversized/deletions) are reported, not dropped (#76).
+   * After a turn, diff the working tree against the (possibly advanced)
+   * baseline and reflect any change agy made that never surfaced as a
+   * recognized structured edit (shell edits, unrecognized payloads) through
+   * ACP: emit a synthetic edit update for every client, and additionally hand
+   * the write to the client when it advertises fs capabilities. Discovery
+   * failures are best-effort (logged); notification failures propagate so the
+   * caller does not go idle after a dropped update. Changes that can't be
+   * shown as a text diff (binary/oversized/deletions) are reported, not
+   * dropped (#76).
    */
   private async reflectUnstructuredEdits(
     baseline: WorkingTreeSnapshot,
-    reflectedPaths: Set<string>,
     fsBridge: ClientFileSystem | undefined,
     onUpdate: (update: SessionUpdate) => Promise<void>,
-    deadline: number
+    deadline?: number
   ): Promise<void> {
+    const roots = [this.config.cwd, ...this.config.additionalDirectories];
+    let reflected: Awaited<ReturnType<typeof reconcileWorkingTree>>["reflected"];
+    let unsupported: Awaited<ReturnType<typeof reconcileWorkingTree>>["unsupported"];
     try {
-      const roots = [this.config.cwd, ...this.config.additionalDirectories];
-      const { reflected, unsupported } = await reconcileWorkingTree(baseline, roots, reflectedPaths);
-      const turnToken = String(this.#reconcileTurnSeq++);
-      let index = 0;
-      for (const edit of reflected) {
-        if (this.#cancelled) return;
-        const update = buildReconcileEditUpdate(edit, index++, this.config.cwd, turnToken);
-        await this.raceTurnCallback(onUpdate(update), deadline);
-        if (fsBridge) await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
-      }
-      if (unsupported.length > 0) {
-        const detail = unsupported
-          .map((change) => `${toDisplayPath(change.path, this.config.cwd)} (${change.reason})`)
-          .join(", ");
-        console.error(
-          `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${detail}`
-        );
-      }
+      ({ reflected, unsupported } = await reconcileWorkingTree(baseline, roots));
     } catch (error) {
+      // Filesystem scan is best-effort — a transient stat failure shouldn't
+      // fail the whole turn after agy already finished.
       console.error(`[agy-acp] WARN: working-tree reconciliation failed: ${(error as Error).message}`);
+      return;
+    }
+    const turnToken = String(this.#reconcileTurnSeq++);
+    let index = 0;
+    for (const edit of reflected) {
+      if (this.#cancelled) return;
+      const update = buildReconcileEditUpdate(edit, index++, this.config.cwd, turnToken);
+      // Propagate onUpdate / write-through failures: the ordinary update loop
+      // does not swallow them, and going idle after a dropped edit update
+      // would leave the client inconsistent with disk.
+      await this.raceTurnCallback(onUpdate(update), deadline);
+      if (fsBridge) await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
+    }
+    if (unsupported.length > 0) {
+      const detail = unsupported
+        .map((change) => `${toDisplayPath(change.path, this.config.cwd)} (${change.reason})`)
+        .join(", ");
+      console.error(
+        `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${detail}`
+      );
     }
   }
 
   private async runPromptCommand(
     command: string[],
     prompt: string,
-    onUpdate: (update: SessionUpdate) => Promise<void>
+    onUpdate: (update: SessionUpdate) => Promise<void>,
+    fsBridge?: ClientFileSystem
   ): Promise<PromptOutcome> {
     const [program, ...args] = command;
     this.#cancelled = false;
@@ -672,6 +693,17 @@ export class AgyCliSession {
     // spawning after the snapshot would risk racing agy's own DB creation.
     const snapshot = this.#conversationId === null ? conversationSnapshot(this.config.conversationsDir) : null;
 
+    // Same working-tree reconciliation as the interactive path: print-mode
+    // turns (`--dangerously-skip-permissions`, `--no-interactive-permissions`,
+    // etc.) still need shell / unrecognized edits reflected through ACP.
+    let editBaseline: WorkingTreeSnapshot | null = null;
+    try {
+      editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
+    } catch {
+      editBaseline = null;
+    }
+    if (this.#cancelled) return { stopReason: "cancelled" };
+
     let child: SpawnedProcess;
     try {
       child = this.spawnProcess(program, args, this.spawnOptions());
@@ -679,6 +711,12 @@ export class AgyCliSession {
       throw this.errorForSpawnFailure(command, error as NodeJS.ErrnoException);
     }
     this.#process = child;
+    // Cancel may have landed in the gap between snapshot and spawn assignment.
+    if (this.#cancelled) {
+      if (process.platform === "win32") child.kill();
+      else child.kill("SIGINT");
+      return { stopReason: "cancelled" };
+    }
     const exitPromise = waitForExit(child);
     const errorPromise = once(child, "error") as Promise<[NodeJS.ErrnoException]>;
     const stderrChunks: Buffer[] = [];
@@ -706,6 +744,13 @@ export class AgyCliSession {
       const pollOnce = async () => {
         for (const update of poller.poll()) {
           await onUpdate(update);
+          // Advance the baseline past recognized edits so end-of-turn
+          // reconciliation only emits further unstructured changes.
+          if (editBaseline && isEditToolCall(update)) {
+            for (const block of diffBlocks(update)) {
+              await refreshSnapshotPath(editBaseline, path.resolve(this.config.cwd, block.path));
+            }
+          }
         }
       };
 
@@ -743,6 +788,10 @@ export class AgyCliSession {
           exitCode,
           stderr
         );
+      }
+
+      if (editBaseline && !this.#cancelled) {
+        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
 
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
@@ -825,14 +874,16 @@ export class AgyCliSession {
   }
 
   async cancel(): Promise<void> {
+    // Always mark cancelled first so a print-mode turn still in its pre-spawn
+    // working-tree snapshot (or any other gap before #process is set) observes
+    // the cancel and returns cancelled instead of racing ahead.
+    this.#cancelled = true;
     if (this.#cancelTurn) {
-      this.#cancelled = true;
       this.#cancelTurn();
       if (this.#pty) await this.stopPty();
       return;
     }
     if (this.#pty) {
-      this.#cancelled = true;
       await this.stopPty();
       return;
     }
@@ -840,7 +891,6 @@ export class AgyCliSession {
     if (!child || child.exitCode !== null) {
       return;
     }
-    this.#cancelled = true;
     const exitPromise = once(child, "exit");
     // SIGINT (rather than SIGTERM) gives agy a chance to flush its last
     // conversation-database write before exiting. Windows has no real SIGINT,
