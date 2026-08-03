@@ -424,14 +424,58 @@ function applySingleDiffBlock(
 /** Snapshot the working tree across one or more roots. */
 export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeSnapshot> {
   const snapshot: WorkingTreeSnapshot = new Map();
+  const seenFiles = new Set<string>();
   for (const root of await dedupeRoots(roots)) {
     for (const abs of await listFiles(root)) {
       if (snapshot.has(abs)) continue;
       const file = await snapshotFile(abs);
-      if (file) snapshot.set(abs, file);
+      if (!file || (file.canonicalPath && seenFiles.has(file.canonicalPath))) continue;
+      if (file.canonicalPath) seenFiles.add(file.canonicalPath);
+      // Keep the first configured spelling while deduplicating overlapping
+      // roots that list the same physical file through different paths.
+      snapshot.set(abs, file);
     }
   }
   return snapshot;
+}
+
+async function pathIsWithinRoots(
+  filePath: string,
+  roots: string[],
+  recordedCanonicalPath?: string
+): Promise<boolean> {
+  // The file and newly-created parent directories may have been deleted. Walk
+  // up to the deepest surviving ancestor, canonicalize it, then restore the
+  // missing suffix without following any replacement symlink.
+  let canonicalFile = recordedCanonicalPath;
+  if (!canonicalFile) {
+    const suffix: string[] = [];
+    let ancestor = path.resolve(filePath);
+    while (true) {
+      try {
+        canonicalFile = path.join(await fs.realpath(ancestor), ...suffix.reverse());
+        break;
+      } catch {
+        const parent = path.dirname(ancestor);
+        if (parent === ancestor) return false;
+        suffix.push(path.basename(ancestor));
+        ancestor = parent;
+      }
+    }
+  }
+  for (const root of await dedupeRoots(roots)) {
+    let canonicalRoot: string;
+    try {
+      canonicalRoot = await fs.realpath(root);
+    } catch {
+      continue;
+    }
+    const relative = path.relative(canonicalRoot, canonicalFile);
+    if (relative === "" || (!path.isAbsolute(relative) && relative !== ".." && !relative.startsWith(`..${path.sep}`))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -522,18 +566,41 @@ export async function reconcileWorkingTree(
   const current = await snapshotWorkingTree(roots);
   const reflected: ReflectedEdit[] = [];
   const unsupported: UnsupportedChange[] = [];
+  const structuredCandidates = new Set<string>();
+  const baselineByCanonical = new Map<string, FileSnapshot>();
+  const currentByCanonical = new Map<string, string>();
+  for (const file of baseline.values()) {
+    if (file.canonicalPath) baselineByCanonical.set(file.canonicalPath, file);
+  }
+  for (const [abs, file] of current) {
+    if (file.canonicalPath) currentByCanonical.set(file.canonicalPath, abs);
+  }
+  const currentKeyFor = (abs: string, before: FileSnapshot): string | undefined =>
+    current.has(abs) ? abs : before.canonicalPath ? currentByCanonical.get(before.canonicalPath) : undefined;
+  const baselineFor = (abs: string, now: FileSnapshot): FileSnapshot | undefined =>
+    baseline.get(abs) ?? (now.canonicalPath ? baselineByCanonical.get(now.canonicalPath) : undefined);
 
   // A newly added ignore rule can remove a still-existing baseline candidate
   // from `git ls-files --others --exclude-standard`. Snapshot those paths
   // directly so an eligibility change is not misreported as a deletion.
   for (const [abs, before] of baseline) {
-    if (current.has(abs)) continue;
+    if (currentKeyFor(abs, before)) continue;
     // Structured baseline advancement can add an absolute path outside the
-    // configured roots. It was never a listing candidate, so do not pull it
-    // into reconciliation and duplicate the already-routed structured edit.
-    if (before.candidate === false) continue;
+    // configured roots. Only pull structured-only entries into reconciliation
+    // when their physical location belongs to this workspace.
+    if (before.candidate === false) {
+      if (!(await pathIsWithinRoots(abs, roots, before.canonicalPath))) continue;
+      structuredCandidates.add(abs);
+      // Do not read through an intermediate symlink that now redirects the
+      // same spelling outside the workspace. The recorded in-root file is a
+      // deletion; any replacement target is unrelated and must remain unread.
+      if (!(await pathIsWithinRoots(abs, roots))) continue;
+    }
     const now = await snapshotFile(abs);
-    if (now) current.set(abs, now);
+    if (now) {
+      current.set(abs, now);
+      if (now.canonicalPath) currentByCanonical.set(now.canonicalPath, abs);
+    }
   }
 
   // Conversely, removing an ignore rule can expose a pre-existing file that
@@ -545,7 +612,12 @@ export async function reconcileWorkingTree(
   for (const abs of paths) {
     if (path.basename(abs) !== ".gitignore") continue;
     const before = baseline.get(abs);
-    if ((before?.initialSha1 ?? before?.sha1) !== current.get(abs)?.sha1) changedIgnoreRules.add(abs);
+    const now = current.get(abs);
+    const alignedBefore = before ?? (now ? baselineFor(abs, now) : undefined);
+    const alignedNow = now ?? (before ? current.get(currentKeyFor(abs, before) ?? "") : undefined);
+    if ((alignedBefore?.initialSha1 ?? alignedBefore?.sha1) !== alignedNow?.sha1) {
+      changedIgnoreRules.add(abs);
+    }
   }
   const couldBeAffectedByIgnoreChange = (abs: string): boolean => {
     if (path.basename(abs) === ".gitignore") return false;
@@ -556,12 +628,12 @@ export async function reconcileWorkingTree(
     return false;
   };
   const newlyListedAfterIgnoreChange = [...current.keys()].filter(
-    (abs) => !baseline.has(abs) && couldBeAffectedByIgnoreChange(abs)
+    (abs) => !baselineFor(abs, current.get(abs)!) && couldBeAffectedByIgnoreChange(abs)
   );
   const ignoredBeforeTurn = await ignoredByBaselineRules(baseline, newlyListedAfterIgnoreChange);
 
   for (const [abs, now] of current) {
-    const before = baseline.get(abs);
+    const before = baselineFor(abs, now);
     if (before && before.sha1 === now.sha1) continue; // unchanged
     if (!before && ignoredBeforeTurn.has(abs)) {
       unsupported.push({ path: abs, reason: "ignore-rules-changed" });
@@ -585,8 +657,12 @@ export async function reconcileWorkingTree(
   }
 
   for (const [abs, before] of baseline) {
-    if (before.candidate === false) continue;
-    if (!current.has(abs)) unsupported.push({ path: abs, reason: "deleted" });
+    if (currentKeyFor(abs, before)) continue;
+    // Structured edits can introduce entries absent from the initial listing.
+    // Report a later deletion when that physical path belongs to a configured
+    // root, while continuing to ignore structured edits outside the workspace.
+    if (before.candidate === false && !structuredCandidates.has(abs)) continue;
+    unsupported.push({ path: abs, reason: "deleted" });
   }
 
   return { reflected, unsupported };

@@ -416,6 +416,165 @@ describe("reconcileWorkingTree", () => {
     }
   );
 
+  it.skipIf(process.platform === "win32")(
+    "deduplicates files shared by overlapping aliased roots",
+    async () => {
+      const dir = gitRepo();
+      const subdir = path.join(dir, "subdir");
+      const aliasParent = tmpDir();
+      const alias = path.join(aliasParent, "alias");
+      fs.mkdirSync(subdir);
+      fs.symlinkSync(subdir, alias, "dir");
+      const file = path.join(subdir, "a.txt");
+      const aliasedFile = path.join(alias, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+      execFileSync("git", ["-C", dir, "add", "."]);
+
+      const baseline = await snapshotWorkingTree([alias, dir]);
+      expect([...baseline.keys()].filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
+      fs.writeFileSync(file, "after", "utf8");
+
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
+      expect(unsupported).toEqual([]);
+      expect(reflected).toEqual([{ path: aliasedFile, oldText: "before", newText: "after" }]);
+
+      fs.rmSync(aliasParent, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "aligns structured creations with the retained alias spelling",
+    async () => {
+      const dir = gitRepo();
+      const subdir = path.join(dir, "subdir");
+      const aliasParent = tmpDir();
+      const alias = path.join(aliasParent, "alias");
+      fs.mkdirSync(subdir);
+      fs.symlinkSync(subdir, alias, "dir");
+      const file = path.join(subdir, "new.txt");
+      const aliasedFile = path.join(alias, "new.txt");
+      const baseline = await snapshotWorkingTree([alias, dir]);
+      fs.writeFileSync(file, "structured", "utf8");
+      applyDiffBlockToSnapshot(baseline, file, null, "structured");
+
+      expect(await reconcileWorkingTree(baseline, [alias, dir])).toEqual({ reflected: [], unsupported: [] });
+
+      fs.writeFileSync(file, "later", "utf8");
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
+      expect(unsupported).toEqual([]);
+      expect(reflected).toEqual([{ path: aliasedFile, oldText: "structured", newText: "later" }]);
+
+      fs.rmSync(aliasParent, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  );
+
+  it("reports deletion of an in-root file created by a structured edit", async () => {
+    const dir = gitRepo();
+    const createdDir = path.join(dir, "created");
+    const file = path.join(createdDir, "structured.txt");
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.mkdirSync(createdDir);
+    fs.writeFileSync(file, "created", "utf8");
+    applyDiffBlockToSnapshot(baseline, file, null, "created");
+    expect(baseline.get(file)?.candidate).toBe(false);
+    fs.rmSync(createdDir, { recursive: true });
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not report a surviving ignored structured creation as deleted", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "ignored.txt");
+    fs.writeFileSync(path.join(dir, ".gitignore"), "ignored.txt\n", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "created", "utf8");
+    applyDiffBlockToSnapshot(baseline, file, null, "created");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "uses structured physical identity after an in-root symlink to outside is removed",
+    async () => {
+      const dir = gitRepo();
+      const outside = tmpDir();
+      const link = path.join(dir, "link");
+      const file = path.join(link, "outside.txt");
+      fs.symlinkSync(outside, link, "dir");
+      const baseline = await snapshotWorkingTree([dir]);
+      fs.writeFileSync(file, "created", "utf8");
+      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      fs.rmSync(file);
+      fs.rmSync(link);
+
+      expect(await reconcileWorkingTree(baseline, [dir])).toEqual({ reflected: [], unsupported: [] });
+
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reports an in-root structured file replaced by an outside symlink as deleted",
+    async () => {
+      const dir = gitRepo();
+      const outside = tmpDir();
+      const file = path.join(dir, "structured.txt");
+      const target = path.join(outside, "target.txt");
+      const baseline = await snapshotWorkingTree([dir]);
+      fs.writeFileSync(file, "created", "utf8");
+      fs.writeFileSync(target, "outside", "utf8");
+      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      fs.rmSync(file);
+      fs.symlinkSync(target, file);
+
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+      expect(reflected).toEqual([]);
+      expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+      expect(fs.readFileSync(target, "utf8")).toBe("outside");
+
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "does not read through a replaced parent directory symlink",
+    async () => {
+      const dir = gitRepo();
+      const outside = tmpDir();
+      const createdDir = path.join(dir, "created");
+      const file = path.join(createdDir, "structured.txt");
+      const target = path.join(outside, "structured.txt");
+      const baseline = await snapshotWorkingTree([dir]);
+      fs.mkdirSync(createdDir);
+      fs.writeFileSync(file, "created", "utf8");
+      applyDiffBlockToSnapshot(baseline, file, null, "created");
+      fs.rmSync(createdDir, { recursive: true });
+      fs.writeFileSync(target, "outside secret", "utf8");
+      fs.symlinkSync(outside, createdDir, "dir");
+
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+      expect(reflected).toEqual([]);
+      expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
+      expect(fs.readFileSync(target, "utf8")).toBe("outside secret");
+
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(outside, { recursive: true, force: true });
+    }
+  );
+
   it("does not report structured-only baseline entries as deletions", async () => {
     const dir = gitRepo();
     const outside = tmpDir();
