@@ -569,11 +569,13 @@ async function runSteeredV2Turn(
 
     session.activePrompt = true;
     ownsActivePrompt = true;
+    controller = new AbortController();
+    session.promptAbort = controller;
     const promptText = await contentBlocksToPrompt(
       params.prompt as v1.ContentBlock[],
       session.cwd
     );
-    if (session.closed) {
+    if (controller.signal.aborted || session.closed) {
       notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
@@ -582,8 +584,6 @@ async function runSteeredV2Turn(
       return;
     }
 
-    controller = new AbortController();
-    session.promptAbort = controller;
     await runV2PromptTurn(params, client, session, promptText, controller.signal, deps);
   } finally {
     if (controller && session.promptAbort === controller) {
@@ -703,11 +703,13 @@ export async function handlePromptV2(
   // Claim an idle session before attachment conversion. Once scheduled, the
   // detached turn owns this claim and releases it from its finalizer.
   session.activePrompt = true;
+  const controller = new AbortController();
+  session.promptAbort = controller;
   let turnScheduled = false;
   try {
     // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
     const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
-    if (session.closed) {
+    if (controller.signal.aborted || session.closed) {
       notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
@@ -715,8 +717,6 @@ export async function handlePromptV2(
       });
       return {};
     }
-    const controller = new AbortController();
-    session.promptAbort = controller;
 
     // Queue the empty acceptance response before any session/update from the turn.
     // Work starts on the next event-loop task (see dual-version-agent example).
@@ -743,6 +743,9 @@ export async function handlePromptV2(
   } finally {
     // Setup failed or closed before the async turn was scheduled.
     if (!turnScheduled) {
+      if (session.promptAbort === controller) {
+        session.promptAbort = undefined;
+      }
       session.activePrompt = false;
       notifyIdleAndDrainQueue(session);
     }

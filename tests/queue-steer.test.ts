@@ -276,6 +276,39 @@ describe("queue and steer-by-cancel", () => {
     expect(session.promptIdleNotify).toBeUndefined();
   });
 
+  it("cancels a v2 turn while prompt content is still being prepared", async () => {
+    let promptCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      activePrompt: false,
+      promptQueue: [],
+      agy: {
+        prompt: async () => {
+          promptCalls++;
+          return { stopReason: "end_turn" };
+        },
+        cancel: async () => {}
+      }
+    } as unknown as SessionState;
+    const deps = {
+      requireSession: () => session
+    } as unknown as PromptV2Deps;
+
+    const response = handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "prepared asynchronously" }]
+    } as any, { notify: async () => {} } as any, deps);
+
+    expect(session.promptAbort).toBeDefined();
+    session.promptAbort!.abort();
+
+    await expect(response).resolves.toEqual({});
+    expect(promptCalls).toBe(0);
+    expect(session.promptAbort).toBeUndefined();
+    expect(session.activePrompt).toBe(false);
+  });
+
   it("does not install a new idle waiter when a competing steer resumes after close", async () => {
     const session = {
       sessionId: "s1",
