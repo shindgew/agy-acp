@@ -64,13 +64,21 @@ export interface ReconcileResult {
   unsupported: UnsupportedChange[];
 }
 
-function dedupeRoots(roots: string[]): string[] {
+async function dedupeRoots(roots: string[]): Promise<string[]> {
   const seen = new Set<string>();
   const out: string[] = [];
   for (const root of roots) {
     const resolved = path.resolve(root);
-    if (seen.has(resolved)) continue;
-    seen.add(resolved);
+    let canonical = resolved;
+    try {
+      canonical = await fs.realpath(resolved);
+    } catch {
+      // Preserve the unresolved root so the existing git/walk fallback can
+      // decide whether it is readable.
+    }
+    if (seen.has(canonical)) continue;
+    seen.add(canonical);
+    // Keep the first configured spelling (normally cwd) for emitted paths.
     out.push(resolved);
   }
   return out;
@@ -378,7 +386,7 @@ function applySingleDiffBlock(
 /** Snapshot the working tree across one or more roots. */
 export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeSnapshot> {
   const snapshot: WorkingTreeSnapshot = new Map();
-  for (const root of dedupeRoots(roots)) {
+  for (const root of await dedupeRoots(roots)) {
     for (const abs of await listFiles(root)) {
       if (snapshot.has(abs)) continue;
       const file = await snapshotFile(abs);

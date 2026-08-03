@@ -387,6 +387,32 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "deduplicates workspace roots that alias the same checkout",
+    async () => {
+      const dir = gitRepo();
+      const aliasParent = tmpDir();
+      const alias = path.join(aliasParent, "alias");
+      fs.symlinkSync(dir, alias, "dir");
+      const file = path.join(dir, "a.txt");
+      const aliasedFile = path.join(alias, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+      execFileSync("git", ["-C", dir, "add", "."]);
+
+      // Keep the first spelling (cwd) while deduplicating by physical root.
+      const baseline = await snapshotWorkingTree([alias, dir]);
+      expect([...baseline.keys()].filter((p) => p.endsWith("a.txt"))).toEqual([aliasedFile]);
+      fs.writeFileSync(file, "after", "utf8");
+
+      const { reflected, unsupported } = await reconcileWorkingTree(baseline, [alias, dir]);
+      expect(unsupported).toEqual([]);
+      expect(reflected).toEqual([{ path: aliasedFile, oldText: "before", newText: "after" }]);
+
+      fs.rmSync(aliasParent, { recursive: true, force: true });
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  );
+
   it("does not follow a tracked symlink to a directory", async () => {
     const dir = gitRepo();
     const outside = tmpDir();
