@@ -18,8 +18,8 @@ export async function handleCloseSession(
     (session as SessionState).closed = true;
     // Unblock any steer waiter before teardown so it observes `closed`.
     wakePromptIdleWaiters(session as SessionState);
-    await cancelQueuedPrompts(session as SessionState);
     session.promptAbort?.abort();
+    cancelQueuedPrompts(session as SessionState);
     await session.agy.close();
   }
   return {};

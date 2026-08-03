@@ -29,9 +29,9 @@ export async function handleDeleteSession(
     (session as SessionState).closed = true;
     // Unblock any steer waiter before teardown so it observes `closed`.
     wakePromptIdleWaiters(session as SessionState);
-    await cancelQueuedPrompts(session as SessionState);
+    session.promptAbort?.abort();
+    cancelQueuedPrompts(session as SessionState);
   }
-  session?.promptAbort?.abort();
   await session?.agy.close();
   await store.delete(params.sessionId);
   return {};
