@@ -126,6 +126,16 @@ export class Translator {
     return this._hadUpdates;
   }
 
+  /**
+   * Reset row-derived file state before replaying a complete prompt-scoped
+   * snapshot. StreamPoller rereads all rows after its fixed base idx whenever
+   * SQLite changes; rebuilding this cache makes oldText derivation independent
+   * of the previous poll's terminal state.
+   */
+  resetFileContentsForFullReplay(): void {
+    this.fileContents.clear();
+  }
+
   /** Translate a batch of rows into ordered ACP updates, advancing state. */
   translate(rows: StepRow[]): SessionUpdate[] {
     const out: SessionUpdate[] = [];

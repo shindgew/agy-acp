@@ -696,8 +696,10 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const cacheKey = path.resolve(resolvedTarget);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
-      // Plan-file incomplete writes must not poison the cache used by replace derivation.
-      if (!isPlanFile(targetFile) || status === "completed") {
+      // Pending/failed writes describe proposed content, not a new baseline.
+      // Preserve the prior body until completion so the completed lifecycle
+      // update still carries a meaningful oldText instead of newText→newText.
+      if (status === "completed") {
         fileContents?.set(cacheKey, fullContent);
       }
       if (isReadableLocation(resolvedTarget, ctx)) locations.push({ path: resolvedTarget });
