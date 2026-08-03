@@ -28,7 +28,7 @@ import {
 import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
-import type { SessionState } from "./types.js";
+import type { QueuedPromptV1, QueuedPromptV2, SessionState, TurnIntent } from "./types.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface PromptTurnDeps {
@@ -49,6 +49,46 @@ export interface PromptV2Deps extends PromptTurnDeps {
   notifyConfigOptionUpdateV2(client: V2AgentContext, sessionId: string, session: SessionState): Promise<void>;
   clientElicitationV2?(client: V2AgentContext): ClientElicitationCapability | undefined;
   clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
+}
+
+export function parseTurnIntent(params: unknown): TurnIntent | undefined {
+  if (!params || typeof params !== "object") return undefined;
+  const meta = (params as Record<string, unknown>)._meta;
+  if (!meta || typeof meta !== "object") return undefined;
+  const intent = (meta as Record<string, unknown>)["agy-acp/turnIntent"];
+  if (intent === "queue" || intent === "steer") return intent;
+  return undefined;
+}
+
+export function notifyIdleAndDrainQueue(session: SessionState): void {
+  const notify = session.promptIdleNotify;
+  session.promptIdleNotify = undefined;
+  if (notify) {
+    notify();
+    return;
+  }
+
+  if (!session.activePrompt && session.promptQueue.length > 0) {
+    const next = session.promptQueue.shift()!;
+    if (next.version === "v1") {
+      if (next.signal?.aborted) {
+        next.resolve({ stopReason: "cancelled" });
+        notifyIdleAndDrainQueue(session);
+        return;
+      }
+      void executeQueuedV1Turn(next);
+    } else {
+      if (next.controller.signal.aborted) {
+        void next.client.notify(v2.methods.client.session.update, {
+          sessionId: next.params.sessionId,
+          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
+        }).catch(() => {});
+        notifyIdleAndDrainQueue(session);
+        return;
+      }
+      void executeQueuedV2Turn(next);
+    }
+  }
 }
 
 /**
@@ -113,7 +153,49 @@ export async function handlePromptV1(
 ): Promise<V1PromptResponse> {
   const session = deps.requireSession(params.sessionId);
   if (session.activePrompt) {
-    throw new Error(`Session already has an active prompt: ${params.sessionId}`);
+    const intent = parseTurnIntent(params);
+    if (intent === "queue") {
+      return new Promise<V1PromptResponse>((resolve, reject) => {
+        const queuedId = `q-${randomUUID()}`;
+        const queued: QueuedPromptV1 = {
+          id: queuedId,
+          version: "v1",
+          params,
+          client,
+          signal,
+          deps,
+          resolve,
+          reject
+        };
+        session.promptQueue.push(queued);
+        if (signal) {
+          const onAbort = () => {
+            const idx = session.promptQueue.findIndex((q) => q.id === queuedId);
+            if (idx >= 0) {
+              session.promptQueue.splice(idx, 1);
+              resolve({ stopReason: "cancelled" });
+            }
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+        }
+      });
+    }
+
+    if (intent === "steer") {
+      session.promptAbort?.abort();
+      await session.agy.cancel();
+      if (session.activePrompt) {
+        await new Promise<void>((resolve) => {
+          const prevNotify = session.promptIdleNotify;
+          session.promptIdleNotify = () => {
+            prevNotify?.();
+            resolve();
+          };
+        });
+      }
+    } else {
+      throw new Error(`Session already has an active prompt: ${params.sessionId}`);
+    }
   }
 
   const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
@@ -186,6 +268,77 @@ export async function handlePromptV1(
   } finally {
     signal?.removeEventListener("abort", cancelPrompt);
     session.activePrompt = false;
+    notifyIdleAndDrainQueue(session);
+  }
+}
+
+async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
+  const { params, client, signal, deps, resolve, reject } = item;
+  const session = deps.requireSession(params.sessionId);
+  session.activePrompt = true;
+
+  try {
+    const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
+
+    const handled = await applyCuratedSlashCommand(
+      params.sessionId,
+      prompt,
+      {
+        modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
+        configChanged: async () => {
+          await deps.notifyConfigOptionUpdateV1(
+            client,
+            params.sessionId,
+            deps.requireSession(params.sessionId)
+          );
+        }
+      },
+      deps
+    );
+    if (handled) {
+      resolve({ stopReason: signal?.aborted ? "cancelled" : "end_turn" });
+      return;
+    }
+
+    const cancelPrompt = () => {
+      session.agy.cancel().catch(() => {});
+    };
+    signal?.addEventListener("abort", cancelPrompt, { once: true });
+
+    try {
+      const tracker = createTerminalOutputTracker();
+      const clientToolCallName = deps.clientToolCallNameV1?.(client);
+      const outcome = await session.agy.prompt(prompt, async (update) => {
+        await client.notify(v1.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: sessionUpdateToV1(update, tracker, { clientToolCallName })
+        });
+      }, async (toolCall, { toolName, questionIndex }) => {
+        const elicitationCap = deps.clientElicitationV1?.(client);
+        return requestPermissionV1(
+          client,
+          params.sessionId,
+          toolCall,
+          toolName,
+          signal,
+          questionIndex,
+          elicitationCap,
+          clientToolCallName
+        );
+      }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
+      await deps.persistSession(params.sessionId, session);
+      resolve({
+        stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
+      });
+    } finally {
+      signal?.removeEventListener("abort", cancelPrompt);
+    }
+  } catch (error) {
+    await deps.persistSession(params.sessionId, session).catch(() => {});
+    reject(error as Error);
+  } finally {
+    session.activePrompt = false;
+    notifyIdleAndDrainQueue(session);
   }
 }
 
@@ -203,7 +356,59 @@ export async function handlePromptV2(
 ): Promise<V2PromptResponse> {
   const session = deps.requireSession(params.sessionId);
   if (session.activePrompt) {
-    throw new Error(`Session already has an active prompt: ${params.sessionId}`);
+    const intent = parseTurnIntent(params);
+    if (intent === "queue") {
+      const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
+      const parsedSlash = parseSlashCommand(promptText);
+      const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
+      const userMessageId =
+        slashResult && slashResult.kind !== "pass"
+          ? `slash-${randomUUID()}`
+          : `user-${randomUUID()}`;
+
+      await client.notify(v2.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "user_message",
+          messageId: userMessageId,
+          content: params.prompt as v2.ContentBlock[]
+        }
+      });
+
+      const controller = new AbortController();
+      const queuedId = `q-${randomUUID()}`;
+      const queued: QueuedPromptV2 = {
+        id: queuedId,
+        version: "v2",
+        params,
+        client,
+        promptText,
+        userMessageId,
+        controller,
+        deps
+      };
+      session.promptQueue.push(queued);
+      if (!session.activePrompt) {
+        notifyIdleAndDrainQueue(session);
+      }
+      return {};
+    }
+
+    if (intent === "steer") {
+      session.promptAbort?.abort();
+      await session.agy.cancel();
+      if (session.activePrompt) {
+        await new Promise<void>((resolve) => {
+          const prevNotify = session.promptIdleNotify;
+          session.promptIdleNotify = () => {
+            prevNotify?.();
+            resolve();
+          };
+        });
+      }
+    } else {
+      throw new Error(`Session already has an active prompt: ${params.sessionId}`);
+    }
   }
 
   // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
@@ -228,9 +433,123 @@ export async function handlePromptV2(
         session.promptAbort = undefined;
       }
       session.activePrompt = false;
+      notifyIdleAndDrainQueue(session);
     });
 
   return {};
+}
+
+async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
+  const { params, client, promptText, userMessageId, controller, deps } = item;
+  const session = deps.requireSession(params.sessionId);
+  session.activePrompt = true;
+  session.promptAbort = controller;
+
+  const notify = async (update: v2.SessionUpdate) => {
+    await client.notify(v2.methods.client.session.update, {
+      sessionId: params.sessionId,
+      update
+    });
+  };
+
+  const signal = controller.signal;
+  try {
+    signal.throwIfAborted();
+
+    // user_message was already sent at enqueue time.
+    await notify({ sessionUpdate: "state_update", state: "running" });
+
+    const slashHandled = await applyCuratedSlashCommand(
+      params.sessionId,
+      promptText,
+      {
+        configChanged: async () => {
+          await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
+        }
+      },
+      deps
+    );
+    if (slashHandled) {
+      await notify({
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: signal.aborted ? "cancelled" : "end_turn"
+      });
+      return;
+    }
+
+    const cancelPrompt = () => {
+      session.agy.cancel().catch(() => {});
+    };
+    signal.addEventListener("abort", cancelPrompt, { once: true });
+
+    try {
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
+      const clientToolCallName = deps.clientToolCallNameV2?.(client);
+      const outcome = await (async () => {
+        try {
+          return await session.agy.prompt(promptText, async (update) => {
+            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker, { clientToolCallName })) {
+              await notify(v2Update);
+            }
+          }, async (toolCall, { toolName, questionIndex }) => {
+            const elicitationCap = deps.clientElicitationV2?.(client);
+            return requestPermissionV2(
+              client,
+              params.sessionId,
+              toolCall,
+              toolName,
+              signal,
+              questionIndex,
+              elicitationCap,
+              clientToolCallName
+            );
+          }, undefined, deps.clientElicitationV2?.(client));
+        } finally {
+          const userStepIdxs = session.agy.lastPromptUserStepIdxs;
+          if (userStepIdxs.length > 1) {
+            throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
+          }
+          if (userStepIdxs.length === 1) {
+            session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
+          }
+        }
+      })();
+      await deps.persistSession(params.sessionId, session);
+
+      const stopReason =
+        outcome.stopReason === "cancelled" || signal.aborted ? "cancelled" : "end_turn";
+      await notify({
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason
+      });
+    } finally {
+      signal.removeEventListener("abort", cancelPrompt);
+    }
+  } catch (error) {
+    await deps.persistSession(params.sessionId, session).catch(() => {});
+    if (signal.aborted) {
+      await notify({
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      return;
+    }
+    await notify({
+      sessionUpdate: "state_update",
+      state: "idle",
+      stopReason: "end_turn"
+    });
+  } finally {
+    if (session.promptAbort === controller) {
+      session.promptAbort = undefined;
+    }
+    session.activePrompt = false;
+    notifyIdleAndDrainQueue(session);
+  }
 }
 
 async function runV2PromptTurn(
