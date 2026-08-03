@@ -156,6 +156,50 @@ describe("queue and steer-by-cancel", () => {
     expect(session.activePrompt).toBe(false);
   });
 
+  it("cancels a v1 turn while prompt content is still being prepared", async () => {
+    let promptCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      activePrompt: false,
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      catalog: { models: [], byBase: new Map() },
+      selectedBaseModel: "m",
+      selectedReasoningEffort: "",
+      agy: {
+        config: { mode: "default" },
+        prompt: async () => {
+          promptCalls++;
+          return { stopReason: "end_turn" };
+        },
+        cancel: async () => {}
+      }
+    } as unknown as SessionState;
+    const deps = {
+      requireSession: () => session,
+      applyConfigOption: async () => {},
+      persistSession: async () => {},
+      notifyCurrentModeUpdate: async () => {},
+      notifyConfigOptionUpdateV1: async () => {},
+      clientFileSystemV1: () => undefined
+    } satisfies PromptV1Deps;
+
+    const response = handlePromptV1({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "prepared asynchronously" }]
+    } as any, { notify: async () => {} } as any, undefined, deps);
+
+    expect(session.promptAbort).toBeDefined();
+    session.promptAbort!.abort();
+
+    await expect(response).resolves.toEqual({ stopReason: "cancelled" });
+    expect(promptCalls).toBe(0);
+    expect(session.promptAbort).toBeUndefined();
+    expect(session.activePrompt).toBe(false);
+  });
+
   it("places concurrent v2 queue requests in FIFO before notification awaits", async () => {
     const session = {
       sessionId: "s1",

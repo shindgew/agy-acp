@@ -267,11 +267,16 @@ export async function handlePromptV1(
   // setup failures and slash-only turns — so release + queue drain always run.
   let releaseSteer: (() => void) | undefined;
   let ownsActivePrompt = false;
-  const cancelled = () => Boolean(signal?.aborted || session.closed);
+  let turnController: AbortController | undefined;
+  const cancelled = () => Boolean(
+    signal?.aborted || turnController?.signal.aborted || session.closed
+  );
   if (!busyAtAdmission) {
     // Claim an idle session before attachment conversion or config awaits.
     session.activePrompt = true;
     ownsActivePrompt = true;
+    turnController = new AbortController();
+    session.promptAbort = turnController;
   }
   try {
     if (busyAtAdmission) {
@@ -299,6 +304,8 @@ export async function handlePromptV1(
       }
       session.activePrompt = true;
       ownsActivePrompt = true;
+      turnController = new AbortController();
+      session.promptAbort = turnController;
     }
 
     const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
@@ -342,9 +349,11 @@ export async function handlePromptV1(
       });
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
+    turnController?.signal.addEventListener("abort", cancelPrompt, { once: true });
     // Listener only fires for future aborts; honor an already-aborted signal.
-    if (signal?.aborted) {
-      signal.removeEventListener("abort", cancelPrompt);
+    if (cancelled()) {
+      signal?.removeEventListener("abort", cancelPrompt);
+      turnController?.signal.removeEventListener("abort", cancelPrompt);
       return { stopReason: "cancelled" };
     }
 
@@ -379,14 +388,18 @@ export async function handlePromptV1(
       // Persist even on failure: agy's conversation id/step position may have
       // advanced before it errored out, and that partial progress is worth
       // resuming from on the next prompt.
-      if (!session.closed && !signal?.aborted) {
+      if (!cancelled()) {
         await deps.persistSession(params.sessionId, session).catch(() => {});
       }
       throw error;
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
+      turnController?.signal.removeEventListener("abort", cancelPrompt);
     }
   } finally {
+    if (turnController && session.promptAbort === turnController) {
+      session.promptAbort = undefined;
+    }
     if (ownsActivePrompt) {
       session.activePrompt = false;
     }
@@ -403,8 +416,12 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   const { params, client, signal, deps, resolve, reject } = item;
   const session = deps.requireSession(params.sessionId);
   session.activePrompt = true;
+  const turnController = new AbortController();
+  session.promptAbort = turnController;
 
-  const cancelled = () => Boolean(signal?.aborted || session.closed);
+  const cancelled = () => Boolean(
+    signal?.aborted || turnController.signal.aborted || session.closed
+  );
 
   try {
     if (cancelled()) {
@@ -449,9 +466,11 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
       session.agy.cancel().catch(() => {});
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
+    turnController.signal.addEventListener("abort", cancelPrompt, { once: true });
     // Listener only fires for future aborts; honor an already-aborted signal.
-    if (signal?.aborted) {
-      signal.removeEventListener("abort", cancelPrompt);
+    if (cancelled()) {
+      signal?.removeEventListener("abort", cancelPrompt);
+      turnController.signal.removeEventListener("abort", cancelPrompt);
       cancelPrompt();
       resolve({ stopReason: "cancelled" });
       return;
@@ -487,9 +506,10 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
       });
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
+      turnController.signal.removeEventListener("abort", cancelPrompt);
     }
   } catch (error) {
-    if (!session.closed && !signal?.aborted) {
+    if (!cancelled()) {
       await deps.persistSession(params.sessionId, session).catch(() => {});
     }
     if (cancelled()) {
@@ -498,6 +518,9 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
     }
     reject(error as Error);
   } finally {
+    if (session.promptAbort === turnController) {
+      session.promptAbort = undefined;
+    }
     session.activePrompt = false;
     notifyIdleAndDrainQueue(session);
   }
