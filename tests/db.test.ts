@@ -2638,4 +2638,12 @@ describe("user prompt envelope replay", () => {
       { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
     ]);
   });
+
+  it("preserves surrounding whitespace when replaying a raw prompt", () => {
+    const raw = "\n  const value = 1;  \n\n";
+    const updates = promptUpdates("conv-raw-whitespace", raw);
+    expect(updates).toEqual([
+      { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
+    ]);
+  });
 });

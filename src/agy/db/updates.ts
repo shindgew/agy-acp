@@ -144,7 +144,8 @@ function titleUpdate(stepRow: StepRow): SessionUpdate[] {
  */
 function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
   const up = stepRow.stepPayload.userPrompt;
-  const text = (up?.text || up?.content?.text || "").trim();
+  const rawText = up?.text || up?.content?.text || "";
+  const text = rawText.trim();
 
   const blockPattern =
     /<user_text>\n([\s\S]*?)\n<\/user_text>|<resource_link uri="(.*?)" title="(.*?)"\/>|<embedded_resource uri="(.*?)">\n([\s\S]*?)\n<\/embedded_resource>/g;
@@ -169,7 +170,7 @@ function userPromptUpdate(stepRow: StepRow): SessionUpdate[] {
       }
     }
   }
-  if (blocks.length === 0) blocks.push({ type: "text", text });
+  if (blocks.length === 0) blocks.push({ type: "text", text: rawText });
 
   return blocks.map((content) => ({ sessionUpdate: "user_message_chunk", content, messageId: String(stepRow.idx) })) as SessionUpdate[];
 }
