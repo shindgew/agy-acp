@@ -2,6 +2,7 @@
 // Docs: https://agentclientprotocol.com/protocol/v1/prompt-turn#cancellation
 
 import type { SessionState } from "./types.js";
+import { turnsOf } from "./turn-scheduler.js";
 import * as v2 from "@agentclientprotocol/sdk/experimental/v2";
 
 function cancelQueuedV2Prompt(
@@ -59,6 +60,8 @@ export async function handleCancel(
     }
   }
 
-  session.promptAbort?.abort();
+  // Aborts the running turn *and* any steer holding a reservation — a steer
+  // waiting for the previous turn to stop is still the user's turn to cancel.
+  turnsOf(session).abortAll();
   await session.agy.cancel();
 }

@@ -6,7 +6,7 @@ import type { SessionDeleteTarget } from "./delete.js";
 
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { wakePromptIdleWaiters } from "./prompt.js";
+import { turnsOf } from "./turn-scheduler.js";
 
 export async function handleCloseSession(
   params: CloseSessionRequest,
@@ -16,9 +16,9 @@ export async function handleCloseSession(
   activeSessions.delete(params.sessionId);
   if (session) {
     (session as SessionState).closed = true;
-    // Unblock any steer waiter before teardown so it observes `closed`.
-    wakePromptIdleWaiters(session as SessionState);
-    session.promptAbort?.abort();
+    // Abort running turns and steer reservations before touching the backend,
+    // so a stalled client transport cannot delay teardown.
+    turnsOf(session as SessionState).close();
     cancelQueuedPrompts(session as SessionState);
     await session.agy.close();
   }

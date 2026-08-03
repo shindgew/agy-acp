@@ -8,15 +8,15 @@ import * as acp from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
 import { createAcpApp, createAcpV2App } from "../src/agent.js";
-import { cancelQueuedPrompts } from "../src/acp/session/cancel.js";
+import { cancelQueuedPrompts, handleCancel } from "../src/acp/session/cancel.js";
 import { handleCloseSession } from "../src/acp/session/close.js";
 import {
   handlePromptV1,
   handlePromptV2,
-  wakePromptIdleWaiters,
   type PromptV1Deps,
   type PromptV2Deps
 } from "../src/acp/session/prompt.js";
+import { turnsOf } from "../src/acp/session/turn-scheduler.js";
 import type { SessionState } from "../src/acp/session/types.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload } from "./fixtures/step-encoder.js";
@@ -122,7 +122,6 @@ describe("queue and steer-by-cancel", () => {
       sessionId: "s1",
       cwd: "/repo",
       additionalDirectories: [],
-      activePrompt: false,
       promptQueue: [],
       v2UserMessageIdsByStep: {},
       catalog: { models: [], byBase: new Map() },
@@ -144,7 +143,7 @@ describe("queue and steer-by-cancel", () => {
       sessionId: "s1",
       prompt: [{ type: "text", text: "/plan" }]
     } as any, client, undefined, deps);
-    await waitFor(() => session.activePrompt);
+    await waitFor(() => turnsOf(session).busy());
 
     await expect(handlePromptV1({
       sessionId: "s1",
@@ -153,7 +152,7 @@ describe("queue and steer-by-cancel", () => {
 
     releaseConfigNotification();
     await expect(first).resolves.toEqual({ stopReason: "end_turn" });
-    expect(session.activePrompt).toBe(false);
+    expect(turnsOf(session).busy()).toBe(false);
   });
 
   it("cancels a v1 turn while prompt content is still being prepared", async () => {
@@ -162,7 +161,6 @@ describe("queue and steer-by-cancel", () => {
       sessionId: "s1",
       cwd: "/repo",
       additionalDirectories: [],
-      activePrompt: false,
       promptQueue: [],
       v2UserMessageIdsByStep: {},
       catalog: { models: [], byBase: new Map() },
@@ -191,22 +189,23 @@ describe("queue and steer-by-cancel", () => {
       prompt: [{ type: "text", text: "prepared asynchronously" }]
     } as any, { notify: async () => {} } as any, undefined, deps);
 
-    expect(session.promptAbort).toBeDefined();
-    session.promptAbort!.abort();
+    expect(turnsOf(session).activeClaim).toBeDefined();
+    turnsOf(session).activeClaim!.abort();
 
     await expect(response).resolves.toEqual({ stopReason: "cancelled" });
     expect(promptCalls).toBe(0);
-    expect(session.promptAbort).toBeUndefined();
-    expect(session.activePrompt).toBe(false);
+    expect(turnsOf(session).activeClaim).toBeUndefined();
+    expect(turnsOf(session).busy()).toBe(false);
   });
 
   it("places concurrent v2 queue requests in FIFO before notification awaits", async () => {
     const session = {
       sessionId: "s1",
       cwd: "/repo",
-      activePrompt: true,
       promptQueue: []
     } as unknown as SessionState;
+    // A turn is already running, so both requests must queue rather than start.
+    turnsOf(session).claimIdle("foreground");
     const deps = {
       requireSession: () => session
     } as unknown as PromptV2Deps;
@@ -245,9 +244,7 @@ describe("queue and steer-by-cancel", () => {
     const session = {
       sessionId: "s1",
       cwd: "/repo",
-      activePrompt: true,
       promptQueue: [],
-      steerClaims: 0,
       agy: {
         cancel: () => {
           cancelCalls++;
@@ -258,6 +255,8 @@ describe("queue and steer-by-cancel", () => {
     const deps = {
       requireSession: () => session
     } as unknown as PromptV2Deps;
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground");
 
     const response = handlePromptV2({
       sessionId: "s1",
@@ -265,15 +264,16 @@ describe("queue and steer-by-cancel", () => {
       _meta: { "agy-acp/turnIntent": "steer" }
     } as any, { notify: async () => {} } as any, deps);
 
+    // Accepted while the backend cancellation is still pending.
     await expect(response).resolves.toEqual({});
-    expect(session.steerClaims).toBe(1);
+    expect(turns.busy()).toBe(true);
     await waitFor(() => cancelCalls === 1);
 
     session.closed = true;
-    wakePromptIdleWaiters(session);
+    turns.close();
+    turns.release(activeClaim);
     releaseCancel();
-    await waitFor(() => session.steerClaims === 0);
-    expect(session.promptIdleNotify).toBeUndefined();
+    await waitFor(() => !turns.busy());
   });
 
   it("cancels a v2 turn while prompt content is still being prepared", async () => {
@@ -281,7 +281,6 @@ describe("queue and steer-by-cancel", () => {
     const session = {
       sessionId: "s1",
       cwd: "/repo",
-      activePrompt: false,
       promptQueue: [],
       agy: {
         prompt: async () => {
@@ -300,13 +299,13 @@ describe("queue and steer-by-cancel", () => {
       prompt: [{ type: "text", text: "prepared asynchronously" }]
     } as any, { notify: async () => {} } as any, deps);
 
-    expect(session.promptAbort).toBeDefined();
-    session.promptAbort!.abort();
+    expect(turnsOf(session).activeClaim).toBeDefined();
+    turnsOf(session).activeClaim!.abort();
 
     await expect(response).resolves.toEqual({});
+    await waitFor(() => !turnsOf(session).busy());
     expect(promptCalls).toBe(0);
-    expect(session.promptAbort).toBeUndefined();
-    expect(session.activePrompt).toBe(false);
+    expect(turnsOf(session).activeClaim).toBeUndefined();
   });
 
   it("does not install a new idle waiter when a competing steer resumes after close", async () => {
@@ -314,9 +313,7 @@ describe("queue and steer-by-cancel", () => {
       sessionId: "s1",
       cwd: "/repo",
       additionalDirectories: [],
-      activePrompt: true,
       promptQueue: [],
-      steerClaims: 0,
       v2UserMessageIdsByStep: {},
       catalog: { models: [], byBase: new Map() },
       selectedBaseModel: "m",
@@ -342,30 +339,30 @@ describe("queue and steer-by-cancel", () => {
       _meta: { "agy-acp/turnIntent": "steer" }
     } as any, client, undefined, deps);
 
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground");
+
     const first = steer("first");
-    await waitFor(() => session.promptIdleNotify !== undefined);
     const second = steer("second");
-    await waitFor(() => session.steerClaims === 2);
+    await waitFor(() => activeClaim.aborted);
 
     session.closed = true;
-    wakePromptIdleWaiters(session);
+    turns.close();
+    turns.release(activeClaim);
 
     await expect(Promise.all([first, second])).resolves.toEqual([
       { stopReason: "cancelled" },
       { stopReason: "cancelled" }
     ]);
-    expect(session.promptIdleNotify).toBeUndefined();
-    expect(session.steerClaims).toBe(0);
+    expect(turns.busy()).toBe(false);
   });
 
   it("does not let stalled queued v2 notifications block session teardown", async () => {
-    const activeController = new AbortController();
     const queuedController = new AbortController();
     const notify = vi.fn(() => new Promise<void>(() => {}));
     const close = vi.fn(async () => {});
     const session = {
       sessionId: "s1",
-      activePrompt: true,
       promptQueue: [{
         id: "q1",
         version: "v2",
@@ -373,14 +370,14 @@ describe("queue and steer-by-cancel", () => {
         client: { notify },
         controller: queuedController
       }],
-      promptAbort: activeController,
       agy: { close }
     } as unknown as SessionState;
+    const activeClaim = turnsOf(session).claimIdle("foreground");
     const sessions = new Map([["s1", session]]);
 
     await handleCloseSession({ sessionId: "s1" }, sessions);
 
-    expect(activeController.signal.aborted).toBe(true);
+    expect(activeClaim.aborted).toBe(true);
     expect(queuedController.signal.aborted).toBe(true);
     expect(notify).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledOnce();
@@ -895,14 +892,11 @@ describe("queue and steer-by-cancel", () => {
 
   it("stops an aborted v1 steer before launching the replacement", async () => {
     let promptCalls = 0;
-    let wakeIdle: (() => void) | undefined;
     const session = {
       sessionId: "s1",
       cwd: "/repo",
       additionalDirectories: [],
-      activePrompt: true,
       promptQueue: [],
-      steerClaims: 0,
       v2UserMessageIdsByStep: {},
       catalog: { models: [], byBase: new Map() },
       selectedBaseModel: "m",
@@ -910,7 +904,7 @@ describe("queue and steer-by-cancel", () => {
       agy: {
         config: { mode: "default" },
         cancel: async () => {
-          // Keep activePrompt true until the steer is waiting on idle.
+          // Keep the turn owned until the steer is waiting on idle.
         },
         prompt: async () => {
           promptCalls++;
@@ -928,6 +922,8 @@ describe("queue and steer-by-cancel", () => {
       clientFileSystemV1: () => undefined
     };
 
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground");
     const controller = new AbortController();
     const steerPromise = handlePromptV1(
       {
@@ -940,19 +936,150 @@ describe("queue and steer-by-cancel", () => {
       deps
     );
 
-    // Wait until the steer has registered its idle waiter.
-    await waitFor(() => session.promptIdleNotify !== undefined);
-    wakeIdle = session.promptIdleNotify;
+    // Wait until the steer has displaced the active turn and is awaiting idle.
+    await waitFor(() => activeClaim.aborted);
 
     // Abort while still waiting for the prior turn to settle.
     controller.abort();
-    session.activePrompt = false;
-    wakeIdle?.();
+    turns.release(activeClaim);
 
     const result = await steerPromise;
     expect(result.stopReason).toBe("cancelled");
     expect(promptCalls).toBe(0);
-    expect(session.steerClaims ?? 0).toBe(0);
+    expect(turns.busy()).toBe(false);
+  });
+
+  it("cancels a reserved v2 steer that is still waiting for the active turn", async () => {
+    // PR #84 review: an accepted steer holds a reservation while it waits for
+    // the previous turn to stop. A stop arriving in that window was dropped,
+    // and the replacement launched anyway.
+    let promptCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async () => {
+          promptCalls++;
+          return { stopReason: "end_turn" };
+        },
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground");
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "replacement" }],
+      _meta: { "agy-acp/turnIntent": "steer" }
+    } as any, { notify: async () => {} } as any, deps)).resolves.toEqual({});
+
+    await waitFor(() => activeClaim.aborted);
+    await handleCancel("s1", new Map([["s1", session]]));
+    turns.release(activeClaim);
+
+    await waitFor(() => !turns.busy());
+    expect(promptCalls).toBe(0);
+  });
+
+  it("reports a failed v2 steer setup as a terminal idle update", async () => {
+    // PR #84 review: the RPC has already returned {}, so a setup failure that
+    // is only logged leaves the client stuck in `running` forever.
+    const updates: any[] = [];
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {
+          throw new Error("backend kill failed");
+        },
+        prompt: async () => ({ stopReason: "end_turn" }),
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground");
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = { notify: async (_m: string, p: any) => { updates.push(p.update); } } as any;
+
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "replacement" }],
+      _meta: { "agy-acp/turnIntent": "steer" }
+    } as any, client, deps)).resolves.toEqual({});
+
+    await waitFor(() => updates.length > 0);
+    expect(updates.at(-1)).toMatchObject({ sessionUpdate: "state_update", state: "idle" });
+    // The failed steer released its reservation; only the simulated turn holds
+    // the slot, so the session frees up once that finishes.
+    turns.release(activeClaim);
+    expect(turns.busy()).toBe(false);
+  });
+
+  it("releases the turn slot when a terminal update stalls and the session closes", async () => {
+    // A wedged client transport must not hold the turn slot forever: closing
+    // the session aborts the claim, which unblocks the terminal notification.
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        close: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" }),
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    // Every notification after the first two (user_message, running) stalls.
+    let sent = 0;
+    const client = {
+      notify: async () => {
+        sent++;
+        if (sent > 2) await new Promise<void>(() => {});
+      }
+    } as any;
+
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "hello" }]
+    } as any, client, deps)).resolves.toEqual({});
+
+    await waitFor(() => sent >= 3);
+    expect(turns.busy()).toBe(true);
+
+    await handleCloseSession({ sessionId: "s1" }, new Map([["s1", session]]) as any);
+
+    await waitFor(() => !turns.busy());
   });
 
   it("rejects a non-intent prompt while a steer replacement is in progress", async () => {

@@ -22,6 +22,7 @@ import { createConversationDb, insertStep } from "./fixtures/conversation-db.js"
 import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
+import { turnsOf } from "../src/acp/session/turn-scheduler.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import { parseClientToolCallName } from "../src/acp/initialize.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
@@ -821,7 +822,7 @@ describe("active session retention", () => {
     const close3 = vi.fn(async () => {});
     const session = (id: string, close: () => Promise<void>) => ({
       sessionId: id,
-      activePrompt: false,
+      promptQueue: [],
       agy: { close }
     });
     type SessionRetentionAgent = {
@@ -848,19 +849,18 @@ describe("active session retention", () => {
     const close1 = vi.fn(async () => {});
     const close2 = vi.fn(async () => {});
     const close3 = vi.fn(async () => {});
-    const session = (id: string, close: () => Promise<void>, steerClaims = 0) => ({
-      sessionId: id,
-      activePrompt: false,
-      steerClaims,
-      agy: { close }
-    });
+    const session = (id: string, close: () => Promise<void>, reserved = false) => {
+      const state = { sessionId: id, promptQueue: [], agy: { close } };
+      if (reserved) turnsOf(state as any).reserveSteer();
+      return state;
+    };
     type SessionRetentionAgent = {
       registerSession(id: string, session: unknown): Promise<void>;
       requireSession(id: string): unknown;
     };
     const retention = agent as unknown as SessionRetentionAgent;
 
-    await retention.registerSession("s1", session("s1", close1, 1));
+    await retention.registerSession("s1", session("s1", close1, true));
     await retention.registerSession("s2", session("s2", close2));
     await retention.registerSession("s3", session("s3", close3));
 

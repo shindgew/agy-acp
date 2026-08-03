@@ -39,24 +39,18 @@ export interface SessionState {
   catalog: ModelCatalog;
   selectedBaseModel: string;
   selectedReasoningEffort: string;
-  activePrompt: boolean;
+  /**
+   * Owns the session's single turn slot: who is running, who has reserved the
+   * next turn, and the abort controller for each. Created lazily via
+   * `turnsOf(session)`; see `turn-scheduler.ts` for the invariants.
+   */
+  turns?: import("./turn-scheduler.js").TurnScheduler;
   /** Per-session FIFO of queued follow-up prompts. */
   promptQueue: QueuedPrompt[];
   /** Serializes v2 queued-message preparation and publication in FIFO order. */
   promptQueuePreparation?: Promise<void>;
-  /** Resolves when the active turn reaches idle and the queue consumer can proceed. */
-  promptIdleNotify?: () => void;
-  /** Serializes steer replacements so competing requests cannot overlap. */
-  promptSteerInProgress?: Promise<void>;
-  /**
-   * Number of in-flight steer replacements that have reserved the next turn.
-   * While > 0, the queue must not auto-start — a steer owns the claim.
-   */
-  steerClaims?: number;
   /** Set when the session is being closed or deleted. */
   closed?: boolean;
   /** Stable v2 user-message IDs keyed by their persisted agy step index. */
   v2UserMessageIdsByStep: Record<string, string>;
-  /** Active prompt-turn abort controller, including pre-launch preparation. */
-  promptAbort?: AbortController;
 }

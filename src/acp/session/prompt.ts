@@ -1,5 +1,14 @@
 // ACP session/prompt: user message, agent execution loop, permission requests.
 // Docs: https://agentclientprotocol.com/protocol/v1/prompt-turn
+//
+// Turn ownership (who may talk to agy, and when) lives in `turn-scheduler.ts`.
+// Every accepted request here follows the same shape:
+//
+//   claim the slot (synchronously)  ->  runTurnBody  ->  exactly one terminal
+//
+// `runTurnBody` is shared by all five entry points (v1 foreground, v1 queued,
+// v2 foreground, v2 queued, v2 steer) so a fix lands in one place instead of
+// five. Cancellation unwinds by throwing, so no path can "forget" to re-check.
 
 import { randomUUID } from "node:crypto";
 import * as v1 from "@agentclientprotocol/sdk";
@@ -29,6 +38,14 @@ import { MODEL_CONFIG_ID } from "./config-options.js";
 import { MODE_CONFIG_ID } from "./modes.js";
 import { requestPermissionV1, requestPermissionV2 } from "./request-permission.js";
 import type { QueuedPromptV1, QueuedPromptV2, SessionState, TurnIntent } from "./types.js";
+import {
+  isTurnCancelled,
+  onAbort,
+  raceClaim,
+  TurnCancelled,
+  turnsOf,
+  type TurnClaim
+} from "./turn-scheduler.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1 } from "./update-wire.js";
 
 export interface PromptTurnDeps {
@@ -51,6 +68,8 @@ export interface PromptV2Deps extends PromptTurnDeps {
   clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
 }
 
+type StopReason = "end_turn" | "cancelled";
+
 export function parseTurnIntent(params: unknown): TurnIntent | undefined {
   if (!params || typeof params !== "object") return undefined;
   const meta = (params as Record<string, unknown>)._meta;
@@ -58,27 +77,6 @@ export function parseTurnIntent(params: unknown): TurnIntent | undefined {
   const intent = (meta as Record<string, unknown>)["agy-acp/turnIntent"];
   if (intent === "queue" || intent === "steer") return intent;
   return undefined;
-}
-
-function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) {
-      reject(signal.reason);
-      return;
-    }
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      }
-    );
-  });
 }
 
 function notifyV2BestEffort(
@@ -95,76 +93,43 @@ function notifyV2BestEffort(
 
 /** True when a turn is running or a steer has reserved the next turn. */
 export function sessionTurnBusy(session: SessionState): boolean {
-  return session.activePrompt || (session.steerClaims ?? 0) > 0;
-}
-
-export function notifyIdleAndDrainQueue(session: SessionState): void {
-  const notify = session.promptIdleNotify;
-  session.promptIdleNotify = undefined;
-  if (notify) {
-    notify();
-    return;
-  }
-
-  if (session.closed) return;
-  // A steer has reserved the next turn (possibly still waiting on a prior steer).
-  if ((session.steerClaims ?? 0) > 0) return;
-
-  if (!session.activePrompt && session.promptQueue.length > 0) {
-    const next = session.promptQueue.shift()!;
-    if (next.version === "v1") {
-      if (next.signal?.aborted) {
-        next.resolve({ stopReason: "cancelled" });
-        notifyIdleAndDrainQueue(session);
-        return;
-      }
-      void executeQueuedV1Turn(next).catch((error) => {
-        console.error(`[agy-acp] queued v1 turn failed: ${(error as Error).message}`);
-      });
-    } else {
-      if (next.controller.signal.aborted) {
-        void next.client.notify(v2.methods.client.session.update, {
-          sessionId: next.params.sessionId,
-          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
-        }).catch(() => {});
-        notifyIdleAndDrainQueue(session);
-        return;
-      }
-      void executeQueuedV2Turn(next).catch((error) => {
-        console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
-      });
-    }
-  }
+  return turnsOf(session).busy();
 }
 
 /**
- * Claim the session for a steer replacement before any await, then serialize
- * against other steers. The returned release must run exactly once (success,
- * cancel, or closed) so the queue can drain again.
+ * Start the next queued prompt if the session is free. Safe to call from any
+ * finalizer; it is a no-op while a turn or steer reservation owns the slot.
  */
-async function acquireSteerSlot(session: SessionState): Promise<() => void> {
-  session.steerClaims = (session.steerClaims ?? 0) + 1;
-  const previousSteer = session.promptSteerInProgress;
-  let release!: () => void;
-  session.promptSteerInProgress = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  if (previousSteer) await previousSteer;
+export function notifyIdleAndDrainQueue(session: SessionState): void {
+  if (session.closed) return;
+  const turns = turnsOf(session);
+  if (turns.busy()) return;
+  if (session.promptQueue.length === 0) return;
 
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    session.steerClaims = Math.max(0, (session.steerClaims ?? 1) - 1);
-    release();
-  };
-}
-
-/** Wake any steer idle-waiter after marking the session closed. */
-export function wakePromptIdleWaiters(session: SessionState): void {
-  const notify = session.promptIdleNotify;
-  session.promptIdleNotify = undefined;
-  notify?.();
+  const next = session.promptQueue.shift()!;
+  if (next.version === "v1") {
+    if (next.signal?.aborted) {
+      next.resolve({ stopReason: "cancelled" });
+      notifyIdleAndDrainQueue(session);
+      return;
+    }
+    void executeQueuedV1Turn(next).catch((error) => {
+      console.error(`[agy-acp] queued v1 turn failed: ${(error as Error).message}`);
+    });
+  } else {
+    if (next.controller.signal.aborted) {
+      notifyV2BestEffort(next.client, next.params.sessionId, {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      notifyIdleAndDrainQueue(session);
+      return;
+    }
+    void executeQueuedV2Turn(next).catch((error) => {
+      console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
+    });
+  }
 }
 
 /**
@@ -216,6 +181,298 @@ export async function applyCuratedSlashCommand(
 }
 
 /**
+ * Per-version hooks for the shared turn body. Progress notifications differ
+ * between v1 and v2; the ordering, cancellation, and persistence rules do not.
+ */
+interface TurnAdapter {
+  /** v2 foreground only — queued v2 already published it, v1 has no concept. */
+  announceUserMessage?(promptText: string): Promise<void>;
+  /** v2 only. */
+  announceRunning?(): Promise<void>;
+  forwardUpdates(promptText: string, claim: TurnClaim): Promise<{ stopReason: string }>;
+  applySlash(promptText: string): Promise<boolean>;
+}
+
+/**
+ * The one turn body. Converts content, honors curated slash commands, runs agy,
+ * and persists. Throws `TurnCancelled` the moment the claim is aborted — every
+ * await is guarded, so there is no "recheck the flag afterwards" step to omit.
+ */
+async function runTurnBody(
+  sessionId: string,
+  promptBlocks: v1.ContentBlock[],
+  session: SessionState,
+  claim: TurnClaim,
+  adapter: TurnAdapter,
+  deps: PromptTurnDeps,
+  /** Queued v2 converts at enqueue time; re-converting would rewrite attachments. */
+  preconverted?: string
+): Promise<StopReason> {
+  const guard = <T>(promise: Promise<T>) => raceClaim(promise, claim);
+  const ensureLive = () => {
+    claim.throwIfAborted();
+    if (session.closed) throw new TurnCancelled();
+  };
+
+  ensureLive();
+  const promptText = preconverted ?? await guard(contentBlocksToPrompt(promptBlocks, session.cwd));
+  ensureLive();
+
+  if (adapter.announceUserMessage) {
+    await guard(adapter.announceUserMessage(promptText));
+    ensureLive();
+  }
+  if (adapter.announceRunning) {
+    await guard(adapter.announceRunning());
+    ensureLive();
+  }
+
+  // Only intercept pure client text blocks; a resource or image payload whose
+  // flattened body happens to read `/plan` must be forwarded to agy verbatim.
+  if (isClientTextSlashPrompt(promptBlocks)) {
+    const handled = await guard(adapter.applySlash(promptText));
+    if (handled) {
+      ensureLive();
+      return "end_turn";
+    }
+    ensureLive();
+  }
+
+  // The backend is now the thing to stop, so route aborts to it. `onAbort`
+  // fires immediately if the claim is already aborted.
+  const stopBackend = () => {
+    session.agy.cancel().catch(() => {
+      // The prompt loop surfaces process failures through its own result.
+    });
+  };
+  const detach = onAbort(claim.signal, stopBackend);
+  try {
+    ensureLive();
+    const outcome = await adapter.forwardUpdates(promptText, claim);
+    if (!session.closed) {
+      await deps.persistSession(sessionId, session);
+    }
+    return outcome.stopReason === "cancelled" || claim.aborted || session.closed
+      ? "cancelled"
+      : "end_turn";
+  } catch (error) {
+    // Persist even on failure: agy's conversation id/step position may have
+    // advanced before it errored out, and that partial progress is worth
+    // resuming from on the next prompt.
+    if (!claim.aborted && !session.closed) {
+      await deps.persistSession(sessionId, session).catch(() => {});
+    }
+    throw error;
+  } finally {
+    detach();
+  }
+}
+
+function v1Adapter(
+  params: V1PromptRequest,
+  client: V1AgentContext,
+  session: SessionState,
+  deps: PromptV1Deps
+): TurnAdapter {
+  return {
+    applySlash: (promptText) => applyCuratedSlashCommand(
+      params.sessionId,
+      promptText,
+      {
+        // ACP transition: send both legacy current_mode_update (modes-API clients)
+        // and config_option_update (configOptions clients) on slash mode changes.
+        modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
+        configChanged: async () => {
+          await deps.notifyConfigOptionUpdateV1(
+            client,
+            params.sessionId,
+            deps.requireSession(params.sessionId)
+          );
+        }
+      },
+      deps
+    ),
+    forwardUpdates: async (promptText, claim) => {
+      const tracker = createTerminalOutputTracker();
+      const clientToolCallName = deps.clientToolCallNameV1?.(client);
+      return session.agy.prompt(promptText, async (update) => {
+        await client.notify(v1.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: sessionUpdateToV1(update, tracker, { clientToolCallName })
+        });
+      }, async (toolCall, { toolName, questionIndex }) => {
+        const elicitationCap = deps.clientElicitationV1?.(client);
+        return requestPermissionV1(
+          client,
+          params.sessionId,
+          toolCall,
+          toolName,
+          claim.signal,
+          questionIndex,
+          elicitationCap,
+          clientToolCallName
+        );
+      }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
+    }
+  };
+}
+
+function v2Adapter(
+  params: V2PromptRequest,
+  client: V2AgentContext,
+  session: SessionState,
+  deps: PromptV2Deps,
+  options: { userMessageId?: string; announceUserMessage: boolean }
+): TurnAdapter {
+  const notify = async (update: v2.SessionUpdate) => {
+    await client.notify(v2.methods.client.session.update, {
+      sessionId: params.sessionId,
+      update
+    });
+  };
+  // Assigned when announced (foreground) or supplied by the queue (already
+  // announced at enqueue time); recorded against agy's step index afterwards.
+  let userMessageId = options.userMessageId ?? "";
+
+  const adapter: TurnAdapter = {
+    announceUserMessage: options.announceUserMessage
+      ? async (promptText: string) => {
+          userMessageId = v2UserMessageId(params.prompt as v1.ContentBlock[], promptText);
+          await notify({
+            sessionUpdate: "user_message",
+            messageId: userMessageId,
+            content: params.prompt as v2.ContentBlock[]
+          });
+        }
+      : undefined,
+    announceRunning: () => notify({ sessionUpdate: "state_update", state: "running" }),
+    applySlash: (promptText) => applyCuratedSlashCommand(
+      params.sessionId,
+      promptText,
+      {
+        configChanged: () => deps.notifyConfigOptionUpdateV2(
+          client,
+          params.sessionId,
+          deps.requireSession(params.sessionId)
+        )
+      },
+      deps
+    ),
+    forwardUpdates: async (promptText, claim) => {
+      const terminalTracker = createTerminalOutputTracker();
+      const toolContentTracker = createToolCallContentTracker();
+      const clientToolCallName = deps.clientToolCallNameV2?.(client);
+      try {
+        return await session.agy.prompt(promptText, async (update) => {
+          for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker, { clientToolCallName })) {
+            await raceClaim(notify(v2Update), claim);
+          }
+        }, async (toolCall, { toolName, questionIndex }) => {
+          const elicitationCap = deps.clientElicitationV2?.(client);
+          return requestPermissionV2(
+            client,
+            params.sessionId,
+            toolCall,
+            toolName,
+            claim.signal,
+            questionIndex,
+            elicitationCap,
+            clientToolCallName
+          );
+        }, undefined, deps.clientElicitationV2?.(client));
+      } finally {
+        const userStepIdxs = session.agy.lastPromptUserStepIdxs;
+        if (userStepIdxs.length > 1) {
+          throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
+        }
+        if (userStepIdxs.length === 1 && userMessageId) {
+          session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
+        }
+      }
+    }
+  };
+  return adapter;
+}
+
+/**
+ * Emit a v2 turn's single terminal `idle` update.
+ *
+ * Racing the claim matters: if the session is closed or cancelled while this
+ * notification is in flight on a stalled transport, teardown must not be held
+ * up — and neither must the turn slot, which is only released afterwards.
+ */
+function v2TerminalEmitter(
+  client: V2AgentContext,
+  sessionId: string,
+  session: SessionState,
+  claim: TurnClaim
+): (stopReason: StopReason) => Promise<void> {
+  return async (stopReason) => {
+    const update: v2.SessionUpdate = {
+      sessionUpdate: "state_update",
+      state: "idle",
+      stopReason
+    };
+    if (session.closed || claim.aborted) {
+      notifyV2BestEffort(client, sessionId, update);
+      return;
+    }
+    try {
+      await raceClaim(
+        client.notify(v2.methods.client.session.update, { sessionId, update }),
+        claim
+      );
+    } catch (error) {
+      if (!isTurnCancelled(error)) throw error;
+      notifyV2BestEffort(client, sessionId, update);
+    }
+  };
+}
+
+/** Slash selections get a distinguishable message id, matching v2 clients. */
+function v2UserMessageId(promptBlocks: v1.ContentBlock[], promptText: string): string {
+  const parsedSlash = isClientTextSlashPrompt(promptBlocks) ? parseSlashCommand(promptText) : null;
+  const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
+  return slashResult && slashResult.kind !== "pass"
+    ? `slash-${randomUUID()}`
+    : `user-${randomUUID()}`;
+}
+
+/**
+ * Run a claimed turn to completion and report exactly one terminal outcome.
+ * Every accepted request — foreground, queued, steered, or one that fails
+ * during setup — ends here, so a prompt can never vanish without a terminal.
+ */
+async function completeTurn(
+  session: SessionState,
+  claim: TurnClaim,
+  body: () => Promise<StopReason>,
+  report: {
+    terminal(stopReason: StopReason): void | Promise<void>;
+    failure(error: unknown): void | Promise<void>;
+  }
+): Promise<void> {
+  const turns = turnsOf(session);
+  try {
+    let stopReason: StopReason;
+    try {
+      stopReason = await body();
+    } catch (error) {
+      if (isTurnCancelled(error) || claim.aborted || session.closed) {
+        stopReason = "cancelled";
+      } else {
+        await report.failure(error);
+        return;
+      }
+    }
+    await report.terminal(stopReason);
+  } finally {
+    turns.release(claim);
+    notifyIdleAndDrainQueue(session);
+  }
+}
+
+/**
  * v1 `session/prompt`: response carries stopReason after the full turn.
  *
  * Zero prompt injection: only client `params.prompt` content is encoded and
@@ -228,375 +485,123 @@ export async function handlePromptV1(
   deps: PromptV1Deps
 ): Promise<V1PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  const busyAtAdmission = sessionTurnBusy(session);
-  if (busyAtAdmission) {
+  const turns = turnsOf(session);
+
+  if (turns.busy()) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
-      return new Promise<V1PromptResponse>((resolve, reject) => {
-        const queuedId = `q-${randomUUID()}`;
-        const queued: QueuedPromptV1 = {
-          id: queuedId,
-          version: "v1",
-          params,
-          client,
-          signal,
-          deps,
-          resolve,
-          reject
-        };
-        session.promptQueue.push(queued);
-        if (signal) {
-          const onAbort = () => {
-            const idx = session.promptQueue.findIndex((q) => q.id === queuedId);
-            if (idx >= 0) {
-              session.promptQueue.splice(idx, 1);
-              resolve({ stopReason: "cancelled" });
-            }
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-          if (signal.aborted) onAbort();
-        }
-      });
+      return enqueueV1(params, client, signal, session, deps);
     }
     if (intent !== "steer") {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
-  }
-
-  // Own the steer claim (if any) for the full replacement path — including
-  // setup failures and slash-only turns — so release + queue drain always run.
-  let releaseSteer: (() => void) | undefined;
-  let ownsActivePrompt = false;
-  let turnController: AbortController | undefined;
-  const cancelled = () => Boolean(
-    signal?.aborted || turnController?.signal.aborted || session.closed
-  );
-  if (!busyAtAdmission) {
-    // Claim an idle session before attachment conversion or config awaits.
-    session.activePrompt = true;
-    ownsActivePrompt = true;
-    turnController = new AbortController();
-    session.promptAbort = turnController;
-  }
-  try {
-    if (busyAtAdmission) {
-      // Reserve before any await so a queued follow-up cannot claim the session.
-      releaseSteer = await acquireSteerSlot(session);
-      // Teardown may have completed while this steer waited behind another.
-      if (cancelled()) {
-        return { stopReason: "cancelled" };
-      }
-      const waitForIdle = session.activePrompt
-        ? new Promise<void>((resolve) => {
-            const prevNotify = session.promptIdleNotify;
-            session.promptIdleNotify = () => {
-              prevNotify?.();
-              resolve();
-            };
-          })
-        : undefined;
-      session.promptAbort?.abort();
-      await session.agy.cancel();
-      await waitForIdle;
-      // Request may have been cancelled while waiting on the prior turn/steer.
-      if (cancelled()) {
-        return { stopReason: "cancelled" };
-      }
-      session.activePrompt = true;
-      ownsActivePrompt = true;
-      turnController = new AbortController();
-      session.promptAbort = turnController;
-    }
-
-    const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
-    if (cancelled()) {
-      return { stopReason: "cancelled" };
-    }
-
-    // Curated slash commands → config options; do not spawn agy for those.
-    // Only intercept pure client text blocks (not resource/image payloads whose
-    // flattened body happens to look like `/plan`).
-    const handled =
-      isClientTextSlashPrompt(params.prompt) &&
-      (await applyCuratedSlashCommand(
-        params.sessionId,
-        prompt,
-        {
-          // ACP transition: send both legacy current_mode_update (modes-API clients)
-          // and config_option_update (configOptions clients) on slash-command mode changes.
-          modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
-          configChanged: async () => {
-            await deps.notifyConfigOptionUpdateV1(
-              client,
-              params.sessionId,
-              deps.requireSession(params.sessionId)
-            );
-          }
-        },
-        deps
-      ));
-    if (handled) {
-      return { stopReason: cancelled() ? "cancelled" : "end_turn" };
-    }
-
-    if (cancelled()) {
-      return { stopReason: "cancelled" };
-    }
-
-    const cancelPrompt = () => {
-      session.agy.cancel().catch(() => {
-        // The prompt loop will surface process failures through its own result.
-      });
-    };
-    signal?.addEventListener("abort", cancelPrompt, { once: true });
-    turnController?.signal.addEventListener("abort", cancelPrompt, { once: true });
-    // Listener only fires for future aborts; honor an already-aborted signal.
-    if (cancelled()) {
-      signal?.removeEventListener("abort", cancelPrompt);
-      turnController?.signal.removeEventListener("abort", cancelPrompt);
-      return { stopReason: "cancelled" };
-    }
-
-    try {
-      const tracker = createTerminalOutputTracker();
-      const clientToolCallName = deps.clientToolCallNameV1?.(client);
-      const outcome = await session.agy.prompt(prompt, async (update) => {
-        await client.notify(v1.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: sessionUpdateToV1(update, tracker, { clientToolCallName })
-        });
-      }, async (toolCall, { toolName, questionIndex }) => {
-        const elicitationCap = deps.clientElicitationV1?.(client);
-        return requestPermissionV1(
-          client,
+    // Reserve synchronously: the claim (and its abort controller) must exist
+    // before the first await so a cancel during the wait is never dropped.
+    const claim = turns.reserveSteer(signal);
+    let response: V1PromptResponse = { stopReason: "cancelled" };
+    await completeTurn(
+      session,
+      claim,
+      async () => {
+        await turns.promote(claim, () => session.agy.cancel());
+        return runTurnBody(
           params.sessionId,
-          toolCall,
-          toolName,
-          signal,
-          questionIndex,
-          elicitationCap,
-          clientToolCallName
+          params.prompt,
+          session,
+          claim,
+          v1Adapter(params, client, session, deps),
+          deps
         );
-      }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
-      if (!session.closed) {
-        await deps.persistSession(params.sessionId, session);
+      },
+      {
+        terminal: (stopReason) => {
+          response = { stopReason };
+        },
+        failure: (error) => {
+          throw error;
+        }
       }
-      return {
-        stopReason: outcome.stopReason === "cancelled" || cancelled() ? "cancelled" : "end_turn"
-      };
-    } catch (error) {
-      // Persist even on failure: agy's conversation id/step position may have
-      // advanced before it errored out, and that partial progress is worth
-      // resuming from on the next prompt.
-      if (!cancelled()) {
-        await deps.persistSession(params.sessionId, session).catch(() => {});
-      }
-      throw error;
-    } finally {
-      signal?.removeEventListener("abort", cancelPrompt);
-      turnController?.signal.removeEventListener("abort", cancelPrompt);
-    }
-  } finally {
-    if (turnController && session.promptAbort === turnController) {
-      session.promptAbort = undefined;
-    }
-    if (ownsActivePrompt) {
-      session.activePrompt = false;
-    }
-    releaseSteer?.();
-    // Slash-only, closed, setup-error, and agy paths all release the same
-    // admission claim here, after which queued work may proceed.
-    if (!session.activePrompt) {
-      notifyIdleAndDrainQueue(session);
-    }
+    );
+    return response;
   }
+
+  const claim = turns.claimIdle("foreground", signal);
+  let response: V1PromptResponse = { stopReason: "cancelled" };
+  await completeTurn(
+    session,
+    claim,
+    () => runTurnBody(
+      params.sessionId,
+      params.prompt,
+      session,
+      claim,
+      v1Adapter(params, client, session, deps),
+      deps
+    ),
+    {
+      terminal: (stopReason) => {
+        response = { stopReason };
+      },
+      failure: (error) => {
+        throw error;
+      }
+    }
+  );
+  return response;
+}
+
+function enqueueV1(
+  params: V1PromptRequest,
+  client: V1AgentContext,
+  signal: AbortSignal | undefined,
+  session: SessionState,
+  deps: PromptV1Deps
+): Promise<V1PromptResponse> {
+  return new Promise<V1PromptResponse>((resolve, reject) => {
+    const queuedId = `q-${randomUUID()}`;
+    session.promptQueue.push({
+      id: queuedId,
+      version: "v1",
+      params,
+      client,
+      signal,
+      deps,
+      resolve,
+      reject
+    } satisfies QueuedPromptV1);
+    if (signal) {
+      onAbort(signal, () => {
+        const idx = session.promptQueue.findIndex((q) => q.id === queuedId);
+        if (idx >= 0) {
+          session.promptQueue.splice(idx, 1);
+          resolve({ stopReason: "cancelled" });
+        }
+      });
+    }
+  });
 }
 
 async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   const { params, client, signal, deps, resolve, reject } = item;
   const session = deps.requireSession(params.sessionId);
-  session.activePrompt = true;
-  const turnController = new AbortController();
-  session.promptAbort = turnController;
+  const claim = turnsOf(session).claimIdle("queued", signal);
 
-  const cancelled = () => Boolean(
-    signal?.aborted || turnController.signal.aborted || session.closed
+  await completeTurn(
+    session,
+    claim,
+    () => runTurnBody(
+      params.sessionId,
+      params.prompt,
+      session,
+      claim,
+      v1Adapter(params, client, session, deps),
+      deps
+    ),
+    {
+      terminal: (stopReason) => resolve({ stopReason }),
+      failure: (error) => reject(error as Error)
+    }
   );
-
-  try {
-    if (cancelled()) {
-      resolve({ stopReason: "cancelled" });
-      return;
-    }
-
-    const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
-    if (cancelled()) {
-      resolve({ stopReason: "cancelled" });
-      return;
-    }
-
-    const handled =
-      isClientTextSlashPrompt(params.prompt) &&
-      (await applyCuratedSlashCommand(
-        params.sessionId,
-        prompt,
-        {
-          modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
-          configChanged: async () => {
-            await deps.notifyConfigOptionUpdateV1(
-              client,
-              params.sessionId,
-              deps.requireSession(params.sessionId)
-            );
-          }
-        },
-        deps
-      ));
-    if (handled) {
-      resolve({ stopReason: cancelled() ? "cancelled" : "end_turn" });
-      return;
-    }
-
-    if (cancelled()) {
-      resolve({ stopReason: "cancelled" });
-      return;
-    }
-
-    const cancelPrompt = () => {
-      session.agy.cancel().catch(() => {});
-    };
-    signal?.addEventListener("abort", cancelPrompt, { once: true });
-    turnController.signal.addEventListener("abort", cancelPrompt, { once: true });
-    // Listener only fires for future aborts; honor an already-aborted signal.
-    if (cancelled()) {
-      signal?.removeEventListener("abort", cancelPrompt);
-      turnController.signal.removeEventListener("abort", cancelPrompt);
-      cancelPrompt();
-      resolve({ stopReason: "cancelled" });
-      return;
-    }
-
-    try {
-      const tracker = createTerminalOutputTracker();
-      const clientToolCallName = deps.clientToolCallNameV1?.(client);
-      const outcome = await session.agy.prompt(prompt, async (update) => {
-        await client.notify(v1.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: sessionUpdateToV1(update, tracker, { clientToolCallName })
-        });
-      }, async (toolCall, { toolName, questionIndex }) => {
-        const elicitationCap = deps.clientElicitationV1?.(client);
-        return requestPermissionV1(
-          client,
-          params.sessionId,
-          toolCall,
-          toolName,
-          signal,
-          questionIndex,
-          elicitationCap,
-          clientToolCallName
-        );
-      }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
-      if (!session.closed) {
-        await deps.persistSession(params.sessionId, session);
-      }
-      resolve({
-        stopReason:
-          outcome.stopReason === "cancelled" || cancelled() ? "cancelled" : "end_turn"
-      });
-    } finally {
-      signal?.removeEventListener("abort", cancelPrompt);
-      turnController.signal.removeEventListener("abort", cancelPrompt);
-    }
-  } catch (error) {
-    if (!cancelled()) {
-      await deps.persistSession(params.sessionId, session).catch(() => {});
-    }
-    if (cancelled()) {
-      resolve({ stopReason: "cancelled" });
-      return;
-    }
-    reject(error as Error);
-  } finally {
-    if (session.promptAbort === turnController) {
-      session.promptAbort = undefined;
-    }
-    session.activePrompt = false;
-    notifyIdleAndDrainQueue(session);
-  }
-}
-
-async function runSteeredV2Turn(
-  params: V2PromptRequest,
-  client: V2AgentContext,
-  session: SessionState,
-  steerSlot: Promise<() => void>,
-  deps: PromptV2Deps
-): Promise<void> {
-  const releaseSteer = await steerSlot;
-  let ownsActivePrompt = false;
-  let controller: AbortController | undefined;
-  try {
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    const waitForIdle = session.activePrompt
-      ? new Promise<void>((resolve) => {
-          const prevNotify = session.promptIdleNotify;
-          session.promptIdleNotify = () => {
-            prevNotify?.();
-            resolve();
-          };
-        })
-      : undefined;
-    session.promptAbort?.abort();
-    await session.agy.cancel();
-    await waitForIdle;
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    session.activePrompt = true;
-    ownsActivePrompt = true;
-    controller = new AbortController();
-    session.promptAbort = controller;
-    const promptText = await contentBlocksToPrompt(
-      params.prompt as v1.ContentBlock[],
-      session.cwd
-    );
-    if (controller.signal.aborted || session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    await runV2PromptTurn(params, client, session, promptText, controller.signal, deps);
-  } finally {
-    if (controller && session.promptAbort === controller) {
-      session.promptAbort = undefined;
-    }
-    if (ownsActivePrompt) {
-      session.activePrompt = false;
-    }
-    releaseSteer();
-    if (!session.activePrompt) {
-      notifyIdleAndDrainQueue(session);
-    }
-  }
 }
 
 /**
@@ -612,463 +617,199 @@ export async function handlePromptV2(
   deps: PromptV2Deps
 ): Promise<V2PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  const busyAtAdmission = sessionTurnBusy(session);
-  if (busyAtAdmission) {
+  const turns = turnsOf(session);
+
+  if (turns.busy()) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
-      const controller = new AbortController();
-      const queuedId = `q-${randomUUID()}`;
-      const queued: QueuedPromptV2 = {
-        id: queuedId,
-        version: "v2",
-        params,
-        client,
-        ready: Promise.resolve(),
-        controller,
-        deps
-      };
-      // Enter FIFO before conversion or client transport awaits can reorder
-      // concurrently admitted queue requests.
-      session.promptQueue.push(queued);
-      const responseQueued = new Promise<void>((resolve) => {
-        setTimeout(resolve, 0);
-      });
-      const previousPreparation = session.promptQueuePreparation ?? Promise.resolve();
-      queued.ready = raceWithAbort(
-        previousPreparation.catch(() => {}).then(() => responseQueued).then(async () => {
-          const promptText = await contentBlocksToPrompt(
-            params.prompt as v1.ContentBlock[],
-            session.cwd
-          );
-          controller.signal.throwIfAborted();
-          const parsedSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[])
-            ? parseSlashCommand(promptText)
-            : null;
-          const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
-          const userMessageId =
-            slashResult && slashResult.kind !== "pass"
-              ? `slash-${randomUUID()}`
-              : `user-${randomUUID()}`;
-
-          await client.notify(v2.methods.client.session.update, {
-            sessionId: params.sessionId,
-            update: {
-              sessionUpdate: "user_message",
-              messageId: userMessageId,
-              content: params.prompt as v2.ContentBlock[]
-            }
-          });
-          controller.signal.throwIfAborted();
-          queued.promptText = promptText;
-          queued.userMessageId = userMessageId;
-        }),
-        controller.signal
-      );
-      session.promptQueuePreparation = queued.ready.then(() => {}, () => {});
-      void queued.ready.catch(() => {
-        const idx = session.promptQueue.findIndex((item) => item.id === queuedId);
-        if (idx < 0) return; // The FIFO executor owns terminal reporting.
-        session.promptQueue.splice(idx, 1);
-        if (!controller.signal.aborted && !session.closed) {
-          notifyV2BestEffort(client, params.sessionId, {
-            sessionUpdate: "state_update",
-            state: "idle",
-            stopReason: "end_turn"
-          });
-        }
-        if (!sessionTurnBusy(session)) notifyIdleAndDrainQueue(session);
-      });
-      if (!sessionTurnBusy(session)) {
-        notifyIdleAndDrainQueue(session);
-      }
+      enqueueV2(params, client, session, deps);
       return {};
     }
     if (intent !== "steer") {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
-    // Reserve synchronously, acknowledge the RPC, then cancel and replace on
-    // the next task so backend shutdown latency cannot delay v2 acceptance.
-    const steerSlot = acquireSteerSlot(session);
-    const responseQueued = new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
-    });
-    void responseQueued
-      .then(() => runSteeredV2Turn(params, client, session, steerSlot, deps))
+    // Reserve synchronously, acknowledge the RPC, then displace the active turn
+    // on the next task so backend shutdown latency cannot delay acceptance.
+    const claim = turns.reserveSteer();
+    void nextTask()
+      .then(() => runV2Turn(params, client, session, claim, deps, {
+        announceUserMessage: true,
+        displaceActive: true
+      }))
       .catch((error) => {
         console.error(`[agy-acp] v2 steer turn failed: ${(error as Error).message}`);
       });
     return {};
   }
 
-  // Claim an idle session before attachment conversion. Once scheduled, the
-  // detached turn owns this claim and releases it from its finalizer.
-  session.activePrompt = true;
-  const controller = new AbortController();
-  session.promptAbort = controller;
-  let turnScheduled = false;
-  try {
-    // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
-    const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
-    if (controller.signal.aborted || session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return {};
-    }
-
-    // Queue the empty acceptance response before any session/update from the turn.
-    // Work starts on the next event-loop task (see dual-version-agent example).
-    const responseQueued = new Promise<void>((resolve) => {
-      setTimeout(resolve, 0);
+  const claim = turns.claimIdle("foreground");
+  void nextTask()
+    .then(() => runV2Turn(params, client, session, claim, deps, {
+      announceUserMessage: true,
+      displaceActive: false
+    }))
+    .catch((error) => {
+      console.error(`[agy-acp] v2 prompt turn failed: ${(error as Error).message}`);
     });
+  return {};
+}
 
-    turnScheduled = true;
+/** Queue the RPC response ahead of any session/update the turn emits. */
+function nextTask(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    setTimeout(resolve, 0);
+  });
+}
 
-    void responseQueued
-      .then(() => runV2PromptTurn(params, client, session, promptText, controller.signal, deps))
-      .catch((error) => {
-        console.error(`[agy-acp] v2 prompt turn failed: ${(error as Error).message}`);
-      })
-      .finally(() => {
-        if (session.promptAbort === controller) {
-          session.promptAbort = undefined;
-        }
-        session.activePrompt = false;
-        notifyIdleAndDrainQueue(session);
-      });
-
-    return {};
-  } finally {
-    // Setup failed or closed before the async turn was scheduled.
-    if (!turnScheduled) {
-      if (session.promptAbort === controller) {
-        session.promptAbort = undefined;
-      }
-      session.activePrompt = false;
-      notifyIdleAndDrainQueue(session);
-    }
+async function runV2Turn(
+  params: V2PromptRequest,
+  client: V2AgentContext,
+  session: SessionState,
+  claim: TurnClaim,
+  deps: PromptV2Deps,
+  options: {
+    announceUserMessage: boolean;
+    displaceActive: boolean;
+    userMessageId?: string;
+    promptBlocks?: v1.ContentBlock[];
   }
+): Promise<void> {
+  const adapter = v2Adapter(params, client, session, deps, {
+    announceUserMessage: options.announceUserMessage,
+    userMessageId: options.userMessageId
+  });
+  const turns = turnsOf(session);
+  const emitTerminal = v2TerminalEmitter(client, params.sessionId, session, claim);
+
+  await completeTurn(
+    session,
+    claim,
+    async () => {
+      if (options.displaceActive) {
+        await turns.promote(claim, () => session.agy.cancel());
+      }
+      return runTurnBody(
+        params.sessionId,
+        options.promptBlocks ?? (params.prompt as v1.ContentBlock[]),
+        session,
+        claim,
+        adapter,
+        deps
+      );
+    },
+    {
+      terminal: emitTerminal,
+      failure: async (error) => {
+        console.error(`[agy-acp] v2 turn failed: ${(error as Error).message}`);
+        // The RPC already returned `{}`; a setup or backend failure must still
+        // land the client back in `idle` rather than leaving it in `running`.
+        await emitTerminal("end_turn").catch(() => {});
+      }
+    }
+  );
+}
+
+function enqueueV2(
+  params: V2PromptRequest,
+  client: V2AgentContext,
+  session: SessionState,
+  deps: PromptV2Deps
+): void {
+  const controller = new AbortController();
+  const queuedId = `q-${randomUUID()}`;
+  const queued: QueuedPromptV2 = {
+    id: queuedId,
+    version: "v2",
+    params,
+    client,
+    ready: Promise.resolve(),
+    controller,
+    deps
+  };
+  // Enter FIFO before conversion or client transport awaits can reorder
+  // concurrently admitted queue requests.
+  session.promptQueue.push(queued);
+
+  const previousPreparation = session.promptQueuePreparation ?? Promise.resolve();
+  queued.ready = previousPreparation
+    .catch(() => {})
+    .then(() => nextTask())
+    .then(async () => {
+      controller.signal.throwIfAborted();
+      const promptText = await contentBlocksToPrompt(
+        params.prompt as v1.ContentBlock[],
+        session.cwd
+      );
+      controller.signal.throwIfAborted();
+      const userMessageId = v2UserMessageId(params.prompt as v1.ContentBlock[], promptText);
+
+      await client.notify(v2.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update: {
+          sessionUpdate: "user_message",
+          messageId: userMessageId,
+          content: params.prompt as v2.ContentBlock[]
+        }
+      });
+      controller.signal.throwIfAborted();
+      if (session.closed) throw new TurnCancelled();
+      queued.promptText = promptText;
+      queued.userMessageId = userMessageId;
+    });
+  session.promptQueuePreparation = queued.ready.then(() => {}, () => {});
+
+  void queued.ready.catch(() => {
+    const idx = session.promptQueue.findIndex((item) => item.id === queuedId);
+    if (idx < 0) return; // The FIFO executor owns terminal reporting.
+    session.promptQueue.splice(idx, 1);
+    notifyV2BestEffort(client, params.sessionId, {
+      sessionUpdate: "state_update",
+      state: "idle",
+      stopReason: controller.signal.aborted || session.closed ? "cancelled" : "end_turn"
+    });
+    notifyIdleAndDrainQueue(session);
+  });
+
+  notifyIdleAndDrainQueue(session);
 }
 
 async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
   const { params, client, controller, deps } = item;
   const session = deps.requireSession(params.sessionId);
-  session.activePrompt = true;
-  session.promptAbort = controller;
-  const signal = controller.signal;
+  const claim = turnsOf(session).claimIdle("queued", controller.signal);
+  const emitTerminal = v2TerminalEmitter(client, params.sessionId, session, claim);
 
-  const notify = async (update: v2.SessionUpdate) => {
-    await raceWithAbort(
-      client.notify(v2.methods.client.session.update, {
-        sessionId: params.sessionId,
-        update
-      }),
-      signal
-    );
-  };
-
-  try {
-    signal.throwIfAborted();
-    await item.ready;
-    signal.throwIfAborted();
-    const { promptText, userMessageId } = item;
-    if (promptText === undefined || userMessageId === undefined) {
-      throw new Error("Queued v2 prompt preparation completed without content");
-    }
-
-    // user_message was already sent at enqueue time.
-    await notify({ sessionUpdate: "state_update", state: "running" });
-    // Cleanup may have aborted while the notification was in flight.
-    signal.throwIfAborted();
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    const slashHandled =
-      isClientTextSlashPrompt(params.prompt as v1.ContentBlock[]) &&
-      (await applyCuratedSlashCommand(
-        params.sessionId,
-        promptText,
-        {
-          configChanged: () => raceWithAbort(
-            deps.notifyConfigOptionUpdateV2(
-              client,
-              params.sessionId,
-              deps.requireSession(params.sessionId)
-            ),
-            signal
-          )
-        },
-        deps
-      ));
-    if (slashHandled) {
-      await notify({
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: signal.aborted ? "cancelled" : "end_turn"
-      });
-      return;
-    }
-
-    signal.throwIfAborted();
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    const cancelPrompt = () => {
-      session.agy.cancel().catch(() => {});
-    };
-    signal.addEventListener("abort", cancelPrompt, { once: true });
-    // Listener only fires for future aborts; honor an already-aborted signal.
-    if (signal.aborted) {
-      cancelPrompt();
-      signal.throwIfAborted();
-    }
-
-    try {
-      const terminalTracker = createTerminalOutputTracker();
-      const toolContentTracker = createToolCallContentTracker();
-      const clientToolCallName = deps.clientToolCallNameV2?.(client);
-      const outcome = await (async () => {
-        try {
-          return await session.agy.prompt(promptText, async (update) => {
-            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker, { clientToolCallName })) {
-              await notify(v2Update);
-            }
-          }, async (toolCall, { toolName, questionIndex }) => {
-            const elicitationCap = deps.clientElicitationV2?.(client);
-            return requestPermissionV2(
-              client,
-              params.sessionId,
-              toolCall,
-              toolName,
-              signal,
-              questionIndex,
-              elicitationCap,
-              clientToolCallName
-            );
-          }, undefined, deps.clientElicitationV2?.(client));
-        } finally {
-          const userStepIdxs = session.agy.lastPromptUserStepIdxs;
-          if (userStepIdxs.length > 1) {
-            throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
-          }
-          if (userStepIdxs.length === 1) {
-            session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
-          }
-        }
-      })();
-      if (!session.closed) {
-        await deps.persistSession(params.sessionId, session);
+  await completeTurn(
+    session,
+    claim,
+    async () => {
+      // Preparation (content conversion + user_message) ran at enqueue time.
+      await raceClaim(item.ready, claim);
+      claim.throwIfAborted();
+      const { promptText, userMessageId } = item;
+      if (promptText === undefined || userMessageId === undefined) {
+        throw new Error("Queued v2 prompt preparation completed without content");
       }
-
-      const stopReason =
-        outcome.stopReason === "cancelled" || signal.aborted || session.closed ? "cancelled" : "end_turn";
-      await notify({
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason
+      const adapter = v2Adapter(params, client, session, deps, {
+        announceUserMessage: false,
+        userMessageId
       });
-    } finally {
-      signal.removeEventListener("abort", cancelPrompt);
-    }
-  } catch (error) {
-    if (!session.closed && !signal.aborted) {
-      await deps.persistSession(params.sessionId, session).catch(() => {});
-    }
-    if (signal.aborted || session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-    await notify({
-      sessionUpdate: "state_update",
-      state: "idle",
-      stopReason: "end_turn"
-    });
-  } finally {
-    if (session.promptAbort === controller) {
-      session.promptAbort = undefined;
-    }
-    session.activePrompt = false;
-    notifyIdleAndDrainQueue(session);
-  }
-}
-
-async function runV2PromptTurn(
-  params: V2PromptRequest,
-  client: V2AgentContext,
-  session: SessionState,
-  promptText: string,
-  signal: AbortSignal,
-  deps: PromptV2Deps
-): Promise<void> {
-  const notify = async (update: v2.SessionUpdate) => {
-    await raceWithAbort(
-      client.notify(v2.methods.client.session.update, {
-        sessionId: params.sessionId,
-        update
-      }),
-      signal
-    );
-  };
-
-  // Only treat pure client text as a slash-menu selection (not resource bodies).
-  const clientSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[]);
-  const parsedSlash = clientSlash ? parseSlashCommand(promptText) : null;
-  const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
-  const userMessageId =
-    slashResult && slashResult.kind !== "pass"
-      ? `slash-${randomUUID()}`
-      : `user-${randomUUID()}`;
-  try {
-    signal.throwIfAborted();
-
-    // User message acknowledgment — source of truth for agent-owned messageId.
-    await notify({
-      sessionUpdate: "user_message",
-      messageId: userMessageId,
-      content: params.prompt as v2.ContentBlock[]
-    });
-
-    signal.throwIfAborted();
-    await notify({ sessionUpdate: "state_update", state: "running" });
-    signal.throwIfAborted();
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    // Curated slash commands → config options (no agy spawn).
-    const slashHandled =
-      clientSlash &&
-      (await applyCuratedSlashCommand(
+      return runTurnBody(
         params.sessionId,
-        promptText,
-        {
-          configChanged: () => raceWithAbort(
-            deps.notifyConfigOptionUpdateV2(
-              client,
-              params.sessionId,
-              deps.requireSession(params.sessionId)
-            ),
-            signal
-          )
-        },
-        deps
-      ));
-    if (slashHandled) {
-      await notify({
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: signal.aborted ? "cancelled" : "end_turn"
-      });
-      return;
-    }
-
-    signal.throwIfAborted();
-    if (session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-
-    const cancelPrompt = () => {
-      session.agy.cancel().catch(() => {});
-    };
-    signal.addEventListener("abort", cancelPrompt, { once: true });
-    if (signal.aborted) {
-      cancelPrompt();
-      signal.throwIfAborted();
-    }
-
-    try {
-      const terminalTracker = createTerminalOutputTracker();
-      const toolContentTracker = createToolCallContentTracker();
-      const clientToolCallName = deps.clientToolCallNameV2?.(client);
-      const outcome = await (async () => {
-        try {
-          return await session.agy.prompt(promptText, async (update) => {
-            for (const v2Update of expandSessionUpdateToV2(update, terminalTracker, toolContentTracker, { clientToolCallName })) {
-              await notify(v2Update);
-            }
-          }, async (toolCall, { toolName, questionIndex }) => {
-            const elicitationCap = deps.clientElicitationV2?.(client);
-            return requestPermissionV2(
-              client,
-              params.sessionId,
-              toolCall,
-              toolName,
-              signal,
-              questionIndex,
-              elicitationCap,
-              clientToolCallName
-            );
-          }, undefined, deps.clientElicitationV2?.(client));
-        } finally {
-          const userStepIdxs = session.agy.lastPromptUserStepIdxs;
-          if (userStepIdxs.length > 1) {
-            throw new Error(`Expected at most one user step for a prompt, observed: ${userStepIdxs.join(", ")}`);
-          }
-          if (userStepIdxs.length === 1) {
-            session.v2UserMessageIdsByStep[String(userStepIdxs[0])] = userMessageId;
-          }
-        }
-      })();
-      if (!session.closed) {
-        await deps.persistSession(params.sessionId, session);
+        params.prompt as v1.ContentBlock[],
+        session,
+        claim,
+        adapter,
+        deps,
+        promptText
+      );
+    },
+    {
+      terminal: emitTerminal,
+      failure: async (error) => {
+        console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
+        await emitTerminal("end_turn").catch(() => {});
       }
-
-      const stopReason =
-        outcome.stopReason === "cancelled" || signal.aborted || session.closed ? "cancelled" : "end_turn";
-      await notify({
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason
-      });
-    } finally {
-      signal.removeEventListener("abort", cancelPrompt);
     }
-  } catch (error) {
-    if (!session.closed && !signal.aborted) {
-      await deps.persistSession(params.sessionId, session).catch(() => {});
-    }
-    if (signal.aborted || session.closed) {
-      notifyV2BestEffort(client, params.sessionId, {
-        sessionUpdate: "state_update",
-        state: "idle",
-        stopReason: "cancelled"
-      });
-      return;
-    }
-    // Surface a failed turn as idle so the client is not left in `running`.
-    await notify({
-      sessionUpdate: "state_update",
-      state: "idle",
-      stopReason: "end_turn"
-    });
-    throw error;
-  }
+  );
 }

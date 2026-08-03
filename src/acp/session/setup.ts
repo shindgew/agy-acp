@@ -15,7 +15,8 @@ import { applyModelSelection, initialModelSelection, restoredModelSelection } fr
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { sessionTurnBusy, wakePromptIdleWaiters } from "./prompt.js";
+import { sessionTurnBusy } from "./prompt.js";
+import { turnsOf } from "./turn-scheduler.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -56,7 +57,6 @@ export async function buildSession(
     catalog,
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
-    activePrompt: false,
     promptQueue: [],
     v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
@@ -73,8 +73,7 @@ export async function registerSession(
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
     replaced.closed = true;
-    wakePromptIdleWaiters(replaced);
-    replaced.promptAbort?.abort();
+    turnsOf(replaced).close();
     cancelQueuedPrompts(replaced);
     await replaced.agy.close().catch(() => {});
   }
@@ -85,8 +84,7 @@ export async function registerSession(
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
     evicted.closed = true;
-    wakePromptIdleWaiters(evicted);
-    evicted.promptAbort?.abort();
+    turnsOf(evicted).close();
     cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(

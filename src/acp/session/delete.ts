@@ -5,10 +5,10 @@ import type { DeleteSessionRequest, DeleteSessionResponse } from "@agentclientpr
 import type { SessionStore } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { wakePromptIdleWaiters } from "./prompt.js";
+import { turnsOf, type TurnScheduler } from "./turn-scheduler.js";
 
 export interface SessionDeleteTarget {
-  promptAbort?: AbortController | null;
+  turns?: TurnScheduler;
   agy: { close(): Promise<void> };
 }
 
@@ -27,9 +27,8 @@ export async function handleDeleteSession(
   activeSessions.delete(params.sessionId);
   if (session) {
     (session as SessionState).closed = true;
-    // Unblock any steer waiter before teardown so it observes `closed`.
-    wakePromptIdleWaiters(session as SessionState);
-    session.promptAbort?.abort();
+    // Abort running turns and steer reservations before touching the backend.
+    turnsOf(session as SessionState).close();
     cancelQueuedPrompts(session as SessionState);
   }
   await session?.agy.close();
