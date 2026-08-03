@@ -20,8 +20,10 @@ export interface QueuedPromptV2 {
   version: "v2";
   params: import("@agentclientprotocol/sdk/experimental/v2").PromptRequest;
   client: import("@agentclientprotocol/sdk/experimental/v2").AgentContext;
-  promptText: string;
-  userMessageId: string;
+  /** Preparation starts at admission, but the placeholder enters FIFO first. */
+  ready: Promise<void>;
+  promptText?: string;
+  userMessageId?: string;
   controller: AbortController;
   deps: PromptV2Deps;
 }
@@ -40,6 +42,8 @@ export interface SessionState {
   activePrompt: boolean;
   /** Per-session FIFO of queued follow-up prompts. */
   promptQueue: QueuedPrompt[];
+  /** Serializes v2 queued-message preparation and publication in FIFO order. */
+  promptQueuePreparation?: Promise<void>;
   /** Resolves when the active turn reaches idle and the queue consumer can proceed. */
   promptIdleNotify?: () => void;
   /** Serializes steer replacements so competing requests cannot overlap. */

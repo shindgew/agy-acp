@@ -60,6 +60,39 @@ export function parseTurnIntent(params: unknown): TurnIntent | undefined {
   return undefined;
 }
 
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      }
+    );
+  });
+}
+
+function notifyV2BestEffort(
+  client: V2AgentContext,
+  sessionId: string,
+  update: v2.SessionUpdate
+): void {
+  try {
+    void client.notify(v2.methods.client.session.update, { sessionId, update }).catch(() => {});
+  } catch {
+    // Teardown must not wait for or fail on a disconnected client transport.
+  }
+}
+
 /** True when a turn is running or a steer has reserved the next turn. */
 export function sessionTurnBusy(session: SessionState): boolean {
   return session.activePrompt || (session.steerClaims ?? 0) > 0;
@@ -195,7 +228,8 @@ export async function handlePromptV1(
   deps: PromptV1Deps
 ): Promise<V1PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  if (sessionTurnBusy(session)) {
+  const busyAtAdmission = sessionTurnBusy(session);
+  if (busyAtAdmission) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
       return new Promise<V1PromptResponse>((resolve, reject) => {
@@ -232,11 +266,21 @@ export async function handlePromptV1(
   // Own the steer claim (if any) for the full replacement path — including
   // setup failures and slash-only turns — so release + queue drain always run.
   let releaseSteer: (() => void) | undefined;
+  let ownsActivePrompt = false;
   const cancelled = () => Boolean(signal?.aborted || session.closed);
+  if (!busyAtAdmission) {
+    // Claim an idle session before attachment conversion or config awaits.
+    session.activePrompt = true;
+    ownsActivePrompt = true;
+  }
   try {
-    if (sessionTurnBusy(session)) {
+    if (busyAtAdmission) {
       // Reserve before any await so a queued follow-up cannot claim the session.
       releaseSteer = await acquireSteerSlot(session);
+      // Teardown may have completed while this steer waited behind another.
+      if (cancelled()) {
+        return { stopReason: "cancelled" };
+      }
       const waitForIdle = session.activePrompt
         ? new Promise<void>((resolve) => {
             const prevNotify = session.promptIdleNotify;
@@ -253,6 +297,8 @@ export async function handlePromptV1(
       if (cancelled()) {
         return { stopReason: "cancelled" };
       }
+      session.activePrompt = true;
+      ownsActivePrompt = true;
     }
 
     const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
@@ -290,7 +336,6 @@ export async function handlePromptV1(
       return { stopReason: "cancelled" };
     }
 
-    session.activePrompt = true;
     const cancelPrompt = () => {
       session.agy.cancel().catch(() => {
         // The prompt loop will surface process failures through its own result.
@@ -300,7 +345,6 @@ export async function handlePromptV1(
     // Listener only fires for future aborts; honor an already-aborted signal.
     if (signal?.aborted) {
       signal.removeEventListener("abort", cancelPrompt);
-      session.activePrompt = false;
       return { stopReason: "cancelled" };
     }
 
@@ -341,12 +385,14 @@ export async function handlePromptV1(
       throw error;
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
-      session.activePrompt = false;
     }
   } finally {
+    if (ownsActivePrompt) {
+      session.activePrompt = false;
+    }
     releaseSteer?.();
-    // Slash-only / closed / setup-error paths never set activePrompt; agy turns
-    // clear it in the inner finally. Either way the queue may now proceed.
+    // Slash-only, closed, setup-error, and agy paths all release the same
+    // admission claim here, after which queued work may proceed.
     if (!session.activePrompt) {
       notifyIdleAndDrainQueue(session);
     }
@@ -470,45 +516,10 @@ export async function handlePromptV2(
   deps: PromptV2Deps
 ): Promise<V2PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  if (sessionTurnBusy(session)) {
+  const busyAtAdmission = sessionTurnBusy(session);
+  if (busyAtAdmission) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
-      const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
-      if (session.closed) {
-        await client.notify(v2.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
-        }).catch(() => {});
-        return {};
-      }
-
-      const parsedSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[])
-        ? parseSlashCommand(promptText)
-        : null;
-      const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
-      const userMessageId =
-        slashResult && slashResult.kind !== "pass"
-          ? `slash-${randomUUID()}`
-          : `user-${randomUUID()}`;
-
-      await client.notify(v2.methods.client.session.update, {
-        sessionId: params.sessionId,
-        update: {
-          sessionUpdate: "user_message",
-          messageId: userMessageId,
-          content: params.prompt as v2.ContentBlock[]
-        }
-      });
-
-      // Cleanup may have drained the queue while user_message was in flight.
-      if (session.closed) {
-        await client.notify(v2.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
-        }).catch(() => {});
-        return {};
-      }
-
       const controller = new AbortController();
       const queuedId = `q-${randomUUID()}`;
       const queued: QueuedPromptV2 = {
@@ -516,12 +527,61 @@ export async function handlePromptV2(
         version: "v2",
         params,
         client,
-        promptText,
-        userMessageId,
+        ready: Promise.resolve(),
         controller,
         deps
       };
+      // Enter FIFO before conversion or client transport awaits can reorder
+      // concurrently admitted queue requests.
       session.promptQueue.push(queued);
+      const responseQueued = new Promise<void>((resolve) => {
+        setTimeout(resolve, 0);
+      });
+      const previousPreparation = session.promptQueuePreparation ?? Promise.resolve();
+      queued.ready = raceWithAbort(
+        previousPreparation.catch(() => {}).then(() => responseQueued).then(async () => {
+          const promptText = await contentBlocksToPrompt(
+            params.prompt as v1.ContentBlock[],
+            session.cwd
+          );
+          controller.signal.throwIfAborted();
+          const parsedSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[])
+            ? parseSlashCommand(promptText)
+            : null;
+          const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
+          const userMessageId =
+            slashResult && slashResult.kind !== "pass"
+              ? `slash-${randomUUID()}`
+              : `user-${randomUUID()}`;
+
+          await client.notify(v2.methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: {
+              sessionUpdate: "user_message",
+              messageId: userMessageId,
+              content: params.prompt as v2.ContentBlock[]
+            }
+          });
+          controller.signal.throwIfAborted();
+          queued.promptText = promptText;
+          queued.userMessageId = userMessageId;
+        }),
+        controller.signal
+      );
+      session.promptQueuePreparation = queued.ready.then(() => {}, () => {});
+      void queued.ready.catch(() => {
+        const idx = session.promptQueue.findIndex((item) => item.id === queuedId);
+        if (idx < 0) return; // The FIFO executor owns terminal reporting.
+        session.promptQueue.splice(idx, 1);
+        if (!controller.signal.aborted && !session.closed) {
+          notifyV2BestEffort(client, params.sessionId, {
+            sessionUpdate: "state_update",
+            state: "idle",
+            stopReason: "end_turn"
+          });
+        }
+        if (!sessionTurnBusy(session)) notifyIdleAndDrainQueue(session);
+      });
       if (!sessionTurnBusy(session)) {
         notifyIdleAndDrainQueue(session);
       }
@@ -533,12 +593,27 @@ export async function handlePromptV2(
   }
 
   let releaseSteer: (() => void) | undefined;
+  let ownsActivePrompt = false;
   // Once the async turn is scheduled, its finally owns release + drain.
   let turnScheduled = false;
+  if (!busyAtAdmission) {
+    // Claim an idle session before attachment conversion.
+    session.activePrompt = true;
+    ownsActivePrompt = true;
+  }
   try {
-    if (sessionTurnBusy(session)) {
+    if (busyAtAdmission) {
       // Reserve before any await so a queued follow-up cannot claim the session.
       releaseSteer = await acquireSteerSlot(session);
+      // Teardown may have completed while this steer waited behind another.
+      if (session.closed) {
+        notifyV2BestEffort(client, params.sessionId, {
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "cancelled"
+        });
+        return {};
+      }
       const waitForIdle = session.activePrompt
         ? new Promise<void>((resolve) => {
             const prevNotify = session.promptIdleNotify;
@@ -552,17 +627,27 @@ export async function handlePromptV2(
       await session.agy.cancel();
       await waitForIdle;
       if (session.closed) {
-        await client.notify(v2.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
-        }).catch(() => {});
+        notifyV2BestEffort(client, params.sessionId, {
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "cancelled"
+        });
         return {};
       }
+      session.activePrompt = true;
+      ownsActivePrompt = true;
     }
 
     // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
     const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
-    session.activePrompt = true;
+    if (session.closed) {
+      notifyV2BestEffort(client, params.sessionId, {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      return {};
+    }
     const controller = new AbortController();
     session.promptAbort = controller;
 
@@ -595,36 +680,48 @@ export async function handlePromptV2(
     // Setup failed or closed before the async turn was scheduled.
     if (!turnScheduled && releaseSteer) {
       releaseSteer();
-      if (!session.activePrompt) {
-        notifyIdleAndDrainQueue(session);
-      }
+    }
+    if (!turnScheduled && ownsActivePrompt) {
+      session.activePrompt = false;
+    }
+    if (!turnScheduled && !session.activePrompt) {
+      notifyIdleAndDrainQueue(session);
     }
   }
 }
 
 async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
-  const { params, client, promptText, userMessageId, controller, deps } = item;
+  const { params, client, controller, deps } = item;
   const session = deps.requireSession(params.sessionId);
   session.activePrompt = true;
   session.promptAbort = controller;
+  const signal = controller.signal;
 
   const notify = async (update: v2.SessionUpdate) => {
-    await client.notify(v2.methods.client.session.update, {
-      sessionId: params.sessionId,
-      update
-    });
+    await raceWithAbort(
+      client.notify(v2.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update
+      }),
+      signal
+    );
   };
 
-  const signal = controller.signal;
   try {
     signal.throwIfAborted();
+    await item.ready;
+    signal.throwIfAborted();
+    const { promptText, userMessageId } = item;
+    if (promptText === undefined || userMessageId === undefined) {
+      throw new Error("Queued v2 prompt preparation completed without content");
+    }
 
     // user_message was already sent at enqueue time.
     await notify({ sessionUpdate: "state_update", state: "running" });
     // Cleanup may have aborted while the notification was in flight.
     signal.throwIfAborted();
     if (session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
@@ -638,9 +735,14 @@ async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
         params.sessionId,
         promptText,
         {
-          configChanged: async () => {
-            await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
-          }
+          configChanged: () => raceWithAbort(
+            deps.notifyConfigOptionUpdateV2(
+              client,
+              params.sessionId,
+              deps.requireSession(params.sessionId)
+            ),
+            signal
+          )
         },
         deps
       ));
@@ -655,7 +757,7 @@ async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
 
     signal.throwIfAborted();
     if (session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
@@ -725,7 +827,7 @@ async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
       await deps.persistSession(params.sessionId, session).catch(() => {});
     }
     if (signal.aborted || session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
@@ -755,10 +857,13 @@ async function runV2PromptTurn(
   deps: PromptV2Deps
 ): Promise<void> {
   const notify = async (update: v2.SessionUpdate) => {
-    await client.notify(v2.methods.client.session.update, {
-      sessionId: params.sessionId,
-      update
-    });
+    await raceWithAbort(
+      client.notify(v2.methods.client.session.update, {
+        sessionId: params.sessionId,
+        update
+      }),
+      signal
+    );
   };
 
   // Only treat pure client text as a slash-menu selection (not resource bodies).
@@ -783,7 +888,7 @@ async function runV2PromptTurn(
     await notify({ sessionUpdate: "state_update", state: "running" });
     signal.throwIfAborted();
     if (session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
@@ -798,9 +903,14 @@ async function runV2PromptTurn(
         params.sessionId,
         promptText,
         {
-          configChanged: async () => {
-            await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
-          }
+          configChanged: () => raceWithAbort(
+            deps.notifyConfigOptionUpdateV2(
+              client,
+              params.sessionId,
+              deps.requireSession(params.sessionId)
+            ),
+            signal
+          )
         },
         deps
       ));
@@ -815,7 +925,7 @@ async function runV2PromptTurn(
 
     signal.throwIfAborted();
     if (session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
@@ -884,7 +994,7 @@ async function runV2PromptTurn(
       await deps.persistSession(params.sessionId, session).catch(() => {});
     }
     if (signal.aborted || session.closed) {
-      await notify({
+      notifyV2BestEffort(client, params.sessionId, {
         sessionUpdate: "state_update",
         state: "idle",
         stopReason: "cancelled"
