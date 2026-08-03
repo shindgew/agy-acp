@@ -327,16 +327,16 @@ export class AgyCliSession {
     // Paths reflected through a recognized edit this turn; excluded from the
     // end-of-turn working-tree reconciliation (see #76) so we don't double-emit.
     const reflectedPaths = new Set<string>();
-    // Snapshot the pre-edit working tree while the client can consume writes,
-    // so edits agy makes outside recognized structured-edit tool-calls (shell
-    // commands, unrecognized payloads) still get reflected through ACP.
+    // Snapshot the pre-edit working tree so edits agy makes outside recognized
+    // structured-edit tool-calls (shell commands, unrecognized payloads) still
+    // get reflected through ACP. Emitting the synthetic session/update needs no
+    // client fs capability, so do this for every client (v1 and v2); the client
+    // write-through is layered on later only when a bridge is available.
     let editBaseline: WorkingTreeSnapshot | null = null;
-    if (fsBridge) {
-      try {
-        editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
-      } catch {
-        editBaseline = null;
-      }
+    try {
+      editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
+    } catch {
+      editBaseline = null;
     }
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
@@ -578,7 +578,7 @@ export class AgyCliSession {
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
-      if (fsBridge && editBaseline && !this.#cancelled) {
+      if (editBaseline && !this.#cancelled) {
         await this.reflectUnstructuredEdits(editBaseline, reflectedPaths, fsBridge, onUpdate, deadline);
       }
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
@@ -619,13 +619,14 @@ export class AgyCliSession {
    * After a turn, diff the working tree against the pre-edit snapshot and
    * reflect any change agy made that never surfaced as a recognized structured
    * edit (shell edits, unrecognized payloads) through ACP: emit a synthetic
-   * edit update and hand the write to the client. Changes that can't be shown
-   * as a text diff (binary/oversized/deletions) are reported, not dropped (#76).
+   * edit update for every client, and additionally hand the write to the client
+   * when it advertises fs capabilities. Changes that can't be shown as a text
+   * diff (binary/oversized/deletions) are reported, not dropped (#76).
    */
   private async reflectUnstructuredEdits(
     baseline: WorkingTreeSnapshot,
     reflectedPaths: Set<string>,
-    fsBridge: ClientFileSystem,
+    fsBridge: ClientFileSystem | undefined,
     onUpdate: (update: SessionUpdate) => Promise<void>,
     deadline: number
   ): Promise<void> {
@@ -637,7 +638,7 @@ export class AgyCliSession {
         if (this.#cancelled) return;
         const update = buildReconcileEditUpdate(edit, index++, this.config.cwd);
         await this.raceTurnCallback(onUpdate(update), deadline);
-        await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
+        if (fsBridge) await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
       }
       if (unsupported.length > 0) {
         const detail = unsupported
