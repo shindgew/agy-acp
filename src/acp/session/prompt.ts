@@ -503,6 +503,79 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   }
 }
 
+async function runSteeredV2Turn(
+  params: V2PromptRequest,
+  client: V2AgentContext,
+  session: SessionState,
+  steerSlot: Promise<() => void>,
+  deps: PromptV2Deps
+): Promise<void> {
+  const releaseSteer = await steerSlot;
+  let ownsActivePrompt = false;
+  let controller: AbortController | undefined;
+  try {
+    if (session.closed) {
+      notifyV2BestEffort(client, params.sessionId, {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      return;
+    }
+
+    const waitForIdle = session.activePrompt
+      ? new Promise<void>((resolve) => {
+          const prevNotify = session.promptIdleNotify;
+          session.promptIdleNotify = () => {
+            prevNotify?.();
+            resolve();
+          };
+        })
+      : undefined;
+    session.promptAbort?.abort();
+    await session.agy.cancel();
+    await waitForIdle;
+    if (session.closed) {
+      notifyV2BestEffort(client, params.sessionId, {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      return;
+    }
+
+    session.activePrompt = true;
+    ownsActivePrompt = true;
+    const promptText = await contentBlocksToPrompt(
+      params.prompt as v1.ContentBlock[],
+      session.cwd
+    );
+    if (session.closed) {
+      notifyV2BestEffort(client, params.sessionId, {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "cancelled"
+      });
+      return;
+    }
+
+    controller = new AbortController();
+    session.promptAbort = controller;
+    await runV2PromptTurn(params, client, session, promptText, controller.signal, deps);
+  } finally {
+    if (controller && session.promptAbort === controller) {
+      session.promptAbort = undefined;
+    }
+    if (ownsActivePrompt) {
+      session.activePrompt = false;
+    }
+    releaseSteer();
+    if (!session.activePrompt) {
+      notifyIdleAndDrainQueue(session);
+    }
+  }
+}
+
 /**
  * v2 `session/prompt`: respond `{}` immediately on acceptance. Foreground
  * progress and stopReason arrive as `state_update` notifications.
@@ -590,54 +663,25 @@ export async function handlePromptV2(
     if (intent !== "steer") {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
     }
+    // Reserve synchronously, acknowledge the RPC, then cancel and replace on
+    // the next task so backend shutdown latency cannot delay v2 acceptance.
+    const steerSlot = acquireSteerSlot(session);
+    const responseQueued = new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    void responseQueued
+      .then(() => runSteeredV2Turn(params, client, session, steerSlot, deps))
+      .catch((error) => {
+        console.error(`[agy-acp] v2 steer turn failed: ${(error as Error).message}`);
+      });
+    return {};
   }
 
-  let releaseSteer: (() => void) | undefined;
-  let ownsActivePrompt = false;
-  // Once the async turn is scheduled, its finally owns release + drain.
+  // Claim an idle session before attachment conversion. Once scheduled, the
+  // detached turn owns this claim and releases it from its finalizer.
+  session.activePrompt = true;
   let turnScheduled = false;
-  if (!busyAtAdmission) {
-    // Claim an idle session before attachment conversion.
-    session.activePrompt = true;
-    ownsActivePrompt = true;
-  }
   try {
-    if (busyAtAdmission) {
-      // Reserve before any await so a queued follow-up cannot claim the session.
-      releaseSteer = await acquireSteerSlot(session);
-      // Teardown may have completed while this steer waited behind another.
-      if (session.closed) {
-        notifyV2BestEffort(client, params.sessionId, {
-          sessionUpdate: "state_update",
-          state: "idle",
-          stopReason: "cancelled"
-        });
-        return {};
-      }
-      const waitForIdle = session.activePrompt
-        ? new Promise<void>((resolve) => {
-            const prevNotify = session.promptIdleNotify;
-            session.promptIdleNotify = () => {
-              prevNotify?.();
-              resolve();
-            };
-          })
-        : undefined;
-      session.promptAbort?.abort();
-      await session.agy.cancel();
-      await waitForIdle;
-      if (session.closed) {
-        notifyV2BestEffort(client, params.sessionId, {
-          sessionUpdate: "state_update",
-          state: "idle",
-          stopReason: "cancelled"
-        });
-        return {};
-      }
-      session.activePrompt = true;
-      ownsActivePrompt = true;
-    }
-
     // Content block shapes are compatible at runtime; v1/v2 TS types diverge on open enums.
     const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
     if (session.closed) {
@@ -657,8 +701,6 @@ export async function handlePromptV2(
       setTimeout(resolve, 0);
     });
 
-    const releaseForTurn = releaseSteer;
-    releaseSteer = undefined;
     turnScheduled = true;
 
     void responseQueued
@@ -671,20 +713,14 @@ export async function handlePromptV2(
           session.promptAbort = undefined;
         }
         session.activePrompt = false;
-        releaseForTurn?.();
         notifyIdleAndDrainQueue(session);
       });
 
     return {};
   } finally {
     // Setup failed or closed before the async turn was scheduled.
-    if (!turnScheduled && releaseSteer) {
-      releaseSteer();
-    }
-    if (!turnScheduled && ownsActivePrompt) {
+    if (!turnScheduled) {
       session.activePrompt = false;
-    }
-    if (!turnScheduled && !session.activePrompt) {
       notifyIdleAndDrainQueue(session);
     }
   }

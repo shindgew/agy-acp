@@ -192,6 +192,46 @@ describe("queue and steer-by-cancel", () => {
     cancelQueuedPrompts(session);
   });
 
+  it("acknowledges a v2 steer before awaiting active-turn cancellation", async () => {
+    let releaseCancel!: () => void;
+    const cancelPending = new Promise<void>((resolve) => {
+      releaseCancel = resolve;
+    });
+    let cancelCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      activePrompt: true,
+      promptQueue: [],
+      steerClaims: 0,
+      agy: {
+        cancel: () => {
+          cancelCalls++;
+          return cancelPending;
+        }
+      }
+    } as unknown as SessionState;
+    const deps = {
+      requireSession: () => session
+    } as unknown as PromptV2Deps;
+
+    const response = handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "replacement" }],
+      _meta: { "agy-acp/turnIntent": "steer" }
+    } as any, { notify: async () => {} } as any, deps);
+
+    await expect(response).resolves.toEqual({});
+    expect(session.steerClaims).toBe(1);
+    await waitFor(() => cancelCalls === 1);
+
+    session.closed = true;
+    wakePromptIdleWaiters(session);
+    releaseCancel();
+    await waitFor(() => session.steerClaims === 0);
+    expect(session.promptIdleNotify).toBeUndefined();
+  });
+
   it("does not install a new idle waiter when a competing steer resumes after close", async () => {
     const session = {
       sessionId: "s1",
