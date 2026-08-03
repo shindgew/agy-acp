@@ -57,9 +57,7 @@ export function isDbStatUnchanged(a: DbStat, b: DbStat): boolean {
     a.size === b.size &&
     a.walMtimeMs === b.walMtimeMs &&
     a.walSize === b.walSize &&
-    a.walCheckpointSeq === b.walCheckpointSeq &&
-    a.walSalt1 === b.walSalt1 &&
-    a.walSalt2 === b.walSalt2 &&
+    a.walHash === b.walHash &&
     a.journalMtimeMs === b.journalMtimeMs &&
     a.journalSize === b.journalSize &&
     a.changeCounter === b.changeCounter

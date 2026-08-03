@@ -2798,45 +2798,42 @@ describe("ReplayCache", () => {
     expect(second?.updates).not.toBe(first?.updates);
   });
 
-  it("detects a same-size, same-mtime WAL generation change (RESTART checkpoint rewrite)", () => {
-    const db = createConversationDb(dir, "conv-wal-gen");
+  it("detects a same-size, same-mtime WAL rewrite that keeps the WAL generation", () => {
+    const db = createConversationDb(dir, "conv-wal-rewrite");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
     db.close();
 
-    // Synthesize a WAL sidecar. In WAL mode a RESTART checkpoint can leave the
-    // WAL file at the same size/mtime while rewriting its frames; only the WAL
-    // header's checkpoint sequence + salts change. The main-file change counter
-    // does not advance until checkpoint, so the fingerprint must key on these.
-    const walPath = path.join(dir, "conv-wal-gen.db-wal");
-    const header = Buffer.alloc(32);
-    header.writeUInt32BE(0x377f0682, 0); // WAL magic (little-endian variant)
-    header.writeUInt32BE(1, 12); // checkpoint sequence
-    header.writeUInt32BE(0xaaaaaaaa, 16); // salt-1
-    header.writeUInt32BE(0x00000001, 20); // salt-2
-    fs.writeFileSync(walPath, header);
+    // Synthesize a WAL sidecar. When a spilled WAL transaction rolls back, its
+    // uncommitted frames stay allocated; a later smaller commit overwrites that
+    // tail without restarting the WAL, so the size, mtime (same tick), header
+    // salts, and checkpoint sequence all stay fixed while committed content
+    // changes. Only a content fingerprint catches this.
+    const walPath = path.join(dir, "conv-wal-rewrite.db-wal");
+    const wal = Buffer.alloc(64);
+    wal.writeUInt32BE(0x377f0682, 0); // WAL magic (little-endian variant)
+    wal.writeUInt32BE(1, 12); // checkpoint sequence
+    wal.writeUInt32BE(0xaaaaaaaa, 16); // salt-1
+    wal.writeUInt32BE(0x00000001, 20); // salt-2
+    wal.fill(0x11, 32); // frame bytes
+    fs.writeFileSync(walPath, wal);
     const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
     fs.utimesSync(walPath, pinnedTime, pinnedTime);
 
-    const before = statConversation(dir, "conv-wal-gen");
-    expect(before?.walCheckpointSeq).toBe(1);
-    expect(before?.walSalt1).toBe(0xaaaaaaaa);
-    expect(before?.walSalt2).toBe(1);
+    const before = statConversation(dir, "conv-wal-rewrite");
+    expect(before?.walHash).toBeDefined();
 
-    // Rewrite the header in place (RESTART bumps sequence + salts), same length.
-    header.writeUInt32BE(2, 12);
-    header.writeUInt32BE(0xbbbbbbbb, 16);
-    header.writeUInt32BE(0x00000002, 20);
-    fs.writeFileSync(walPath, header);
+    // Overwrite the frame tail in place: same length, same header generation.
+    wal.fill(0x22, 32);
+    fs.writeFileSync(walPath, wal);
     fs.utimesSync(walPath, pinnedTime, pinnedTime);
 
-    const after = statConversation(dir, "conv-wal-gen");
-    // Metadata the old check relied on is identical...
+    const after = statConversation(dir, "conv-wal-rewrite");
+    // Every metadata field the fingerprint previously relied on is identical...
     expect(after?.walMtimeMs).toBe(before?.walMtimeMs);
     expect(after?.walSize).toBe(before?.walSize);
     expect(after?.changeCounter).toBe(before?.changeCounter);
-    // ...but the WAL generation moved, so the fingerprint reports a change.
-    expect(after?.walCheckpointSeq).toBe(2);
-    expect(after?.walSalt1).toBe(0xbbbbbbbb);
+    // ...but the content hash moved, so the fingerprint reports a change.
+    expect(after?.walHash).not.toBe(before?.walHash);
     expect(isDbStatUnchanged(before as DbStat, after as DbStat)).toBe(false);
   });
 
@@ -2846,23 +2843,19 @@ describe("ReplayCache", () => {
       size: 4096,
       walMtimeMs: 200,
       walSize: 32,
-      walCheckpointSeq: 1,
-      walSalt1: 0xaaaaaaaa,
-      walSalt2: 2,
+      walHash: "aaa",
       journalMtimeMs: undefined,
       journalSize: undefined,
       changeCounter: 7
     };
     expect(isDbStatUnchanged(base, { ...base })).toBe(true);
 
-    const fields: Array<[keyof DbStat, number]> = [
+    const fields: Array<[keyof DbStat, number | string]> = [
       ["mtimeMs", 101],
       ["size", 4097],
       ["walMtimeMs", 201],
       ["walSize", 33],
-      ["walCheckpointSeq", 2],
-      ["walSalt1", 0xbbbbbbbb],
-      ["walSalt2", 3],
+      ["walHash", "bbb"],
       ["changeCounter", 8]
     ];
     for (const [field, value] of fields) {

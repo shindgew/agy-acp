@@ -6,6 +6,7 @@
 // that's needed.
 
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeErrorDetails, decodePermissions, decodeTaskDetails } from "./columns.js";
@@ -64,42 +65,26 @@ export interface DbStat {
   journalSize?: number;
   changeCounter: number;
   /**
-   * WAL header "generation" fields (checkpoint sequence number + salts). In WAL
-   * mode the main-file change counter only advances on checkpoint, and a
-   * RESTART checkpoint can leave the WAL file at the same size/mtime while its
-   * frames are overwritten in place. That reset bumps the checkpoint sequence
-   * and salts, so folding them into the fingerprint catches such same-size,
-   * same-mtime WAL rewrites that the metadata alone would miss.
+   * Hash of the full WAL file content. In WAL mode the main-file change
+   * counter only advances on checkpoint, and WAL metadata alone cannot prove
+   * the content is unchanged: a RESTART checkpoint can leave the file at the
+   * same size/mtime while frames are rewritten, and a rolled-back transaction's
+   * spilled frames stay allocated so a later smaller commit overwrites that
+   * tail without even bumping the header salts or checkpoint sequence. Hashing
+   * the content catches any such same-size, same-mtime, same-generation rewrite.
+   * A torn read while a writer is mid-append only causes a spurious rebuild
+   * (safe direction), never a stale hit.
    */
-  walCheckpointSeq?: number;
-  walSalt1?: number;
-  walSalt2?: number;
+  walHash?: string;
 }
 
-/** Read the WAL header generation fields, or undefined when absent/too short. */
-function readWalGeneration(walPath: string): {
-  checkpointSeq: number;
-  salt1: number;
-  salt2: number;
-} | null {
+/** Hash the WAL file's full content, or undefined when absent/unreadable. */
+function readWalContentHash(walPath: string): string | undefined {
   try {
-    const fd = fs.openSync(walPath, "r");
-    try {
-      const buf = Buffer.alloc(24);
-      if (fs.readSync(fd, buf, 0, 24, 0) === 24) {
-        return {
-          checkpointSeq: buf.readUInt32BE(12),
-          salt1: buf.readUInt32BE(16),
-          salt2: buf.readUInt32BE(20)
-        };
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
+    return createHash("sha256").update(fs.readFileSync(walPath)).digest("hex");
   } catch {
-    // no readable wal header
+    return undefined;
   }
-  return null;
 }
 
 /** Stat a conversation DB, or null if it doesn't exist. */
@@ -110,20 +95,13 @@ export function statConversation(dir: string, id: string): DbStat | null {
 
     let walMtimeMs: number | undefined;
     let walSize: number | undefined;
-    let walCheckpointSeq: number | undefined;
-    let walSalt1: number | undefined;
-    let walSalt2: number | undefined;
+    let walHash: string | undefined;
     try {
       const walPath = `${dbPath}-wal`;
       const ws = fs.statSync(walPath);
       walMtimeMs = ws.mtimeMs;
       walSize = ws.size;
-      const gen = readWalGeneration(walPath);
-      if (gen) {
-        walCheckpointSeq = gen.checkpointSeq;
-        walSalt1 = gen.salt1;
-        walSalt2 = gen.salt2;
-      }
+      walHash = readWalContentHash(walPath);
     } catch {
       // no wal file
     }
@@ -158,9 +136,7 @@ export function statConversation(dir: string, id: string): DbStat | null {
       size: s.size,
       walMtimeMs,
       walSize,
-      walCheckpointSeq,
-      walSalt1,
-      walSalt2,
+      walHash,
       journalMtimeMs,
       journalSize,
       changeCounter
