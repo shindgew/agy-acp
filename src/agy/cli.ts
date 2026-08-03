@@ -1,4 +1,5 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, statSync } from "node:fs";
@@ -17,7 +18,7 @@ import {
   type ClientFileSystem
 } from "./edit/bridge.js";
 import {
-  applyDiffBlockToSnapshot,
+  applyDiffBlocksToSnapshot,
   buildReconcileEditUpdate,
   reconcileWorkingTree,
   snapshotWorkingTree,
@@ -49,6 +50,28 @@ const PERMISSION_REDRAW_TIMEOUT_MS = 500;
 function permissionSignature(row: StepRow): string {
   const p = row.permission;
   return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
+}
+
+/**
+ * Advance the edit baseline from a completed structured-edit tool-call.
+ * Groups multi-replace chunks by path so StartLine values stay relative to the
+ * pre-edit file (see {@link applyDiffBlocksToSnapshot}).
+ */
+function noteStructuredEditOnBaseline(
+  baseline: WorkingTreeSnapshot,
+  cwd: string,
+  toolCall: SessionUpdate
+): void {
+  const byPath = new Map<string, ReturnType<typeof diffBlocks>>();
+  for (const block of diffBlocks(toolCall)) {
+    const abs = path.resolve(cwd, block.path);
+    const list = byPath.get(abs);
+    if (list) list.push(block);
+    else byPath.set(abs, [block]);
+  }
+  for (const [abs, blocks] of byPath) {
+    applyDiffBlocksToSnapshot(baseline, abs, blocks);
+  }
 }
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
@@ -173,9 +196,6 @@ export class AgyCliSession {
   #conversationId: string | null = null;
   #lastStepIdx = -1;
   #lastPromptUserStepIdxs: number[] = [];
-  // Monotonic per-session counter so reconciled edit tool-call IDs stay unique
-  // across turns (clients key tool-call lifecycles on toolCallId).
-  #reconcileTurnSeq = 0;
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
   readonly ptyFactory?: PtyFactory;
@@ -344,17 +364,11 @@ export class AgyCliSession {
     }
     // Advance baseline from the structured diff content (not disk): by the time
     // we observe the tool-call, a later shell edit may already be on disk.
+    // Multi-replace chunks for one path are applied together so StartLine stays
+    // relative to the pre-edit text.
     const noteRecognizedEdit = (toolCall: SessionUpdate): void => {
       if (!editBaseline) return;
-      for (const block of diffBlocks(toolCall)) {
-        applyDiffBlockToSnapshot(
-          editBaseline,
-          path.resolve(this.config.cwd, block.path),
-          block.oldText,
-          block.newText,
-          block.line
-        );
-      }
+      noteStructuredEditOnBaseline(editBaseline, this.config.cwd, toolCall);
     };
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
@@ -671,7 +685,9 @@ export class AgyCliSession {
       console.error(`[agy-acp] WARN: working-tree reconciliation failed: ${(error as Error).message}`);
       return;
     }
-    const turnToken = String(this.#reconcileTurnSeq++);
+    // UUID (not a session-local counter): session/load and session/resume rebuild
+    // AgyCliSession via startSession, which would reset a counter and reuse IDs.
+    const turnToken = randomUUID();
     let index = 0;
     for (const edit of reflected) {
       if (this.#cancelled) return;
@@ -774,15 +790,7 @@ export class AgyCliSession {
           // move the baseline to proposed content that never landed on disk.
           const rawUpdate = update as unknown as { status?: string };
           if (editBaseline && isEditToolCall(update) && rawUpdate.status === "completed") {
-            for (const block of diffBlocks(update)) {
-              applyDiffBlockToSnapshot(
-                editBaseline,
-                path.resolve(this.config.cwd, block.path),
-                block.oldText,
-                block.newText,
-                block.line
-              );
-            }
+            noteStructuredEditOnBaseline(editBaseline, this.config.cwd, update);
           }
         }
       };

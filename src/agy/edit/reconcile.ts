@@ -221,6 +221,13 @@ export function replaceOccurrence(
   return text.slice(0, idx) + newText + text.slice(idx + oldText.length);
 }
 
+export interface DiffBlockSpec {
+  oldText: string | null;
+  newText: string;
+  /** 1-based start line in the *pre-edit* file (agy StartLine). */
+  line?: number;
+}
+
 /**
  * Advance a snapshot entry to the post-edit content described by a structured
  * diff block, without reading disk. Disk may already include later shell edits
@@ -238,12 +245,78 @@ export function applyDiffBlockToSnapshot(
   newText: string,
   line?: number
 ): void {
+  applyDiffBlocksToSnapshot(snapshot, filePath, [{ oldText, newText, line }]);
+}
+
+/**
+ * Apply one or more structured diff blocks for a single path. Multi-replace
+ * chunks carry `StartLine` against the *original* file; applying them left-to-
+ * right on a mutating buffer can invalidate later line numbers when an earlier
+ * chunk changes the line count. Instead, locate every match on the original
+ * text and apply from end to start so indices stay valid.
+ */
+export function applyDiffBlocksToSnapshot(
+  snapshot: WorkingTreeSnapshot,
+  filePath: string,
+  blocks: DiffBlockSpec[]
+): void {
+  if (blocks.length === 0) return;
+
   const abs = path.resolve(filePath);
   const before = snapshot.get(abs);
+
+  // Full-file writes (oldText null) and missing/binary baselines cannot use
+  // multi-match positioning — fall back to sequential single-block rules.
+  if (blocks.some((b) => b.oldText === null) || before?.text == null) {
+    for (const block of blocks) {
+      applySingleDiffBlock(snapshot, abs, snapshot.get(abs), block);
+    }
+    return;
+  }
+
+  const original = before.text;
+  type Op = { idx: number; oldLen: number; newText: string };
+  const ops: Op[] = [];
+
+  for (const block of blocks) {
+    const oldText = block.oldText!;
+    if (original === oldText) {
+      ops.push({ idx: 0, oldLen: original.length, newText: block.newText });
+      continue;
+    }
+    const from = block.line !== undefined ? offsetOfLine(original, block.line) : 0;
+    if (from === null) continue;
+    const idx = original.indexOf(oldText, from);
+    if (idx === -1) continue;
+    ops.push({ idx, oldLen: oldText.length, newText: block.newText });
+  }
+
+  if (ops.length === 0) {
+    // Nothing matched — same best-effort as a single failed apply.
+    const last = blocks[blocks.length - 1]!;
+    if (original === last.newText || original.includes(last.newText)) return;
+    return;
+  }
+
+  // End-to-start so earlier replacements do not shift later indices.
+  ops.sort((a, b) => b.idx - a.idx || b.oldLen - a.oldLen);
+  let result = original;
+  for (const op of ops) {
+    result = result.slice(0, op.idx) + op.newText + result.slice(op.idx + op.oldLen);
+  }
+  snapshot.set(abs, snapshotFromText(result));
+}
+
+function applySingleDiffBlock(
+  snapshot: WorkingTreeSnapshot,
+  abs: string,
+  before: FileSnapshot | undefined,
+  block: DiffBlockSpec
+): void {
+  const { oldText, newText, line } = block;
   let post: string;
 
   if (oldText === null) {
-    // Create / full write with no prior text in the diff.
     post = newText;
   } else if (before?.text != null) {
     if (before.text === oldText) {
@@ -253,17 +326,12 @@ export function applyDiffBlockToSnapshot(
       if (applied !== null) {
         post = applied;
       } else if (before.text === newText || before.text.includes(newText)) {
-        // Baseline already reflects this edit.
         return;
       } else {
-        // Snippet does not apply to baseline text — cannot reconstruct post-edit
-        // content without guessing; leave the entry unchanged.
         return;
       }
     }
   } else {
-    // Missing or binary baseline: best representable post state is newText
-    // (full-file writes; partial snippets are incomplete but all we have).
     post = newText;
   }
 

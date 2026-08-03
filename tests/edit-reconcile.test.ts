@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_TEXT_BYTES,
   applyDiffBlockToSnapshot,
+  applyDiffBlocksToSnapshot,
   buildReconcileEditUpdate,
   isValidUtf8,
   reconcileWorkingTree,
@@ -122,6 +123,21 @@ describe("reconcileWorkingTree", () => {
     ]);
     applyDiffBlockToSnapshot(snap, "/r/a.txt", "OLD", "NEW", 4);
     expect(snap.get("/r/a.txt")?.text).toBe("x\nOLD\ny\nNEW\nz");
+  });
+
+  it("applies multi-replace StartLines against the original text, not intermediate state", () => {
+    // Line 2 is a 3-line block; replacing it with one line shifts later lines up.
+    // Chunk 2's StartLine 6 is relative to the *original* file.
+    const original = "keep\nAAA\nBBB\nCCC\nmid\nOLD\nend";
+    // lines: 1 keep, 2 AAA, 3 BBB, 4 CCC, 5 mid, 6 OLD, 7 end
+    const snap = new Map([
+      ["/r/a.txt", { sha1: "x", size: original.length, text: original }]
+    ]);
+    applyDiffBlocksToSnapshot(snap, "/r/a.txt", [
+      { oldText: "AAA\nBBB\nCCC", newText: "X", line: 2 },
+      { oldText: "OLD", newText: "NEW", line: 6 }
+    ]);
+    expect(snap.get("/r/a.txt")?.text).toBe("keep\nX\nmid\nNEW\nend");
   });
 
   it("round-trips StartLine through diffBlocks when present on the content block", () => {
@@ -361,5 +377,15 @@ describe("buildReconcileEditUpdate", () => {
     expect(turn1).toMatchObject({ toolCallId: "agy-fs-reconcile-1-0" });
     // Same index in different turns must not collide.
     expect((turn0 as { toolCallId: string }).toolCallId).not.toBe((turn1 as { toolCallId: string }).toolCallId);
+  });
+
+  it("keeps tool-call IDs unique when turn tokens are UUIDs (session reload safe)", () => {
+    const edit = { path: "/repo/a.txt", oldText: null, newText: "x" };
+    const a = buildReconcileEditUpdate(edit, 0, "/repo", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    const b = buildReconcileEditUpdate(edit, 0, "/repo", "ffffffff-0000-1111-2222-333333333333");
+    expect((a as { toolCallId: string }).toolCallId).toBe(
+      "agy-fs-reconcile-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-0"
+    );
+    expect((a as { toolCallId: string }).toolCallId).not.toBe((b as { toolCallId: string }).toolCallId);
   });
 });
