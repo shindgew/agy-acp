@@ -15,7 +15,7 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { promises as fs } from "node:fs";
+import { createReadStream, promises as fs } from "node:fs";
 import * as path from "node:path";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 
@@ -33,6 +33,10 @@ export interface FileSnapshot {
   size: number;
   /** utf-8 contents, or null when binary or oversized (out of scope for a diff). */
   text: string | null;
+  /** False when added by structured-diff advancement rather than root listing. */
+  candidate?: boolean;
+  /** Original listed fingerprint, retained when structured diffs advance sha1. */
+  initialSha1?: string;
 }
 
 /** Absolute file path -> snapshot. */
@@ -45,7 +49,7 @@ export interface ReflectedEdit {
   newText: string;
 }
 
-export type UnsupportedReason = "binary" | "oversized" | "deleted";
+export type UnsupportedReason = "binary" | "oversized" | "deleted" | "ignore-rules-changed";
 
 export interface UnsupportedChange {
   path: string;
@@ -150,14 +154,17 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   }
   if (!st.isFile()) return null;
 
-  // Never buffer multi-megabyte blobs into memory. Size+mtime is enough to
-  // notice a change so we can report it as unsupported; we never text-diff them.
+  // Never buffer multi-megabyte blobs into memory. Hash them as a stream so a
+  // same-size replacement with a preserved/coarse mtime is still reported.
   if (st.size > MAX_TEXT_BYTES) {
-    return {
-      sha1: `oversized:${st.size}:${st.mtimeMs}`,
-      size: st.size,
-      text: null
-    };
+    try {
+      const hash = createHash("sha1");
+      for await (const chunk of createReadStream(abs)) hash.update(chunk);
+      const sha1 = `oversized:${st.size}:${hash.digest("hex")}`;
+      return { sha1, size: st.size, text: null, candidate: true, initialSha1: sha1 };
+    } catch {
+      return null;
+    }
   }
 
   let buf: Buffer;
@@ -171,19 +178,22 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   // the client's text write-through (which would rewrite U+FFFD replacements).
   const isBinary = buf.includes(0) || !isValidUtf8(buf);
   const text = !isBinary ? buf.toString("utf8") : null;
-  return { sha1, size: buf.length, text };
+  return { sha1, size: buf.length, text, candidate: true, initialSha1: sha1 };
 }
 
-function snapshotFromText(text: string): FileSnapshot {
+function snapshotFromText(text: string, candidate: boolean, initialSha1?: string): FileSnapshot {
   const buf = Buffer.from(text, "utf8");
   if (buf.length > MAX_TEXT_BYTES) {
-    // mtime unknown — size alone is enough; we never text-diff these.
-    return { sha1: `oversized:${buf.length}:0`, size: buf.length, text: null };
+    const sha1 = `oversized:${buf.length}:${createHash("sha1").update(buf).digest("hex")}`;
+    return { sha1, size: buf.length, text: null, candidate, initialSha1 };
   }
+  const sha1 = createHash("sha1").update(buf).digest("hex");
   return {
-    sha1: createHash("sha1").update(buf).digest("hex"),
+    sha1,
     size: buf.length,
-    text
+    text,
+    candidate,
+    initialSha1
   };
 }
 
@@ -304,7 +314,7 @@ export function applyDiffBlocksToSnapshot(
   for (const op of ops) {
     result = result.slice(0, op.idx) + op.newText + result.slice(op.idx + op.oldLen);
   }
-  snapshot.set(abs, snapshotFromText(result));
+  snapshot.set(abs, snapshotFromText(result, before.candidate !== false, before.initialSha1 ?? before.sha1));
 }
 
 function applySingleDiffBlock(
@@ -335,7 +345,10 @@ function applySingleDiffBlock(
     post = newText;
   }
 
-  snapshot.set(abs, snapshotFromText(post));
+  snapshot.set(
+    abs,
+    snapshotFromText(post, before?.candidate ?? false, before ? (before.initialSha1 ?? before.sha1) : undefined)
+  );
 }
 
 /** Snapshot the working tree across one or more roots. */
@@ -366,9 +379,46 @@ export async function reconcileWorkingTree(
   const reflected: ReflectedEdit[] = [];
   const unsupported: UnsupportedChange[] = [];
 
+  // A newly added ignore rule can remove a still-existing baseline candidate
+  // from `git ls-files --others --exclude-standard`. Snapshot those paths
+  // directly so an eligibility change is not misreported as a deletion.
+  for (const [abs, before] of baseline) {
+    if (current.has(abs)) continue;
+    // Structured baseline advancement can add an absolute path outside the
+    // configured roots. It was never a listing candidate, so do not pull it
+    // into reconciliation and duplicate the already-routed structured edit.
+    if (before.candidate === false) continue;
+    const now = await snapshotFile(abs);
+    if (now) current.set(abs, now);
+  }
+
+  // Conversely, removing an ignore rule can expose a pre-existing file that
+  // was absent from the baseline. We cannot reconstruct its pre-turn content,
+  // so report it rather than inventing a creation and routing a destructive
+  // empty→content write-through. Nested .gitignore changes affect descendants.
+  const changedIgnoreRules = new Set<string>();
+  const paths = new Set([...baseline.keys(), ...current.keys()]);
+  for (const abs of paths) {
+    if (path.basename(abs) !== ".gitignore") continue;
+    const before = baseline.get(abs);
+    if ((before?.initialSha1 ?? before?.sha1) !== current.get(abs)?.sha1) changedIgnoreRules.add(abs);
+  }
+  const becameVisibleAfterIgnoreChange = (abs: string): boolean => {
+    if (path.basename(abs) === ".gitignore") return false;
+    for (const ignoreFile of changedIgnoreRules) {
+      const dir = path.dirname(ignoreFile);
+      if (abs.startsWith(dir + path.sep)) return true;
+    }
+    return false;
+  };
+
   for (const [abs, now] of current) {
     const before = baseline.get(abs);
     if (before && before.sha1 === now.sha1) continue; // unchanged
+    if (!before && becameVisibleAfterIgnoreChange(abs)) {
+      unsupported.push({ path: abs, reason: "ignore-rules-changed" });
+      continue;
+    }
     if (now.text === null) {
       unsupported.push({ path: abs, reason: now.size > MAX_TEXT_BYTES ? "oversized" : "binary" });
       continue;

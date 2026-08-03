@@ -168,6 +168,63 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not invent a creation when removing an ignore rule exposes an existing file", async () => {
+    const dir = gitRepo();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const ignoredFile = path.join(dir, "ignored.txt");
+    fs.writeFileSync(ignoreFile, "ignored.txt\n", "utf8");
+    fs.writeFileSync(ignoredFile, "pre-existing", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    expect(baseline.has(ignoredFile)).toBe(false);
+    fs.writeFileSync(ignoreFile, "", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([{ path: ignoreFile, oldText: "ignored.txt\n", newText: "" }]);
+    expect(unsupported).toEqual([{ path: ignoredFile, reason: "ignore-rules-changed" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("retains ignore-change detection after a structured edit advances the baseline", async () => {
+    const dir = gitRepo();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const ignoredFile = path.join(dir, "ignored.txt");
+    fs.writeFileSync(ignoreFile, "ignored.txt\n", "utf8");
+    fs.writeFileSync(ignoredFile, "pre-existing", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    applyDiffBlockToSnapshot(baseline, ignoreFile, "ignored.txt\n", "");
+    fs.writeFileSync(ignoreFile, "", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: ignoredFile, reason: "ignore-rules-changed" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not report a baseline file as deleted when a new ignore rule hides it", async () => {
+    const dir = gitRepo();
+    const ignoreFile = path.join(dir, ".gitignore");
+    const file = path.join(dir, "later-ignored.txt");
+    fs.writeFileSync(ignoreFile, "", "utf8");
+    fs.writeFileSync(file, "unchanged", "utf8");
+    execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    expect(baseline.has(file)).toBe(true);
+    fs.writeFileSync(ignoreFile, "later-ignored.txt\n", "utf8");
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([{ path: ignoreFile, oldText: "", newText: "later-ignored.txt\n" }]);
+    expect(unsupported).toEqual([]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("reports a binary change as unsupported instead of diffing it", async () => {
     const dir = gitRepo();
     const baseline = await snapshotWorkingTree([dir]);
@@ -240,6 +297,24 @@ describe("reconcileWorkingTree", () => {
     expect(snap!.text).toBeNull();
     expect(snap!.size).toBe(MAX_TEXT_BYTES + 1);
     expect(snap!.sha1.startsWith("oversized:")).toBe(true);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects an oversized same-size replacement even when mtime is preserved", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "huge.bin");
+    fs.writeFileSync(file, Buffer.alloc(MAX_TEXT_BYTES + 1, 1));
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    const originalTimes = fs.statSync(file);
+    fs.writeFileSync(file, Buffer.alloc(MAX_TEXT_BYTES + 1, 2));
+    fs.utimesSync(file, originalTimes.atime, originalTimes.mtime);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "oversized" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
