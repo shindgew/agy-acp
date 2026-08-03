@@ -2768,17 +2768,30 @@ describe("ReplayCache", () => {
     ]);
   });
 
-  it("rebuilds cached replay after an in-place step update with identical payload byte size", () => {
+  it("rebuilds cached replay after an in-place step update the (mtime,size) check misses", () => {
+    const dbPath = path.join(dir, "conv-replay-same-size.db");
     const db = createConversationDb(dir, "conv-replay-same-size");
     insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) });
+
+    // Pin the main-file mtime to a fixed, ms-precision value so we can restore it
+    // exactly after the update and defeat the old (mtime, size) staleness check.
+    const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
+    fs.utimesSync(dbPath, pinnedTime, pinnedTime);
 
     const cache = new ReplayCache(8);
     const first = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
     expect(first?.updates).toMatchObject([{ content: { text: "hello" } }]);
+    const sizeBefore = fs.statSync(dbPath).size;
 
-    // Same string length ("hello" vs "world") keeps payload byte length unchanged
+    // Same string length ("hello" vs "world") keeps the main-file byte size unchanged.
     updateStepPayload(db, 1, encodeStepPayload({ agentText: "world" }));
     db.close();
+
+    // Restore the exact mtime the cache recorded: with size also unchanged, only the
+    // SQLite header change counter differs, so this fails unless the widened
+    // fingerprint (change counter / WAL / journal) is doing the work.
+    fs.utimesSync(dbPath, pinnedTime, pinnedTime);
+    expect(fs.statSync(dbPath).size).toBe(sizeBefore);
 
     const second = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
     expect(second?.updates).toMatchObject([{ content: { text: "world" } }]);
