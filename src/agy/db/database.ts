@@ -58,13 +58,63 @@ export function conversationDbPath(dir: string, id: string): string {
 export interface DbStat {
   mtimeMs: number;
   size: number;
+  walMtimeMs?: number;
+  walSize?: number;
+  journalMtimeMs?: number;
+  journalSize?: number;
+  changeCounter: number;
 }
 
 /** Stat a conversation DB, or null if it doesn't exist. */
 export function statConversation(dir: string, id: string): DbStat | null {
+  const dbPath = conversationDbPath(dir, id);
   try {
-    const s = fs.statSync(conversationDbPath(dir, id));
-    return { mtimeMs: s.mtimeMs, size: s.size };
+    const s = fs.statSync(dbPath);
+
+    let walMtimeMs: number | undefined;
+    let walSize: number | undefined;
+    try {
+      const ws = fs.statSync(`${dbPath}-wal`);
+      walMtimeMs = ws.mtimeMs;
+      walSize = ws.size;
+    } catch {
+      // no wal file
+    }
+
+    let journalMtimeMs: number | undefined;
+    let journalSize: number | undefined;
+    try {
+      const js = fs.statSync(`${dbPath}-journal`);
+      journalMtimeMs = js.mtimeMs;
+      journalSize = js.size;
+    } catch {
+      // no journal file
+    }
+
+    let changeCounter = 0;
+    try {
+      const fd = fs.openSync(dbPath, "r");
+      try {
+        const buf = Buffer.alloc(4);
+        if (fs.readSync(fd, buf, 0, 4, 24) === 4) {
+          changeCounter = buf.readUInt32BE(0);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      // ignore read errors
+    }
+
+    return {
+      mtimeMs: s.mtimeMs,
+      size: s.size,
+      walMtimeMs,
+      walSize,
+      journalMtimeMs,
+      journalSize,
+      changeCounter
+    };
   } catch {
     return null;
   }

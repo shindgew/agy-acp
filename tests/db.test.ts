@@ -2768,6 +2768,41 @@ describe("ReplayCache", () => {
     ]);
   });
 
+  it("rebuilds cached replay after an in-place step update with identical payload byte size", () => {
+    const db = createConversationDb(dir, "conv-replay-same-size");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) });
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
+    expect(first?.updates).toMatchObject([{ content: { text: "hello" } }]);
+
+    // Same string length ("hello" vs "world") keeps payload byte length unchanged
+    updateStepPayload(db, 1, encodeStepPayload({ agentText: "world" }));
+    db.close();
+
+    const second = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
+    expect(second?.updates).toMatchObject([{ content: { text: "world" } }]);
+    expect(second?.updates).not.toBe(first?.updates);
+  });
+
+  it("allows manual invalidation via invalidate() and clear()", () => {
+    const db = createConversationDb(dir, "conv-replay-inv");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "v1" }) });
+
+    const cache = new ReplayCache(8);
+    const first = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(first?.updates).toMatchObject([{ content: { text: "v1" } }]);
+
+    cache.invalidate("conv-replay-inv");
+    const second = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(second?.updates).not.toBe(first?.updates);
+
+    cache.clear();
+    const third = cache.get(dir, "conv-replay-inv", { skipNarration: false });
+    expect(third?.updates).not.toBe(second?.updates);
+    db.close();
+  });
+
   it("rebuilds cached locations when a referenced file is deleted", () => {
     const file = path.join(dir, "cached-location.txt");
     fs.writeFileSync(file, "content");

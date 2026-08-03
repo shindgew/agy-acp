@@ -50,6 +50,18 @@ function buildReplay(dir: string, id: string, opts: ReplayOptions): BuiltReplay 
   }
 }
 
+function isDbStatUnchanged(a: DbStat, b: DbStat): boolean {
+  return (
+    a.mtimeMs === b.mtimeMs &&
+    a.size === b.size &&
+    a.walMtimeMs === b.walMtimeMs &&
+    a.walSize === b.walSize &&
+    a.journalMtimeMs === b.journalMtimeMs &&
+    a.journalSize === b.journalSize &&
+    a.changeCounter === b.changeCounter
+  );
+}
+
 /**
  * Replays conversations into ACP updates, caching results so repeat loads of an
  * unchanged conversation are cheap.
@@ -74,7 +86,7 @@ export class ReplayCache {
       const locationStateUnchanged = [...entry.locationReadability].every(
         ([filePath, wasReadable]) => isReadableFile(filePath) === wasReadable
       );
-      if (entry.stat.mtimeMs === stat.mtimeMs && entry.stat.size === stat.size && locationStateUnchanged) {
+      if (isDbStatUnchanged(entry.stat, stat) && locationStateUnchanged) {
         return { updates: entry.updates, maxIdx: entry.maxIdx };
       }
     }
@@ -84,5 +96,15 @@ export class ReplayCache {
     if (!built) return null;
     this.cache.set(id, { ...built, stat, skipNarration: opts.skipNarration, cwd: opts.cwd });
     return { updates: built.updates, maxIdx: built.maxIdx };
+  }
+
+  /** Manually invalidate cache for a specific conversation ID. */
+  invalidate(id: string): void {
+    this.cache.delete(id);
+  }
+
+  /** Clear all cached conversations. */
+  clear(): void {
+    this.cache.clear();
   }
 }
