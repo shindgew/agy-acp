@@ -6,6 +6,7 @@ import type { SessionDeleteTarget } from "./delete.js";
 
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
+import { wakePromptIdleWaiters } from "./prompt.js";
 
 export async function handleCloseSession(
   params: CloseSessionRequest,
@@ -15,6 +16,8 @@ export async function handleCloseSession(
   activeSessions.delete(params.sessionId);
   if (session) {
     (session as SessionState).closed = true;
+    // Unblock any steer waiter before teardown so it observes `closed`.
+    wakePromptIdleWaiters(session as SessionState);
     await cancelQueuedPrompts(session as SessionState);
     session.promptAbort?.abort();
     await session.agy.close();

@@ -15,6 +15,7 @@ import { applyModelSelection, initialModelSelection, restoredModelSelection } fr
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
+import { wakePromptIdleWaiters } from "./prompt.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -72,6 +73,7 @@ export async function registerSession(
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
     replaced.closed = true;
+    wakePromptIdleWaiters(replaced);
     await cancelQueuedPrompts(replaced);
     replaced.promptAbort?.abort();
     await replaced.agy.close().catch(() => {});
@@ -83,6 +85,7 @@ export async function registerSession(
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
     evicted.closed = true;
+    wakePromptIdleWaiters(evicted);
     await cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(

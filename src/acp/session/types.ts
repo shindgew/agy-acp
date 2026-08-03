@@ -44,6 +44,11 @@ export interface SessionState {
   promptIdleNotify?: () => void;
   /** Serializes steer replacements so competing requests cannot overlap. */
   promptSteerInProgress?: Promise<void>;
+  /**
+   * Number of in-flight steer replacements that have reserved the next turn.
+   * While > 0, the queue must not auto-start — a steer owns the claim.
+   */
+  steerClaims?: number;
   /** Set when the session is being closed or deleted. */
   closed?: boolean;
   /** Stable v2 user-message IDs keyed by their persisted agy step index. */

@@ -466,6 +466,232 @@ describe("queue and steer-by-cancel", () => {
     });
   });
 
+  it("does not start a queued follow-up between competing steers", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const executedPrompts: string[] = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const promptIdx = args.indexOf("--print");
+        executedPrompts.push(promptIdx >= 0 ? args[promptIdx + 1] : "");
+        const db = createConversationDb(dir, `conv-steer-queue-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        () => {}
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        // Queue a follow-up, then two steers that must replace without letting the
+        // queue claim the session between them.
+        const pq = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "queued should wait" }],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+        const s1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer 1" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+        const s2 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer 2" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        await waitFor(() => processes.length === 2);
+        expect(executedPrompts).toEqual(["prompt 1", "steer 1"]);
+        processes[1].finish();
+        await p1;
+        await s1;
+
+        await waitFor(() => processes.length === 3);
+        expect(executedPrompts).toEqual(["prompt 1", "steer 1", "steer 2"]);
+        processes[2].finish();
+        await s2;
+
+        await waitFor(() => processes.length === 4);
+        expect(executedPrompts).toEqual(["prompt 1", "steer 1", "steer 2", "queued should wait"]);
+        processes[3].finish();
+        const rq = (await pq) as acp.PromptResponse;
+        expect(rq.stopReason).toBe("end_turn");
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("cancels an in-flight steer when the session is closed", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const db = createConversationDb(dir, `conv-steer-close-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        () => {}
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const steer = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer after close" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        await connection.agent.request(methods.agent.session.close, {
+          sessionId: session.sessionId
+        });
+
+        const r1 = await p1;
+        const rs = (await steer) as acp.PromptResponse;
+        expect(r1.stopReason).toBe("cancelled");
+        expect(rs.stopReason).toBe("cancelled");
+        // Steer must not start a replacement after cleanup.
+        expect(processes.length).toBe(1);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("does not treat a queued resource body of /plan as a config slash command", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const executedPrompts: string[] = [];
+      const updates: Array<Record<string, unknown>> = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const promptIdx = args.indexOf("--print");
+        executedPrompts.push(promptIdx >= 0 ? args[promptIdx + 1] : "");
+        const db = createConversationDb(dir, `conv-queued-resource-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const p2 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [
+            {
+              type: "resource",
+              resource: { uri: "file:///notes.md", text: "/plan", mimeType: "text/markdown" }
+            }
+          ],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+
+        processes[0].finish();
+        await p1;
+
+        await waitFor(() => processes.length === 2);
+        processes[1].finish();
+        const r2 = (await p2) as acp.PromptResponse;
+        expect(r2.stopReason).toBe("end_turn");
+        // Resource body is forwarded to agy, not intercepted as /plan mode change.
+        expect(executedPrompts[1]).toBe("/plan");
+        expect(
+          updates.some(
+            (u) =>
+              u.sessionUpdate === "current_mode_update" ||
+              (u.sessionUpdate === "config_option_update" &&
+                Array.isArray(u.configOptions) &&
+                (u.configOptions as Array<{ id?: string; currentValue?: string }>).some(
+                  (o) => o.id === "mode" && o.currentValue === "plan"
+                ))
+          )
+        ).toBe(false);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   // The ACP SDK request helper does not currently expose a request-abort
   // option, so queued request cancellation is covered by session close below.
   it.skip("cancels a specific queued prompt via signal abort", async () => {

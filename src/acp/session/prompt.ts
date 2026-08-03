@@ -69,6 +69,8 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
   }
 
   if (session.closed) return;
+  // A steer has reserved the next turn (possibly still waiting on a prior steer).
+  if ((session.steerClaims ?? 0) > 0) return;
 
   if (!session.activePrompt && session.promptQueue.length > 0) {
     const next = session.promptQueue.shift()!;
@@ -91,6 +93,36 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
       void executeQueuedV2Turn(next);
     }
   }
+}
+
+/**
+ * Claim the session for a steer replacement before any await, then serialize
+ * against other steers. The returned release must run exactly once (success,
+ * cancel, or closed) so the queue can drain again.
+ */
+async function acquireSteerSlot(session: SessionState): Promise<() => void> {
+  session.steerClaims = (session.steerClaims ?? 0) + 1;
+  const previousSteer = session.promptSteerInProgress;
+  let release!: () => void;
+  session.promptSteerInProgress = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  if (previousSteer) await previousSteer;
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    session.steerClaims = Math.max(0, (session.steerClaims ?? 1) - 1);
+    release();
+  };
+}
+
+/** Wake any steer idle-waiter after marking the session closed. */
+export function wakePromptIdleWaiters(session: SessionState): void {
+  const notify = session.promptIdleNotify;
+  session.promptIdleNotify = undefined;
+  notify?.();
 }
 
 /**
@@ -185,13 +217,8 @@ export async function handlePromptV1(
     }
 
     if (intent === "steer") {
-      const previousSteer = session.promptSteerInProgress;
-      if (previousSteer) await previousSteer;
-      let release!: () => void;
-      session.promptSteerInProgress = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      releaseSteer = release;
+      // Reserve before any await so a queued follow-up cannot claim the session.
+      releaseSteer = await acquireSteerSlot(session);
       const waitForIdle = session.activePrompt
         ? new Promise<void>((resolve) => {
             const prevNotify = session.promptIdleNotify;
@@ -206,6 +233,7 @@ export async function handlePromptV1(
       await waitForIdle;
       if (session.closed) {
         releaseSteer();
+        releaseSteer = undefined;
         return { stopReason: "cancelled" };
       }
     } else {
@@ -417,13 +445,8 @@ export async function handlePromptV2(
     }
 
     if (intent === "steer") {
-      const previousSteer = session.promptSteerInProgress;
-      if (previousSteer) await previousSteer;
-      let release!: () => void;
-      session.promptSteerInProgress = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      releaseSteer = release;
+      // Reserve before any await so a queued follow-up cannot claim the session.
+      releaseSteer = await acquireSteerSlot(session);
       const waitForIdle = session.activePrompt
         ? new Promise<void>((resolve) => {
             const prevNotify = session.promptIdleNotify;
@@ -438,6 +461,7 @@ export async function handlePromptV2(
       await waitForIdle;
       if (session.closed) {
         releaseSteer();
+        releaseSteer = undefined;
         await client.notify(v2.methods.client.session.update, {
           sessionId: params.sessionId,
           update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
