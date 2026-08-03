@@ -60,6 +60,11 @@ export function parseTurnIntent(params: unknown): TurnIntent | undefined {
   return undefined;
 }
 
+/** True when a turn is running or a steer has reserved the next turn. */
+export function sessionTurnBusy(session: SessionState): boolean {
+  return session.activePrompt || (session.steerClaims ?? 0) > 0;
+}
+
 export function notifyIdleAndDrainQueue(session: SessionState): void {
   const notify = session.promptIdleNotify;
   session.promptIdleNotify = undefined;
@@ -80,7 +85,9 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
         notifyIdleAndDrainQueue(session);
         return;
       }
-      void executeQueuedV1Turn(next);
+      void executeQueuedV1Turn(next).catch((error) => {
+        console.error(`[agy-acp] queued v1 turn failed: ${(error as Error).message}`);
+      });
     } else {
       if (next.controller.signal.aborted) {
         void next.client.notify(v2.methods.client.session.update, {
@@ -90,7 +97,9 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
         notifyIdleAndDrainQueue(session);
         return;
       }
-      void executeQueuedV2Turn(next);
+      void executeQueuedV2Turn(next).catch((error) => {
+        console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
+      });
     }
   }
 }
@@ -186,7 +195,7 @@ export async function handlePromptV1(
   deps: PromptV1Deps
 ): Promise<V1PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  if (session.activePrompt) {
+  if (sessionTurnBusy(session)) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
       return new Promise<V1PromptResponse>((resolve, reject) => {
@@ -211,6 +220,7 @@ export async function handlePromptV1(
             }
           };
           signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) onAbort();
         }
       });
     }
@@ -223,7 +233,7 @@ export async function handlePromptV1(
   // setup failures and slash-only turns — so release + queue drain always run.
   let releaseSteer: (() => void) | undefined;
   try {
-    if (session.activePrompt) {
+    if (sessionTurnBusy(session)) {
       // Reserve before any await so a queued follow-up cannot claim the session.
       releaseSteer = await acquireSteerSlot(session);
       const waitForIdle = session.activePrompt
@@ -329,8 +339,19 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   const session = deps.requireSession(params.sessionId);
   session.activePrompt = true;
 
+  const cancelled = () => Boolean(signal?.aborted || session.closed);
+
   try {
+    if (cancelled()) {
+      resolve({ stopReason: "cancelled" });
+      return;
+    }
+
     const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
+    if (cancelled()) {
+      resolve({ stopReason: "cancelled" });
+      return;
+    }
 
     const handled =
       isClientTextSlashPrompt(params.prompt) &&
@@ -350,7 +371,12 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
         deps
       ));
     if (handled) {
-      resolve({ stopReason: signal?.aborted ? "cancelled" : "end_turn" });
+      resolve({ stopReason: cancelled() ? "cancelled" : "end_turn" });
+      return;
+    }
+
+    if (cancelled()) {
+      resolve({ stopReason: "cancelled" });
       return;
     }
 
@@ -358,6 +384,13 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
       session.agy.cancel().catch(() => {});
     };
     signal?.addEventListener("abort", cancelPrompt, { once: true });
+    // Listener only fires for future aborts; honor an already-aborted signal.
+    if (signal?.aborted) {
+      signal.removeEventListener("abort", cancelPrompt);
+      cancelPrompt();
+      resolve({ stopReason: "cancelled" });
+      return;
+    }
 
     try {
       const tracker = createTerminalOutputTracker();
@@ -380,15 +413,24 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
           clientToolCallName
         );
       }, deps.clientFileSystemV1(client, params.sessionId), deps.clientElicitationV1?.(client));
-      await deps.persistSession(params.sessionId, session);
+      if (!session.closed) {
+        await deps.persistSession(params.sessionId, session);
+      }
       resolve({
-        stopReason: outcome.stopReason === "cancelled" || signal?.aborted ? "cancelled" : "end_turn"
+        stopReason:
+          outcome.stopReason === "cancelled" || cancelled() ? "cancelled" : "end_turn"
       });
     } finally {
       signal?.removeEventListener("abort", cancelPrompt);
     }
   } catch (error) {
-    await deps.persistSession(params.sessionId, session).catch(() => {});
+    if (!session.closed && !signal?.aborted) {
+      await deps.persistSession(params.sessionId, session).catch(() => {});
+    }
+    if (cancelled()) {
+      resolve({ stopReason: "cancelled" });
+      return;
+    }
     reject(error as Error);
   } finally {
     session.activePrompt = false;
@@ -409,10 +451,18 @@ export async function handlePromptV2(
   deps: PromptV2Deps
 ): Promise<V2PromptResponse> {
   const session = deps.requireSession(params.sessionId);
-  if (session.activePrompt) {
+  if (sessionTurnBusy(session)) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
       const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
+      if (session.closed) {
+        await client.notify(v2.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
+        }).catch(() => {});
+        return {};
+      }
+
       const parsedSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[])
         ? parseSlashCommand(promptText)
         : null;
@@ -431,6 +481,15 @@ export async function handlePromptV2(
         }
       });
 
+      // Cleanup may have drained the queue while user_message was in flight.
+      if (session.closed) {
+        await client.notify(v2.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
+        }).catch(() => {});
+        return {};
+      }
+
       const controller = new AbortController();
       const queuedId = `q-${randomUUID()}`;
       const queued: QueuedPromptV2 = {
@@ -444,7 +503,7 @@ export async function handlePromptV2(
         deps
       };
       session.promptQueue.push(queued);
-      if (!session.activePrompt) {
+      if (!sessionTurnBusy(session)) {
         notifyIdleAndDrainQueue(session);
       }
       return {};
@@ -458,7 +517,7 @@ export async function handlePromptV2(
   // Once the async turn is scheduled, its finally owns release + drain.
   let turnScheduled = false;
   try {
-    if (session.activePrompt) {
+    if (sessionTurnBusy(session)) {
       // Reserve before any await so a queued follow-up cannot claim the session.
       releaseSteer = await acquireSteerSlot(session);
       const waitForIdle = session.activePrompt

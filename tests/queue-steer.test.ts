@@ -609,6 +609,71 @@ describe("queue and steer-by-cancel", () => {
     });
   });
 
+  it("rejects a non-intent prompt while a steer replacement is in progress", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const db = createConversationDb(dir, `conv-steer-busy-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        () => {}
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const steer = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "steer turn" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        await waitFor(() => processes.length === 2);
+
+        // Steer owns the session (active or claim); concurrent no-intent must not start.
+        await expect(
+          connection.agent.request(methods.agent.session.prompt, {
+            sessionId: session.sessionId,
+            prompt: [{ type: "text", text: "sneak in" }]
+          })
+        ).rejects.toThrow();
+
+        processes[1].finish();
+        await p1;
+        await steer;
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   it("drains the queue after a slash-command steer", async () => {
     await withConversationsDir(async (dir) => {
       const processes: ControlledFakeProcess[] = [];
@@ -757,6 +822,96 @@ describe("queue and steer-by-cancel", () => {
         const rq = (await queued) as acp.PromptResponse;
         expect(rq.stopReason).toBe("end_turn");
         expect(executedPrompts).toEqual(["prompt 1", "queued after failed steer"]);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("does not leave a v2 queue item stuck when the session closes during enqueue", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const updates: Array<Record<string, unknown>> = [];
+      let blockUserMessage: (() => void) | undefined;
+      const userMessageGate = new Promise<void>((resolve) => {
+        blockUserMessage = resolve;
+      });
+
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const db = createConversationDb(dir, `conv-v2-enqueue-close-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      let userMessageCount = 0;
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        async (ctx) => {
+          const update = ctx.params.update as Record<string, unknown>;
+          updates.push(update);
+          if (update.sessionUpdate === "user_message") {
+            userMessageCount++;
+            // Hold the second user_message (queued) so close can interleave.
+            if (userMessageCount === 2 && blockUserMessage) {
+              await userMessageGate;
+            }
+          }
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+
+        const r1 = await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        expect(r1).toEqual({});
+        await waitFor(() => processes.length === 1);
+
+        const queued = connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "queued v2 during close" }],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+
+        await waitFor(() => userMessageCount >= 2);
+
+        await connection.agent.request(acpV2.methods.agent.session.close, {
+          sessionId: session.sessionId
+        } as any);
+
+        blockUserMessage?.();
+        await queued;
+
+        // Must emit a terminal cancelled update rather than silently dropping the queue item.
+        await waitFor(() =>
+          updates.some(
+            (u) =>
+              u.sessionUpdate === "state_update" &&
+              u.state === "idle" &&
+              u.stopReason === "cancelled"
+          )
+        );
+        // Queued turn must not spawn agy after close.
+        expect(processes.length).toBe(1);
       } finally {
         connection.close();
       }
