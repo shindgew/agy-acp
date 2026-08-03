@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationDb } from "../src/agy/db/database.js";
-import { ReplayCache } from "../src/agy/db/replay.js";
+import { ConversationDb, type DbStat, statConversation } from "../src/agy/db/database.js";
+import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
@@ -2796,6 +2796,78 @@ describe("ReplayCache", () => {
     const second = cache.get(dir, "conv-replay-same-size", { skipNarration: false });
     expect(second?.updates).toMatchObject([{ content: { text: "world" } }]);
     expect(second?.updates).not.toBe(first?.updates);
+  });
+
+  it("detects a same-size, same-mtime WAL generation change (RESTART checkpoint rewrite)", () => {
+    const db = createConversationDb(dir, "conv-wal-gen");
+    insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hi" }) });
+    db.close();
+
+    // Synthesize a WAL sidecar. In WAL mode a RESTART checkpoint can leave the
+    // WAL file at the same size/mtime while rewriting its frames; only the WAL
+    // header's checkpoint sequence + salts change. The main-file change counter
+    // does not advance until checkpoint, so the fingerprint must key on these.
+    const walPath = path.join(dir, "conv-wal-gen.db-wal");
+    const header = Buffer.alloc(32);
+    header.writeUInt32BE(0x377f0682, 0); // WAL magic (little-endian variant)
+    header.writeUInt32BE(1, 12); // checkpoint sequence
+    header.writeUInt32BE(0xaaaaaaaa, 16); // salt-1
+    header.writeUInt32BE(0x00000001, 20); // salt-2
+    fs.writeFileSync(walPath, header);
+    const pinnedTime = new Date(2020, 0, 1, 0, 0, 0);
+    fs.utimesSync(walPath, pinnedTime, pinnedTime);
+
+    const before = statConversation(dir, "conv-wal-gen");
+    expect(before?.walCheckpointSeq).toBe(1);
+    expect(before?.walSalt1).toBe(0xaaaaaaaa);
+    expect(before?.walSalt2).toBe(1);
+
+    // Rewrite the header in place (RESTART bumps sequence + salts), same length.
+    header.writeUInt32BE(2, 12);
+    header.writeUInt32BE(0xbbbbbbbb, 16);
+    header.writeUInt32BE(0x00000002, 20);
+    fs.writeFileSync(walPath, header);
+    fs.utimesSync(walPath, pinnedTime, pinnedTime);
+
+    const after = statConversation(dir, "conv-wal-gen");
+    // Metadata the old check relied on is identical...
+    expect(after?.walMtimeMs).toBe(before?.walMtimeMs);
+    expect(after?.walSize).toBe(before?.walSize);
+    expect(after?.changeCounter).toBe(before?.changeCounter);
+    // ...but the WAL generation moved, so the fingerprint reports a change.
+    expect(after?.walCheckpointSeq).toBe(2);
+    expect(after?.walSalt1).toBe(0xbbbbbbbb);
+    expect(isDbStatUnchanged(before as DbStat, after as DbStat)).toBe(false);
+  });
+
+  it("isDbStatUnchanged treats any single fingerprint field as significant", () => {
+    const base: DbStat = {
+      mtimeMs: 100,
+      size: 4096,
+      walMtimeMs: 200,
+      walSize: 32,
+      walCheckpointSeq: 1,
+      walSalt1: 0xaaaaaaaa,
+      walSalt2: 2,
+      journalMtimeMs: undefined,
+      journalSize: undefined,
+      changeCounter: 7
+    };
+    expect(isDbStatUnchanged(base, { ...base })).toBe(true);
+
+    const fields: Array<[keyof DbStat, number]> = [
+      ["mtimeMs", 101],
+      ["size", 4097],
+      ["walMtimeMs", 201],
+      ["walSize", 33],
+      ["walCheckpointSeq", 2],
+      ["walSalt1", 0xbbbbbbbb],
+      ["walSalt2", 3],
+      ["changeCounter", 8]
+    ];
+    for (const [field, value] of fields) {
+      expect(isDbStatUnchanged(base, { ...base, [field]: value })).toBe(false);
+    }
   });
 
   it("allows manual invalidation via invalidate() and clear()", () => {

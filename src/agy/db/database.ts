@@ -63,6 +63,43 @@ export interface DbStat {
   journalMtimeMs?: number;
   journalSize?: number;
   changeCounter: number;
+  /**
+   * WAL header "generation" fields (checkpoint sequence number + salts). In WAL
+   * mode the main-file change counter only advances on checkpoint, and a
+   * RESTART checkpoint can leave the WAL file at the same size/mtime while its
+   * frames are overwritten in place. That reset bumps the checkpoint sequence
+   * and salts, so folding them into the fingerprint catches such same-size,
+   * same-mtime WAL rewrites that the metadata alone would miss.
+   */
+  walCheckpointSeq?: number;
+  walSalt1?: number;
+  walSalt2?: number;
+}
+
+/** Read the WAL header generation fields, or undefined when absent/too short. */
+function readWalGeneration(walPath: string): {
+  checkpointSeq: number;
+  salt1: number;
+  salt2: number;
+} | null {
+  try {
+    const fd = fs.openSync(walPath, "r");
+    try {
+      const buf = Buffer.alloc(24);
+      if (fs.readSync(fd, buf, 0, 24, 0) === 24) {
+        return {
+          checkpointSeq: buf.readUInt32BE(12),
+          salt1: buf.readUInt32BE(16),
+          salt2: buf.readUInt32BE(20)
+        };
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // no readable wal header
+  }
+  return null;
 }
 
 /** Stat a conversation DB, or null if it doesn't exist. */
@@ -73,10 +110,20 @@ export function statConversation(dir: string, id: string): DbStat | null {
 
     let walMtimeMs: number | undefined;
     let walSize: number | undefined;
+    let walCheckpointSeq: number | undefined;
+    let walSalt1: number | undefined;
+    let walSalt2: number | undefined;
     try {
-      const ws = fs.statSync(`${dbPath}-wal`);
+      const walPath = `${dbPath}-wal`;
+      const ws = fs.statSync(walPath);
       walMtimeMs = ws.mtimeMs;
       walSize = ws.size;
+      const gen = readWalGeneration(walPath);
+      if (gen) {
+        walCheckpointSeq = gen.checkpointSeq;
+        walSalt1 = gen.salt1;
+        walSalt2 = gen.salt2;
+      }
     } catch {
       // no wal file
     }
@@ -111,6 +158,9 @@ export function statConversation(dir: string, id: string): DbStat | null {
       size: s.size,
       walMtimeMs,
       walSize,
+      walCheckpointSeq,
+      walSalt1,
+      walSalt2,
       journalMtimeMs,
       journalSize,
       changeCounter
