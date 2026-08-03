@@ -71,6 +71,7 @@ export async function registerSession(
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
+    replaced.closed = true;
     await cancelQueuedPrompts(replaced);
     replaced.promptAbort?.abort();
     await replaced.agy.close().catch(() => {});
@@ -81,6 +82,7 @@ export async function registerSession(
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
+    evicted.closed = true;
     await cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(

@@ -68,6 +68,8 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
     return;
   }
 
+  if (session.closed) return;
+
   if (!session.activePrompt && session.promptQueue.length > 0) {
     const next = session.promptQueue.shift()!;
     if (next.version === "v1") {
@@ -152,6 +154,7 @@ export async function handlePromptV1(
   deps: PromptV1Deps
 ): Promise<V1PromptResponse> {
   const session = deps.requireSession(params.sessionId);
+  let releaseSteer: (() => void) | undefined;
   if (session.activePrompt) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
@@ -182,16 +185,28 @@ export async function handlePromptV1(
     }
 
     if (intent === "steer") {
+      const previousSteer = session.promptSteerInProgress;
+      if (previousSteer) await previousSteer;
+      let release!: () => void;
+      session.promptSteerInProgress = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releaseSteer = release;
+      const waitForIdle = session.activePrompt
+        ? new Promise<void>((resolve) => {
+            const prevNotify = session.promptIdleNotify;
+            session.promptIdleNotify = () => {
+              prevNotify?.();
+              resolve();
+            };
+          })
+        : undefined;
       session.promptAbort?.abort();
       await session.agy.cancel();
-      if (session.activePrompt) {
-        await new Promise<void>((resolve) => {
-          const prevNotify = session.promptIdleNotify;
-          session.promptIdleNotify = () => {
-            prevNotify?.();
-            resolve();
-          };
-        });
+      await waitForIdle;
+      if (session.closed) {
+        releaseSteer();
+        return { stopReason: "cancelled" };
       }
     } else {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
@@ -223,6 +238,7 @@ export async function handlePromptV1(
       deps
     ));
   if (handled) {
+    releaseSteer?.();
     return { stopReason: signal?.aborted ? "cancelled" : "end_turn" };
   }
 
@@ -268,6 +284,7 @@ export async function handlePromptV1(
   } finally {
     signal?.removeEventListener("abort", cancelPrompt);
     session.activePrompt = false;
+    releaseSteer?.();
     notifyIdleAndDrainQueue(session);
   }
 }
@@ -280,21 +297,23 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   try {
     const prompt = await contentBlocksToPrompt(params.prompt, session.cwd);
 
-    const handled = await applyCuratedSlashCommand(
-      params.sessionId,
-      prompt,
-      {
-        modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
-        configChanged: async () => {
-          await deps.notifyConfigOptionUpdateV1(
-            client,
-            params.sessionId,
-            deps.requireSession(params.sessionId)
-          );
-        }
-      },
-      deps
-    );
+    const handled =
+      isClientTextSlashPrompt(params.prompt) &&
+      (await applyCuratedSlashCommand(
+        params.sessionId,
+        prompt,
+        {
+          modeChanged: (mode) => deps.notifyCurrentModeUpdate(client, params.sessionId, mode),
+          configChanged: async () => {
+            await deps.notifyConfigOptionUpdateV1(
+              client,
+              params.sessionId,
+              deps.requireSession(params.sessionId)
+            );
+          }
+        },
+        deps
+      ));
     if (handled) {
       resolve({ stopReason: signal?.aborted ? "cancelled" : "end_turn" });
       return;
@@ -355,11 +374,14 @@ export async function handlePromptV2(
   deps: PromptV2Deps
 ): Promise<V2PromptResponse> {
   const session = deps.requireSession(params.sessionId);
+  let releaseSteer: (() => void) | undefined;
   if (session.activePrompt) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
       const promptText = await contentBlocksToPrompt(params.prompt as v1.ContentBlock[], session.cwd);
-      const parsedSlash = parseSlashCommand(promptText);
+      const parsedSlash = isClientTextSlashPrompt(params.prompt as v1.ContentBlock[])
+        ? parseSlashCommand(promptText)
+        : null;
       const slashResult = parsedSlash ? interpretSlashCommand(parsedSlash) : null;
       const userMessageId =
         slashResult && slashResult.kind !== "pass"
@@ -395,16 +417,32 @@ export async function handlePromptV2(
     }
 
     if (intent === "steer") {
+      const previousSteer = session.promptSteerInProgress;
+      if (previousSteer) await previousSteer;
+      let release!: () => void;
+      session.promptSteerInProgress = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      releaseSteer = release;
+      const waitForIdle = session.activePrompt
+        ? new Promise<void>((resolve) => {
+            const prevNotify = session.promptIdleNotify;
+            session.promptIdleNotify = () => {
+              prevNotify?.();
+              resolve();
+            };
+          })
+        : undefined;
       session.promptAbort?.abort();
       await session.agy.cancel();
-      if (session.activePrompt) {
-        await new Promise<void>((resolve) => {
-          const prevNotify = session.promptIdleNotify;
-          session.promptIdleNotify = () => {
-            prevNotify?.();
-            resolve();
-          };
-        });
+      await waitForIdle;
+      if (session.closed) {
+        releaseSteer();
+        await client.notify(v2.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: { sessionUpdate: "state_update", state: "idle", stopReason: "cancelled" }
+        }).catch(() => {});
+        return {};
       }
     } else {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
@@ -433,6 +471,7 @@ export async function handlePromptV2(
         session.promptAbort = undefined;
       }
       session.activePrompt = false;
+      releaseSteer?.();
       notifyIdleAndDrainQueue(session);
     });
 
@@ -459,16 +498,18 @@ async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
     // user_message was already sent at enqueue time.
     await notify({ sessionUpdate: "state_update", state: "running" });
 
-    const slashHandled = await applyCuratedSlashCommand(
-      params.sessionId,
-      promptText,
-      {
-        configChanged: async () => {
-          await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
-        }
-      },
-      deps
-    );
+    const slashHandled =
+      isClientTextSlashPrompt(params.prompt as v1.ContentBlock[]) &&
+      (await applyCuratedSlashCommand(
+        params.sessionId,
+        promptText,
+        {
+          configChanged: async () => {
+            await deps.notifyConfigOptionUpdateV2(client, params.sessionId, deps.requireSession(params.sessionId));
+          }
+        },
+        deps
+      ));
     if (slashHandled) {
       await notify({
         sessionUpdate: "state_update",

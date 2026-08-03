@@ -25,6 +25,7 @@ export async function handleDeleteSession(
   const session = activeSessions.get(params.sessionId);
   activeSessions.delete(params.sessionId);
   if (session) {
+    (session as SessionState).closed = true;
     await cancelQueuedPrompts(session as SessionState);
   }
   session?.promptAbort?.abort();

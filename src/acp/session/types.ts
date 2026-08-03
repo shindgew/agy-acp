@@ -42,6 +42,10 @@ export interface SessionState {
   promptQueue: QueuedPrompt[];
   /** Resolves when the active turn reaches idle and the queue consumer can proceed. */
   promptIdleNotify?: () => void;
+  /** Serializes steer replacements so competing requests cannot overlap. */
+  promptSteerInProgress?: Promise<void>;
+  /** Set when the session is being closed or deleted. */
+  closed?: boolean;
   /** Stable v2 user-message IDs keyed by their persisted agy step index. */
   v2UserMessageIdsByStep: Record<string, string>;
   /** Active v2 prompt-turn abort controller, if any. */
