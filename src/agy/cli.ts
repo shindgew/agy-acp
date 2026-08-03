@@ -323,19 +323,27 @@ export class AgyCliSession {
     elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
     this.#lastPromptUserStepIdxs = [];
-    if (this.config.interactivePermissions) {
-      if (!onPermission) throw new Error("interactive permissions require a permission callback");
-      return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge, elicitationCap);
+    if (this.config.interactivePermissions && !onPermission) {
+      throw new Error("interactive permissions require a permission callback");
     }
-    const command = this.commandForPrompt(prompt);
+    this.#cancelled = false;
+    this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     try {
-      return await this.runPromptCommand(command, prompt, onUpdate, fsBridge);
-    } catch (error) {
-      if (this.shouldInstallAfterError(error)) {
-        await this.installAgy();
-        return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate, fsBridge);
+      if (this.config.interactivePermissions) {
+        return await this.runInteractivePrompt(prompt, onUpdate, onPermission!, fsBridge, elicitationCap);
       }
-      throw error;
+      const command = this.commandForPrompt(prompt);
+      try {
+        return await this.runPromptCommand(command, prompt, onUpdate, fsBridge);
+      } catch (error) {
+        if (this.shouldInstallAfterError(error)) {
+          await this.installAgy();
+          return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate, fsBridge);
+        }
+        throw error;
+      }
+    } finally {
+      this.#cancelTurn = undefined;
     }
   }
 
@@ -346,8 +354,6 @@ export class AgyCliSession {
     fsBridge?: ClientFileSystem,
     elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
-    this.#cancelled = false;
-    this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     // Snapshot the pre-edit working tree so edits agy makes outside recognized
     // structured-edit tool-calls (shell commands, unrecognized payloads) still
     // get reflected through ACP. Emitting the synthetic session/update needs no
@@ -621,7 +627,9 @@ export class AgyCliSession {
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
       if (editBaseline && !this.#cancelled) {
-        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate, deadline);
+        // The final idle marker has already proved that agy completed. Do not
+        // reuse its inactivity deadline for client notification/write-through.
+        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } catch (error) {
@@ -634,7 +642,6 @@ export class AgyCliSession {
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#cancelled && !failed) await this.stopPty();
-      this.#cancelTurn = undefined;
     }
   }
 
@@ -671,8 +678,7 @@ export class AgyCliSession {
   private async reflectUnstructuredEdits(
     baseline: WorkingTreeSnapshot,
     fsBridge: ClientFileSystem | undefined,
-    onUpdate: (update: SessionUpdate) => Promise<void>,
-    deadline?: number
+    onUpdate: (update: SessionUpdate) => Promise<void>
   ): Promise<void> {
     const roots = [this.config.cwd, ...this.config.additionalDirectories];
     let reflected: Awaited<ReturnType<typeof reconcileWorkingTree>>["reflected"];
@@ -695,13 +701,15 @@ export class AgyCliSession {
       // Propagate onUpdate / write-through failures: the ordinary update loop
       // does not swallow them, and going idle after a dropped edit update
       // would leave the client inconsistent with disk.
-      await this.raceTurnCallback(onUpdate(update), deadline);
+      const delivered = await this.raceTurnCallback(onUpdate(update));
+      if (delivered === "cancelled") return;
       if (fsBridge) {
         // routeEditThroughClient swallows RPC errors and returns false — treat
         // that as a hard failure here so we do not report end_turn after a
-        // promised client handoff that never completed.
-        const routed = await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
-        if (routed === "cancelled") return;
+        // promised client handoff that never completed. Once routing starts it
+        // must finish even if cancellation arrives, because it temporarily
+        // restores pre-edit text on disk while the client snapshots it.
+        const routed = await routeEditThroughClient(update, fsBridge);
         if (routed !== true) {
           throw new Error(
             `client filesystem write-through failed for reconciled edit ${toDisplayPath(edit.path, this.config.cwd)}`
@@ -726,7 +734,6 @@ export class AgyCliSession {
     fsBridge?: ClientFileSystem
   ): Promise<PromptOutcome> {
     const [program, ...args] = command;
-    this.#cancelled = false;
 
     // Snapshot existing conversation ids *before* spawning, so the file agy
     // creates for a fresh prompt is guaranteed to look "new" once it appears —
@@ -921,8 +928,12 @@ export class AgyCliSession {
     this.#cancelled = true;
     if (this.#cancelTurn) {
       this.#cancelTurn();
-      if (this.#pty) await this.stopPty();
-      return;
+      // Interactive turns have a PTY to stop. Print turns also have a cancel
+      // waiter now, but must continue below and signal their child process.
+      if (this.#pty) {
+        await this.stopPty();
+        return;
+      }
     }
     if (this.#pty) {
       await this.stopPty();

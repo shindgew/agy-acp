@@ -1273,6 +1273,56 @@ describe("prompt", () => {
     expect(fake.stdinEnded).toBe(true);
   });
 
+  it("awaits print-mode reconciled filesystem write-through before ending the turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-reconcile-"));
+    try {
+      const file = path.join(dir, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+      let markWriteStarted!: () => void;
+      const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+      const updates: SessionUpdate[] = [];
+      const session = new AgyCliSession(
+        { ...defaultConfig(), cwd: dir, conversationsDir: path.join(dir, "conversations") },
+        (command, args, options) => {
+          fs.writeFileSync(file, "after", "utf8");
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      let settled = false;
+      const prompt = session.prompt(
+        "edit it",
+        async (update) => { updates.push(update); },
+        undefined,
+        {
+          readTextFile: async () => {},
+          writeTextFile: async (target, content) => {
+            expect(fs.readFileSync(target, "utf8")).toBe("before");
+            markWriteStarted();
+            await writeGate;
+            fs.writeFileSync(target, content, "utf8");
+          }
+        }
+      ).finally(() => { settled = true; });
+
+      await writeStarted;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(fs.readFileSync(file, "utf8")).toBe("before");
+
+      releaseWrite();
+      await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+      expect(fs.readFileSync(file, "utf8")).toBe("after");
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toMatchObject({ kind: "edit", status: "completed" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("can write prompt through stdin", async () => {
     const fake = new FakeProcess(["ok"]);
     const calls: SpawnCall[] = [];
