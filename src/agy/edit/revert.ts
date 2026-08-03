@@ -10,6 +10,11 @@ export interface DiffBlock {
   path: string;
   oldText: string | null;
   newText: string;
+  /**
+   * 1-based start line of the targeted occurrence when the translator knew it
+   * (agy `StartLine` on replace chunks). Used to disambiguate repeated snippets.
+   */
+  line?: number;
 }
 
 export function diffBlocks(toolCall: SessionUpdate): DiffBlock[] {
@@ -24,7 +29,10 @@ export function diffBlocks(toolCall: SessionUpdate): DiffBlock[] {
     const newText = typeof block.newText === "string" ? block.newText : null;
     if (!path || newText === null) continue;
     const oldText = typeof block.oldText === "string" ? block.oldText : null;
-    blocks.push({ path, oldText, newText });
+    const line = typeof block.line === "number" && Number.isFinite(block.line) && block.line >= 1
+      ? Math.floor(block.line)
+      : undefined;
+    blocks.push({ path, oldText, newText, ...(line !== undefined ? { line } : {}) });
   }
   return blocks;
 }

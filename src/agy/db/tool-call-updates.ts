@@ -715,10 +715,18 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const newText = asStr(pick(chunk, "ReplacementContent", "replacementContent"));
       if (newText === null || !targetFile) continue;
       const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
-      content.push({ type: "diff", path: targetFile, oldText, newText });
+      // Carry StartLine on the diff block so baseline advancement can target the
+      // same occurrence when TargetContent appears more than once.
+      const line = asNum(pick(chunk, "StartLine", "startLine"));
+      content.push({
+        type: "diff",
+        path: targetFile,
+        oldText,
+        newText,
+        ...(line !== null ? { line } : {})
+      });
 
       if (isReadableLocation(resolvedTarget, ctx)) {
-        const line = asNum(pick(chunk, "StartLine", "startLine"));
         locations.push(line !== null ? { path: resolvedTarget, line } : { path: resolvedTarget });
       }
     }

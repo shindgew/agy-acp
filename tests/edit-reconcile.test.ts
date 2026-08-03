@@ -9,6 +9,7 @@ import {
   buildReconcileEditUpdate,
   isValidUtf8,
   reconcileWorkingTree,
+  replaceOccurrence,
   snapshotWorkingTree
 } from "../src/agy/edit/reconcile.js";
 import { diffBlocks } from "../src/agy/edit/revert.js";
@@ -107,6 +108,33 @@ describe("reconcileWorkingTree", () => {
     expect(reflected).toEqual([{ path: file, oldText: "before\nNEW\nafter", newText: "before\nSHELL\nafter" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("replaces the StartLine-targeted occurrence when a snippet repeats", () => {
+    const text = "x\nOLD\ny\nOLD\nz";
+    // First occurrence (default) — line 2.
+    expect(replaceOccurrence(text, "OLD", "NEW")).toBe("x\nNEW\ny\nOLD\nz");
+    // Second occurrence via StartLine 4.
+    expect(replaceOccurrence(text, "OLD", "NEW", 4)).toBe("x\nOLD\ny\nNEW\nz");
+    // applyDiffBlockToSnapshot carries the same line disambiguation.
+    const snap = new Map([
+      ["/r/a.txt", { sha1: "x", size: text.length, text }]
+    ]);
+    applyDiffBlockToSnapshot(snap, "/r/a.txt", "OLD", "NEW", 4);
+    expect(snap.get("/r/a.txt")?.text).toBe("x\nOLD\ny\nNEW\nz");
+  });
+
+  it("round-trips StartLine through diffBlocks when present on the content block", () => {
+    const update = {
+      sessionUpdate: "tool_call",
+      toolCallId: "t1",
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: "/r/a.txt", oldText: "OLD", newText: "NEW", line: 4 }]
+    };
+    expect(diffBlocks(update as never)).toEqual([
+      { path: "/r/a.txt", oldText: "OLD", newText: "NEW", line: 4 }
+    ]);
   });
 
   it("ignores gitignored files", async () => {

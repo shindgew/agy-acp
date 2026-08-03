@@ -351,7 +351,8 @@ export class AgyCliSession {
           editBaseline,
           path.resolve(this.config.cwd, block.path),
           block.oldText,
-          block.newText
+          block.newText,
+          block.line
         );
       }
     };
@@ -679,7 +680,18 @@ export class AgyCliSession {
       // does not swallow them, and going idle after a dropped edit update
       // would leave the client inconsistent with disk.
       await this.raceTurnCallback(onUpdate(update), deadline);
-      if (fsBridge) await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
+      if (fsBridge) {
+        // routeEditThroughClient swallows RPC errors and returns false — treat
+        // that as a hard failure here so we do not report end_turn after a
+        // promised client handoff that never completed.
+        const routed = await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
+        if (routed === "cancelled") return;
+        if (routed !== true) {
+          throw new Error(
+            `client filesystem write-through failed for reconciled edit ${toDisplayPath(edit.path, this.config.cwd)}`
+          );
+        }
+      }
     }
     if (unsupported.length > 0) {
       const detail = unsupported
@@ -758,13 +770,17 @@ export class AgyCliSession {
           await onUpdate(update);
           // Advance the baseline from the structured diff (not disk): a shell
           // edit may already have landed before this poll observes the tool-call.
-          if (editBaseline && isEditToolCall(update)) {
+          // Only completed edits — pending/failed lifecycle updates must not
+          // move the baseline to proposed content that never landed on disk.
+          const rawUpdate = update as unknown as { status?: string };
+          if (editBaseline && isEditToolCall(update) && rawUpdate.status === "completed") {
             for (const block of diffBlocks(update)) {
               applyDiffBlockToSnapshot(
                 editBaseline,
                 path.resolve(this.config.cwd, block.path),
                 block.oldText,
-                block.newText
+                block.newText,
+                block.line
               );
             }
           }

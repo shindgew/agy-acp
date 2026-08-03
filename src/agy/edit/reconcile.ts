@@ -188,19 +188,55 @@ function snapshotFromText(text: string): FileSnapshot {
 }
 
 /**
+ * Byte offset of the start of 1-based line `line` in `text`, or null if the
+ * file has fewer lines.
+ */
+function offsetOfLine(text: string, line: number): number | null {
+  if (line < 1) return null;
+  if (line === 1) return 0;
+  let offset = 0;
+  for (let current = 1; current < line; current++) {
+    const nl = text.indexOf("\n", offset);
+    if (nl === -1) return null;
+    offset = nl + 1;
+  }
+  return offset;
+}
+
+/**
+ * Replace one occurrence of `oldText` with `newText`. When `line` is set
+ * (1-based), search starts at that line so a later repeated snippet is chosen
+ * over the first match — matching agy `StartLine` on replace chunks.
+ */
+export function replaceOccurrence(
+  text: string,
+  oldText: string,
+  newText: string,
+  line?: number
+): string | null {
+  const from = line !== undefined ? offsetOfLine(text, line) : 0;
+  if (from === null) return null;
+  const idx = text.indexOf(oldText, from);
+  if (idx === -1) return null;
+  return text.slice(0, idx) + newText + text.slice(idx + oldText.length);
+}
+
+/**
  * Advance a snapshot entry to the post-edit content described by a structured
  * diff block, without reading disk. Disk may already include later shell edits
  * by the time the structured tool-call is polled; rereading would advance past
  * those too and suppress the synthetic update for them.
  *
  * `oldText`/`newText` may be whole-file bodies (`write_to_file`) or replacement
- * snippets (`replace_file_content`) — same rules as {@link revertEditToolCall}.
+ * snippets (`replace_file_content`). Optional `line` (1-based) selects which
+ * occurrence of a repeated snippet was replaced.
  */
 export function applyDiffBlockToSnapshot(
   snapshot: WorkingTreeSnapshot,
   filePath: string,
   oldText: string | null,
-  newText: string
+  newText: string,
+  line?: number
 ): void {
   const abs = path.resolve(filePath);
   const before = snapshot.get(abs);
@@ -212,15 +248,18 @@ export function applyDiffBlockToSnapshot(
   } else if (before?.text != null) {
     if (before.text === oldText) {
       post = newText;
-    } else if (before.text.includes(oldText)) {
-      post = before.text.replace(oldText, newText);
-    } else if (before.text === newText || before.text.includes(newText)) {
-      // Baseline already reflects this edit.
-      return;
     } else {
-      // Snippet does not apply to baseline text — cannot reconstruct post-edit
-      // content without guessing; leave the entry unchanged.
-      return;
+      const applied = replaceOccurrence(before.text, oldText, newText, line);
+      if (applied !== null) {
+        post = applied;
+      } else if (before.text === newText || before.text.includes(newText)) {
+        // Baseline already reflects this edit.
+        return;
+      } else {
+        // Snippet does not apply to baseline text — cannot reconstruct post-edit
+        // content without guessing; leave the entry unchanged.
+        return;
+      }
     }
   } else {
     // Missing or binary baseline: best representable post state is newText
