@@ -609,6 +609,244 @@ describe("queue and steer-by-cancel", () => {
     });
   });
 
+  it("drains the queue after a slash-command steer", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const executedPrompts: string[] = [];
+      const updates: Array<Record<string, unknown>> = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const promptIdx = args.indexOf("--print");
+        executedPrompts.push(promptIdx >= 0 ? args[promptIdx + 1] : "");
+        const db = createConversationDb(dir, `conv-slash-steer-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const queued = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "queued after slash steer" }],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+
+        const steer = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/plan" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        const r1 = await p1;
+        expect(r1.stopReason).toBe("cancelled");
+
+        const rs = (await steer) as acp.PromptResponse;
+        expect(rs.stopReason).toBe("end_turn");
+        expect(
+          updates.some(
+            (u) =>
+              u.sessionUpdate === "current_mode_update" && u.currentModeId === "plan"
+          )
+        ).toBe(true);
+
+        // Queue must still run after the slash-only steer releases its claim.
+        await waitFor(() => processes.length === 2);
+        processes[1].finish();
+        const rq = (await queued) as acp.PromptResponse;
+        expect(rq.stopReason).toBe("end_turn");
+        expect(executedPrompts).toEqual(["prompt 1", "queued after slash steer"]);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("releases the steer slot when slash-command setup throws", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const executedPrompts: string[] = [];
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        const promptIdx = args.indexOf("--print");
+        executedPrompts.push(promptIdx >= 0 ? args[promptIdx + 1] : "");
+        const db = createConversationDb(dir, `conv-steer-throw-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpClient({ name: "test-client" }).onNotification(
+        methods.client.session.update,
+        () => {}
+      );
+      const connection = client.connect(
+        createAcpApp({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(methods.agent.initialize, {
+          protocolVersion: PROTOCOL_VERSION,
+          clientCapabilities: {}
+        });
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          mcpServers: []
+        });
+
+        const p1 = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        await waitFor(() => processes.length === 1);
+
+        const queued = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "queued after failed steer" }],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+
+        const badSteer = connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "/model nonexistent-model-xyz" }],
+          _meta: { "agy-acp/turnIntent": "steer" }
+        } as any);
+
+        // ACP wraps handler errors; the important bit is rejection + claim release.
+        await expect(badSteer).rejects.toThrow();
+        const r1 = await p1;
+        expect(r1.stopReason).toBe("cancelled");
+
+        // Failed steer must release its claim so the queue can proceed.
+        await waitFor(() => processes.length === 2);
+        processes[1].finish();
+        const rq = (await queued) as acp.PromptResponse;
+        expect(rq.stopReason).toBe("end_turn");
+        expect(executedPrompts).toEqual(["prompt 1", "queued after failed steer"]);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("cancels a queued v2 turn aborted during startup notifications", async () => {
+    await withConversationsDir(async (dir) => {
+      const processes: ControlledFakeProcess[] = [];
+      const updates: Array<Record<string, unknown>> = [];
+      let promptSpawnCount = 0;
+      const spawnProcess: SpawnFactory = (_command: string, args: string[]) => {
+        if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+        promptSpawnCount++;
+        const db = createConversationDb(dir, `conv-v2-abort-${processes.length}`);
+        insertStep(db, { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt" }) });
+        insertStep(db, { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ok" }) });
+        db.close();
+        const proc = new ControlledFakeProcess();
+        processes.push(proc);
+        return proc as any;
+      };
+
+      const client = acpV2.client({ name: "test-client" }).onNotification(
+        acpV2.methods.client.session.update,
+        (ctx) => {
+          updates.push(ctx.params.update as Record<string, unknown>);
+        }
+      );
+      const connection = client.connect(
+        createAcpV2App({
+          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          spawnProcess
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+
+        // Start a long-running v2 turn so we can queue behind it.
+        const r1 = await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "prompt 1" }]
+        });
+        expect(r1).toEqual({});
+        await waitFor(() => processes.length === 1);
+
+        const r2 = await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "queued v2" }],
+          _meta: { "agy-acp/turnIntent": "queue" }
+        } as any);
+        expect(r2).toEqual({});
+
+        // Close while p1 is active and p2 is queued — queued turn must not spawn agy.
+        await connection.agent.request(acpV2.methods.agent.session.close, {
+          sessionId: session.sessionId
+        } as any);
+
+        await waitFor(() =>
+          updates.some(
+            (u) =>
+              u.sessionUpdate === "state_update" &&
+              u.state === "idle" &&
+              u.stopReason === "cancelled"
+          )
+        );
+
+        // Only the first (active) prompt may have spawned; queued must not start after teardown.
+        expect(promptSpawnCount).toBe(1);
+        expect(
+          updates.filter(
+            (u) =>
+              u.sessionUpdate === "state_update" &&
+              u.state === "idle" &&
+              u.stopReason === "cancelled"
+          ).length
+        ).toBeGreaterThanOrEqual(1);
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   it("does not treat a queued resource body of /plan as a config slash command", async () => {
     await withConversationsDir(async (dir) => {
       const processes: ControlledFakeProcess[] = [];
