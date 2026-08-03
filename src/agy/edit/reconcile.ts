@@ -187,13 +187,20 @@ export function toDisplayPath(filePath: string, cwd?: string): string {
 /**
  * Build a synthetic completed-edit `tool_call` update for a reconciled change.
  * Shaped so {@link diffBlocks} (edit/revert.ts) reads it back and the client
- * fs write-through routes it exactly like a recognized edit.
+ * fs write-through routes it exactly like a recognized edit. `turnToken`, when
+ * provided, keeps the tool-call ID unique across turns in the same session.
  */
-export function buildReconcileEditUpdate(edit: ReflectedEdit, index: number, cwd?: string): SessionUpdate {
+export function buildReconcileEditUpdate(
+  edit: ReflectedEdit,
+  index: number,
+  cwd?: string,
+  turnToken?: string
+): SessionUpdate {
   const shown = toDisplayPath(edit.path, cwd);
+  const suffix = turnToken !== undefined ? `${turnToken}-${index}` : `${index}`;
   return {
     sessionUpdate: "tool_call",
-    toolCallId: `agy-fs-reconcile-${index}`,
+    toolCallId: `agy-fs-reconcile-${suffix}`,
     name: edit.oldText === null ? "write_to_file" : "edit",
     title: `Edit ${shown}`,
     kind: "edit",

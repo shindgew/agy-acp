@@ -172,6 +172,9 @@ export class AgyCliSession {
   #conversationId: string | null = null;
   #lastStepIdx = -1;
   #lastPromptUserStepIdxs: number[] = [];
+  // Monotonic per-session counter so reconciled edit tool-call IDs stay unique
+  // across turns (clients key tool-call lifecycles on toolCallId).
+  #reconcileTurnSeq = 0;
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
   readonly ptyFactory?: PtyFactory;
@@ -635,10 +638,11 @@ export class AgyCliSession {
     try {
       const roots = [this.config.cwd, ...this.config.additionalDirectories];
       const { reflected, unsupported } = await reconcileWorkingTree(baseline, roots, reflectedPaths);
+      const turnToken = String(this.#reconcileTurnSeq++);
       let index = 0;
       for (const edit of reflected) {
         if (this.#cancelled) return;
-        const update = buildReconcileEditUpdate(edit, index++, this.config.cwd);
+        const update = buildReconcileEditUpdate(edit, index++, this.config.cwd, turnToken);
         await this.raceTurnCallback(onUpdate(update), deadline);
         if (fsBridge) await this.raceTurnCallback(routeEditThroughClient(update, fsBridge), deadline);
       }

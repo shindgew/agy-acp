@@ -173,4 +173,14 @@ describe("buildReconcileEditUpdate", () => {
     const update = buildReconcileEditUpdate({ path: "/repo/new.txt", oldText: null, newText: "x" }, 1, "/repo");
     expect(update).toMatchObject({ toolCallId: "agy-fs-reconcile-1", name: "write_to_file" });
   });
+
+  it("qualifies the tool-call ID with a per-turn token when provided", () => {
+    const edit = { path: "/repo/a.txt", oldText: null, newText: "x" };
+    const turn0 = buildReconcileEditUpdate(edit, 0, "/repo", "0");
+    const turn1 = buildReconcileEditUpdate(edit, 0, "/repo", "1");
+    expect(turn0).toMatchObject({ toolCallId: "agy-fs-reconcile-0-0" });
+    expect(turn1).toMatchObject({ toolCallId: "agy-fs-reconcile-1-0" });
+    // Same index in different turns must not collide.
+    expect((turn0 as { toolCallId: string }).toolCallId).not.toBe((turn1 as { toolCallId: string }).toolCallId);
+  });
 });
