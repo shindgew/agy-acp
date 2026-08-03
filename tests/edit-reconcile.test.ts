@@ -430,7 +430,7 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(outside, { recursive: true, force: true });
   });
 
-  it("recurses into a checked-out git submodule", async () => {
+  it("recurses into a checked-out submodule without applying parent ignore rules", async () => {
     const root = tmpDir();
     const subSrc = path.join(root, "sub-src");
     const parent = path.join(root, "parent");
@@ -457,16 +457,29 @@ describe("reconcileWorkingTree", () => {
       "-c", "protocol.file.allow=always",
       "submodule", "add", subSrc, "vendor"
     ]);
+    const parentIgnore = path.join(parent, ".gitignore");
+    fs.writeFileSync(parentIgnore, "*.txt\n", "utf8");
+    execFileSync("git", ["-C", parent, "add", ".gitignore"]);
     execFileSync("git", ["-C", parent, "commit", "-qm", "add vendor"]);
 
     const inside = path.join(parent, "vendor", "inside.txt");
+    const created = path.join(parent, "vendor", "new.txt");
     const baseline = await snapshotWorkingTree([parent]);
     expect(baseline.has(inside)).toBe(true);
 
+    // Parent ignore rules do not cross the nested repository boundary. Changing
+    // the parent rule must not make the submodule creation look newly exposed.
+    fs.writeFileSync(parentIgnore, "*.log\n", "utf8");
     fs.writeFileSync(inside, "sub-after", "utf8");
+    fs.writeFileSync(created, "sub-created", "utf8");
     const { reflected, unsupported } = await reconcileWorkingTree(baseline, [parent]);
     expect(unsupported).toEqual([]);
-    expect(reflected).toEqual([{ path: inside, oldText: "sub-before", newText: "sub-after" }]);
+    expect(reflected).toHaveLength(3);
+    expect(reflected).toEqual(expect.arrayContaining([
+      { path: parentIgnore, oldText: "*.txt\n", newText: "*.log\n" },
+      { path: inside, oldText: "sub-before", newText: "sub-after" },
+      { path: created, oldText: null, newText: "sub-created" }
+    ]));
 
     fs.rmSync(root, { recursive: true, force: true });
   });

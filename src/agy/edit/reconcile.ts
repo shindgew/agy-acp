@@ -396,36 +396,57 @@ export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeS
  */
 async function ignoredByBaselineRules(
   baseline: WorkingTreeSnapshot,
-  roots: string[],
   candidates: string[]
 ): Promise<Set<string>> {
   const ignored = new Set<string>();
-  for (const root of dedupeRoots(roots)) {
-    const underRoot = candidates.filter((abs) => abs.startsWith(root + path.sep));
-    if (underRoot.length === 0) continue;
+  const byRepository = new Map<string, Array<{ abs: string; canonical: string }>>();
+  for (const abs of candidates) {
     try {
-      await execFileAsync("git", ["-C", root, "rev-parse", "--is-inside-work-tree"]);
+      const canonical = path.join(await fs.realpath(path.dirname(abs)), path.basename(abs));
+      const { stdout } = await execFileAsync(
+        "git",
+        ["-C", path.dirname(abs), "rev-parse", "--show-toplevel"]
+      );
+      const repository = path.resolve(stdout.trim());
+      const existing = byRepository.get(repository);
+      const candidate = { abs, canonical };
+      if (existing) existing.push(candidate);
+      else byRepository.set(repository, [candidate]);
     } catch {
       // Non-git roots use the recursive walker, where .gitignore never changes
       // candidate visibility.
-      continue;
     }
+  }
 
+  for (const [repository, repositoryCandidates] of byRepository) {
     const temp = await fs.mkdtemp(path.join(os.tmpdir(), "agy-acp-ignore-"));
     try {
       await execFileAsync("git", ["-C", temp, "init", "-q"]);
       for (const [ignoreFile, snapshot] of baseline) {
-        if (path.basename(ignoreFile) !== ".gitignore" || !ignoreFile.startsWith(root + path.sep)) continue;
+        let canonicalIgnoreFile: string;
+        try {
+          canonicalIgnoreFile = path.join(
+            await fs.realpath(path.dirname(ignoreFile)),
+            path.basename(ignoreFile)
+          );
+        } catch {
+          continue;
+        }
+        if (
+          path.basename(ignoreFile) !== ".gitignore" ||
+          (canonicalIgnoreFile !== path.join(repository, ".gitignore") &&
+            !canonicalIgnoreFile.startsWith(repository + path.sep))
+        ) continue;
         const text = snapshot.initialText ?? snapshot.text;
         if (text == null) continue;
-        const relative = path.relative(root, ignoreFile);
+        const relative = path.relative(repository, canonicalIgnoreFile);
         const target = path.join(temp, relative);
         await fs.mkdir(path.dirname(target), { recursive: true });
         await fs.writeFile(target, text, "utf8");
       }
 
-      for (const abs of underRoot) {
-        const relative = path.relative(root, abs);
+      for (const { abs, canonical } of repositoryCandidates) {
+        const relative = path.relative(repository, canonical);
         try {
           await execFileAsync("git", ["-C", temp, "check-ignore", "-q", "--no-index", "--", relative]);
           ignored.add(abs);
@@ -491,7 +512,7 @@ export async function reconcileWorkingTree(
   const newlyListedAfterIgnoreChange = [...current.keys()].filter(
     (abs) => !baseline.has(abs) && couldBeAffectedByIgnoreChange(abs)
   );
-  const ignoredBeforeTurn = await ignoredByBaselineRules(baseline, roots, newlyListedAfterIgnoreChange);
+  const ignoredBeforeTurn = await ignoredByBaselineRules(baseline, newlyListedAfterIgnoreChange);
 
   for (const [abs, now] of current) {
     const before = baseline.get(abs);
