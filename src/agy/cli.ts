@@ -543,8 +543,10 @@ export class AgyCliSession {
           // take the write itself, hand it off so its native diff/review UI
           // (e.g. Zed's Review Changes panel) tracks it.
           // Recognized edit: record its paths so end-of-turn reconciliation
-          // doesn't re-emit them as unstructured changes.
-          for (const block of diffBlocks(toolCall)) reflectedPaths.add(path.resolve(block.path));
+          // doesn't re-emit them as unstructured changes. Diff-block paths may
+          // be session-relative, so resolve against the session cwd (not the
+          // adapter process cwd) to match the snapshot's absolute keys.
+          for (const block of diffBlocks(toolCall)) reflectedPaths.add(path.resolve(this.config.cwd, block.path));
           if (fsBridge) {
             const routed = gatedIds.has(id)
               // Pre-edit state was already primed above (race-free) — just
