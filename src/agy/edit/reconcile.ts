@@ -84,6 +84,8 @@ export function isValidUtf8(buf: Buffer): boolean {
  * gitignored, so build output and node_modules stay out); falls back to a
  * bounded recursive walk for non-git roots. Checked-out submodules appear as
  * gitlink directories in the parent listing — expand them by listing inside.
+ * Symlinks are never followed (a tracked symlink to a directory is not a
+ * gitlink; following it can loop or walk outside the configured roots).
  */
 async function listFiles(root: string): Promise<string[]> {
   try {
@@ -96,15 +98,16 @@ async function listFiles(root: string): Promise<string[]> {
     for (const rel of stdout.split("\0")) {
       if (rel.length === 0) continue;
       const abs = path.resolve(root, rel);
-      // Gitlinks (mode 160000) show up as a single path; when checked out that
-      // path is a directory. Recurse so edits inside the submodule are visible.
+      // lstat: do not follow symlinks. Gitlinks (mode 160000) show up as a
+      // single path; when checked out that path is a real directory.
       let st: import("node:fs").Stats | null = null;
       try {
-        st = await fs.stat(abs);
+        st = await fs.lstat(abs);
       } catch {
-        // vanished between ls-files and stat — skip
+        // vanished between ls-files and lstat — skip
         continue;
       }
+      if (st.isSymbolicLink()) continue;
       if (st.isDirectory()) {
         out.push(...(await listFiles(abs)));
       } else if (st.isFile()) {
@@ -171,19 +174,61 @@ async function snapshotFile(abs: string): Promise<FileSnapshot | null> {
   return { sha1, size: buf.length, text };
 }
 
+function snapshotFromText(text: string): FileSnapshot {
+  const buf = Buffer.from(text, "utf8");
+  if (buf.length > MAX_TEXT_BYTES) {
+    // mtime unknown — size alone is enough; we never text-diff these.
+    return { sha1: `oversized:${buf.length}:0`, size: buf.length, text: null };
+  }
+  return {
+    sha1: createHash("sha1").update(buf).digest("hex"),
+    size: buf.length,
+    text
+  };
+}
+
 /**
- * Update (or remove) one path in an existing snapshot. Used after a recognized
- * structured edit lands so a later shell/unrecognized change to the same file
- * still reconciles against the post-edit content rather than being suppressed.
+ * Advance a snapshot entry to the post-edit content described by a structured
+ * diff block, without reading disk. Disk may already include later shell edits
+ * by the time the structured tool-call is polled; rereading would advance past
+ * those too and suppress the synthetic update for them.
+ *
+ * `oldText`/`newText` may be whole-file bodies (`write_to_file`) or replacement
+ * snippets (`replace_file_content`) — same rules as {@link revertEditToolCall}.
  */
-export async function refreshSnapshotPath(
+export function applyDiffBlockToSnapshot(
   snapshot: WorkingTreeSnapshot,
-  filePath: string
-): Promise<void> {
+  filePath: string,
+  oldText: string | null,
+  newText: string
+): void {
   const abs = path.resolve(filePath);
-  const file = await snapshotFile(abs);
-  if (file) snapshot.set(abs, file);
-  else snapshot.delete(abs);
+  const before = snapshot.get(abs);
+  let post: string;
+
+  if (oldText === null) {
+    // Create / full write with no prior text in the diff.
+    post = newText;
+  } else if (before?.text != null) {
+    if (before.text === oldText) {
+      post = newText;
+    } else if (before.text.includes(oldText)) {
+      post = before.text.replace(oldText, newText);
+    } else if (before.text === newText || before.text.includes(newText)) {
+      // Baseline already reflects this edit.
+      return;
+    } else {
+      // Snippet does not apply to baseline text — cannot reconstruct post-edit
+      // content without guessing; leave the entry unchanged.
+      return;
+    }
+  } else {
+    // Missing or binary baseline: best representable post state is newText
+    // (full-file writes; partial snippets are incomplete but all we have).
+    post = newText;
+  }
+
+  snapshot.set(abs, snapshotFromText(post));
 }
 
 /** Snapshot the working tree across one or more roots. */
@@ -201,8 +246,8 @@ export async function snapshotWorkingTree(roots: string[]): Promise<WorkingTreeS
 
 /**
  * Diff the current working tree against a baseline snapshot. Callers that have
- * already reflected a recognized edit should {@link refreshSnapshotPath} the
- * baseline for that path first so only *further* changes are emitted.
+ * already reflected a recognized edit should {@link applyDiffBlockToSnapshot}
+ * the baseline for that path first so only *further* changes are emitted.
  * Added/modified text files become `reflected` edits; binary/oversized/deleted
  * changes (and binary→text replacements we can't represent) become `unsupported`.
  */

@@ -17,9 +17,9 @@ import {
   type ClientFileSystem
 } from "./edit/bridge.js";
 import {
+  applyDiffBlockToSnapshot,
   buildReconcileEditUpdate,
   reconcileWorkingTree,
-  refreshSnapshotPath,
   snapshotWorkingTree,
   toDisplayPath,
   type WorkingTreeSnapshot
@@ -342,10 +342,17 @@ export class AgyCliSession {
     } catch {
       editBaseline = null;
     }
-    const noteRecognizedEdit = async (toolCall: SessionUpdate): Promise<void> => {
+    // Advance baseline from the structured diff content (not disk): by the time
+    // we observe the tool-call, a later shell edit may already be on disk.
+    const noteRecognizedEdit = (toolCall: SessionUpdate): void => {
       if (!editBaseline) return;
       for (const block of diffBlocks(toolCall)) {
-        await refreshSnapshotPath(editBaseline, path.resolve(this.config.cwd, block.path));
+        applyDiffBlockToSnapshot(
+          editBaseline,
+          path.resolve(this.config.cwd, block.path),
+          block.oldText,
+          block.newText
+        );
       }
     };
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
@@ -551,9 +558,11 @@ export class AgyCliSession {
           // (accept-edits / skip-permissions), or it just passed through the
           // live gate above and agy applied it. Either way, if the client can
           // take the write itself, hand it off so its native diff/review UI
-          // (e.g. Zed's Review Changes panel) tracks it. After disk settles,
-          // advance the edit baseline for this path so end-of-turn
-          // reconciliation only picks up *further* unstructured changes.
+          // (e.g. Zed's Review Changes panel) tracks it. On keep, advance the
+          // edit baseline from the structured diff so end-of-turn reconciliation
+          // only picks up *further* unstructured changes (and is not fooled by
+          // disk that already includes a later shell edit).
+          let rejected = false;
           try {
             if (fsBridge) {
               const routed = gatedIds.has(id)
@@ -581,11 +590,14 @@ export class AgyCliSession {
             );
             deadline = Date.now() + timeoutMs;
             if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-            if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+            if (normalizePermissionChoice(choice) === "agy-reject-once") {
+              revertEditToolCall(toolCall);
+              rejected = true;
+            }
           } finally {
-            // Diff-block paths may be session-relative — resolve against the
-            // session cwd so the baseline key matches the snapshot.
-            await noteRecognizedEdit(toolCall);
+            // Reject leaves disk (and baseline) at the pre-edit state — do not
+            // advance. Diff-block paths may be session-relative.
+            if (!rejected) noteRecognizedEdit(toolCall);
           }
         }
         if (this.#cancelled) break;
@@ -744,11 +756,16 @@ export class AgyCliSession {
       const pollOnce = async () => {
         for (const update of poller.poll()) {
           await onUpdate(update);
-          // Advance the baseline past recognized edits so end-of-turn
-          // reconciliation only emits further unstructured changes.
+          // Advance the baseline from the structured diff (not disk): a shell
+          // edit may already have landed before this poll observes the tool-call.
           if (editBaseline && isEditToolCall(update)) {
             for (const block of diffBlocks(update)) {
-              await refreshSnapshotPath(editBaseline, path.resolve(this.config.cwd, block.path));
+              applyDiffBlockToSnapshot(
+                editBaseline,
+                path.resolve(this.config.cwd, block.path),
+                block.oldText,
+                block.newText
+              );
             }
           }
         }

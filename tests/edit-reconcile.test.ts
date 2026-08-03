@@ -5,10 +5,10 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   MAX_TEXT_BYTES,
+  applyDiffBlockToSnapshot,
   buildReconcileEditUpdate,
   isValidUtf8,
   reconcileWorkingTree,
-  refreshSnapshotPath,
   snapshotWorkingTree
 } from "../src/agy/edit/reconcile.js";
 import { diffBlocks } from "../src/agy/edit/revert.js";
@@ -62,8 +62,8 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "after-structured", "utf8");
-    // Simulate a recognized edit landing: advance baseline to post-edit content.
-    await refreshSnapshotPath(baseline, file);
+    // Advance from the structured diff content (not a disk reread).
+    applyDiffBlockToSnapshot(baseline, file, "before", "after-structured");
 
     const { reflected } = await reconcileWorkingTree(baseline, [dir]);
     expect(reflected).toEqual([]);
@@ -78,15 +78,33 @@ describe("reconcileWorkingTree", () => {
     execFileSync("git", ["-C", dir, "add", "."]);
 
     const baseline = await snapshotWorkingTree([dir]);
-    // Structured edit lands first.
-    fs.writeFileSync(file, "mid", "utf8");
-    await refreshSnapshotPath(baseline, file);
-    // Then a shell / unrecognized edit further changes the same file.
+    // Structured edit mid, then a shell edit to final — both may be on disk
+    // before the structured tool-call is observed. Baseline must advance from
+    // the diff content, not a disk reread (which would see "final").
     fs.writeFileSync(file, "final", "utf8");
+    applyDiffBlockToSnapshot(baseline, file, "before", "mid");
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline, [dir]);
     expect(unsupported).toEqual([]);
     expect(reflected).toEqual([{ path: file, oldText: "mid", newText: "final" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("applies partial replace snippets to the baseline without reading disk", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before\nOLD\nafter", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    // Disk already has a later shell edit; structured replace was OLD→NEW.
+    fs.writeFileSync(file, "before\nSHELL\nafter", "utf8");
+    applyDiffBlockToSnapshot(baseline, file, "OLD", "NEW");
+    expect(baseline.get(file)?.text).toBe("before\nNEW\nafter");
+
+    const { reflected } = await reconcileWorkingTree(baseline, [dir]);
+    expect(reflected).toEqual([{ path: file, oldText: "before\nNEW\nafter", newText: "before\nSHELL\nafter" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -225,6 +243,24 @@ describe("reconcileWorkingTree", () => {
     expect(reflected).toEqual([{ path: path.join(dir, "src.txt"), oldText: null, newText: "hello" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not follow a tracked symlink to a directory", async () => {
+    const dir = gitRepo();
+    const outside = tmpDir();
+    fs.writeFileSync(path.join(outside, "secret.txt"), "nope", "utf8");
+    // Symlink into the repo that points at an external directory.
+    fs.symlinkSync(outside, path.join(dir, "linkdir"));
+    execFileSync("git", ["-C", dir, "add", "-A"]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    // The symlink itself is not a regular file snapshot; external contents
+    // must not be walked via symlink-following.
+    expect([...baseline.keys()].some((p) => p.includes("secret.txt"))).toBe(false);
+    expect(baseline.has(path.join(dir, "linkdir"))).toBe(false);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
   });
 
   it("recurses into a checked-out git submodule", async () => {
