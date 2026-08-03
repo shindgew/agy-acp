@@ -15,7 +15,7 @@ import { applyModelSelection, initialModelSelection, restoredModelSelection } fr
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { wakePromptIdleWaiters } from "./prompt.js";
+import { sessionTurnBusy, wakePromptIdleWaiters } from "./prompt.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -74,19 +74,20 @@ export async function registerSession(
     sessions.delete(sessionId);
     replaced.closed = true;
     wakePromptIdleWaiters(replaced);
-    await cancelQueuedPrompts(replaced);
     replaced.promptAbort?.abort();
+    cancelQueuedPrompts(replaced);
     await replaced.agy.close().catch(() => {});
   }
 
   while (sessions.size >= maxActiveSessions) {
-    const candidate = [...sessions].find(([, current]) => !current.activePrompt);
+    const candidate = [...sessions].find(([, current]) => !sessionTurnBusy(current));
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
     evicted.closed = true;
     wakePromptIdleWaiters(evicted);
-    await cancelQueuedPrompts(evicted);
+    evicted.promptAbort?.abort();
+    cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(
         `[agy-acp] WARN: failed to close evicted session ${evictedId}: ${(error as Error).message}`

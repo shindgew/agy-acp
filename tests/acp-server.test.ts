@@ -840,6 +840,36 @@ describe("active session retention", () => {
     expect(close3).not.toHaveBeenCalled();
     expect(() => retention.requireSession("s2")).toThrow("Unknown session");
   });
+
+  it("does not evict a session reserved by a steer", async () => {
+    const agent = new AcpAgent({
+      env: printModeEnv({ AGY_ACP_MAX_ACTIVE_SESSIONS: "2" })
+    });
+    const close1 = vi.fn(async () => {});
+    const close2 = vi.fn(async () => {});
+    const close3 = vi.fn(async () => {});
+    const session = (id: string, close: () => Promise<void>, steerClaims = 0) => ({
+      sessionId: id,
+      activePrompt: false,
+      steerClaims,
+      agy: { close }
+    });
+    type SessionRetentionAgent = {
+      registerSession(id: string, session: unknown): Promise<void>;
+      requireSession(id: string): unknown;
+    };
+    const retention = agent as unknown as SessionRetentionAgent;
+
+    await retention.registerSession("s1", session("s1", close1, 1));
+    await retention.registerSession("s2", session("s2", close2));
+    await retention.registerSession("s3", session("s3", close3));
+
+    expect(close1).not.toHaveBeenCalled();
+    expect(close2).toHaveBeenCalledOnce();
+    expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s1")).not.toThrow();
+    expect(() => retention.requireSession("s2")).toThrow("Unknown session");
+  });
 });
 
 describe("session modes and config option sync", () => {
