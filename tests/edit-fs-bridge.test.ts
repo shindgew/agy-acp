@@ -98,6 +98,24 @@ describe("routeEditThroughClient", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("leaves the file alone and returns false when newText appears multiple times (ambiguous match, gh#80)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file = path.join(dir, "a.txt");
+    const content = "line 1 NEW\nline 2 NEW\nline 3";
+    fs.writeFileSync(file, content, "utf8");
+    const { bridge, writes } = recordingBridge();
+
+    const routed = await routeEditThroughClient(
+      diffToolCall([{ path: file, oldText: "OLD", newText: "NEW" }]),
+      bridge
+    );
+
+    expect(routed).toBe(false);
+    expect(writes).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe(content);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("returns false and restores the post-edit content when the client rejects the write", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
     const file = path.join(dir, "a.txt");

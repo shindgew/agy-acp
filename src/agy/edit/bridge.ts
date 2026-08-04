@@ -14,7 +14,7 @@
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
-import { diffBlocks } from "./revert.js";
+import { diffBlocks, hasUniqueOccurrence } from "./revert.js";
 
 export interface ClientFileSystem {
   readTextFile(path: string): Promise<void>;
@@ -45,10 +45,10 @@ export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: Cl
       let fullOldText: string;
       if (current === newText) {
         fullOldText = oldText ?? "";
-      } else if (current.includes(newText)) {
+      } else if (hasUniqueOccurrence(current, newText)) {
         fullOldText = current.replace(newText, oldText ?? "");
       } else {
-        continue; // diverged since — leave this file alone
+        continue; // diverged since or ambiguous match — leave this file alone
       }
 
       writeFileSync(path, fullOldText, "utf8");
