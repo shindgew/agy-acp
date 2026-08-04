@@ -2985,7 +2985,7 @@ describe("StreamPoller", () => {
     db.close();
   });
 
-  it("clears background wait on stop_hook type 101 even without task id in text", () => {
+  it("does not clear background wait on empty stepType 101, but clears on system message wake", () => {
     const db = createConversationDb(dir, "conv-bg-stop-hook");
     insertStep(db, {
       idx: 1,
@@ -3001,7 +3001,7 @@ describe("StreamPoller", () => {
       stepType: 15,
       status: 3,
       stepPayload: encodeStepPayload({
-        agentText: "Preserving context while waiting for background command output..."
+        agentText: "The test run task has been launched in the background. I will wait for it to complete before providing the final summary."
       })
     });
     const poller = new StreamPoller({
@@ -3015,11 +3015,24 @@ describe("StreamPoller", () => {
     poller.poll();
     expect(poller.hasActiveBackgroundTasks).toBe(true);
 
+    // Empty stepType 101 turn-end marker appended by agy at prompt end must NOT clear active tasks
     insertStep(db, {
       idx: 3,
       stepType: 101,
       status: 3,
       stepPayload: encodeStepPayload({})
+    });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Genuine system message completion wake clears the task
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-42 content=Task id "task-42" finished'
+      })
     });
     poller.poll();
     expect(poller.hasActiveBackgroundTasks).toBe(false);
