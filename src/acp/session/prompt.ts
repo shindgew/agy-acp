@@ -109,6 +109,7 @@ export function notifyIdleAndDrainQueue(session: SessionState): void {
 
   const next = session.promptQueue.shift()!;
   if (next.version === "v1") {
+    next.detachQueueCancel?.();
     if (next.signal?.aborted) {
       next.resolve({ stopReason: "cancelled" });
       notifyIdleAndDrainQueue(session);
@@ -565,7 +566,7 @@ function enqueueV1(
 ): Promise<V1PromptResponse> {
   return new Promise<V1PromptResponse>((resolve, reject) => {
     const queuedId = `q-${randomUUID()}`;
-    session.promptQueue.push({
+    const item: QueuedPromptV1 = {
       id: queuedId,
       version: "v1",
       params,
@@ -574,15 +575,22 @@ function enqueueV1(
       deps,
       resolve,
       reject
-    } satisfies QueuedPromptV1);
+    };
+    session.promptQueue.push(item);
     if (signal) {
-      onAbort(signal, () => {
+      // The listener's job ends when the item leaves the FIFO by any path —
+      // afterwards the turn's claim owns cancellation. Detaching keeps a
+      // long-lived request signal from pinning the session.
+      let detach: () => void = () => {};
+      detach = onAbort(signal, () => {
+        detach();
         const idx = session.promptQueue.findIndex((q) => q.id === queuedId);
         if (idx >= 0) {
           session.promptQueue.splice(idx, 1);
           resolve({ stopReason: "cancelled" });
         }
       });
+      item.detachQueueCancel = detach;
     }
   });
 }

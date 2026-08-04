@@ -7,6 +7,25 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.4.2] - 2026-08-04
+
+Queued follow-up prompts and steer-by-cancel during active turns, background-task-aware turn completion, and stricter zero-prompt-injection content encoding.
+
+### Added
+
+- Opt-in extension semantics for overlapping `session/prompt` requests via `_meta["agy-acp/turnIntent"]`: `"queue"` stores the follow-up in a per-session FIFO and runs it after the active turn reaches idle; `"steer"` cancels the active turn, waits for the backend and conversation writes to settle, and runs the replacement. Prompts without an intent keep standard ACP overlap behavior and are rejected. (#50, #84)
+- Targeted cancellation of queued v2 prompts: the queue acceptance response returns `_meta["agy-acp/queuedPromptId"]`, which `session/cancel` accepts to cancel that item specifically. (#84)
+- Keep print-mode and interactive turns open while agy background tasks finish, draining their output instead of injecting synthetic follow-up prompts. (#68)
+
+### Changed
+
+- Forward only client-originated content to agy — text, URIs, resource bodies, and the native `@path` image transport — without adapter framing prose or omission notices, in both prompt encoding and display text.
+- Replay historical raw prompts verbatim, preserving leading and trailing whitespace; only fully-enveloped legacy tagged prompts are unwrapped into resource blocks. (#84)
+
+### Fixed
+
+- Cancellation races across queued, steered, and in-preparation turns: every turn claim is cancellable from admission, client-bound deliveries are bounded by the turn's cancellation, session teardown cannot be blocked by stalled client transports, and targeted queued cancels no longer fall back to session-wide aborts. (#84)
+
 ## [0.4.1] - 2026-07-31
 
 Support for the programmatic tool call `name` field in ACP v2, a bridge for `manage_task` permission requests, and clean formatting for upstream 402 quota limit errors.

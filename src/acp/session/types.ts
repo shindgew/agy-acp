@@ -13,6 +13,12 @@ export interface QueuedPromptV1 {
   deps: PromptV1Deps;
   resolve: (response: import("@agentclientprotocol/sdk").PromptResponse) => void;
   reject: (error: Error) => void;
+  /**
+   * Detaches the in-FIFO cancel listener. Called when the item leaves the
+   * queue by any path — afterwards the turn's claim owns cancellation, and a
+   * long-lived request signal must not pin the session.
+   */
+  detachQueueCancel?: () => void;
 }
 
 export interface QueuedPromptV2 {

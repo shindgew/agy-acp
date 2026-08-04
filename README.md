@@ -76,39 +76,6 @@ Zed / ACP client
 - **v1:** `session/load` replays history; `session/resume` reattaches without replay.
   **v2:** only `session/resume` — pass `replayFrom: { "type": "start" }` to replay.
 
-### Queued follow-ups and steering
-
-`agy-acp` supports an opt-in extension for overlapping `session/prompt` requests:
-
-```json
-{
-  "_meta": { "agy-acp/turnIntent": "queue" }
-}
-```
-
-`queue` stores the prompt in a per-session FIFO and runs it after the active
-turn reaches idle. Use `"steer"` instead to cancel the active turn, wait for
-its process and conversation writes to settle, and then run the new prompt.
-Steering is cancellation followed by a replacement turn, not modification of
-an in-flight model request. Prompts without `turnIntent` retain standard ACP
-overlap behavior and are rejected.
-
-Queued v1 prompts resolve with `stopReason: "cancelled"` when cancelled or when
-their session closes/deletes. Queued v2 prompts emit `state_update` with
-`state: "idle"` and `stopReason: "cancelled"`.
-
-A queued v2 acceptance response carries a cancellation handle:
-
-```json
-{
-  "_meta": { "agy-acp/queuedPromptId": "q-..." }
-}
-```
-
-Pass the same value as `_meta` on `session/cancel` to cancel that queued item
-specifically; a plain `session/cancel` still cancels the active turn (and any
-steer reservation) without touching the queue.
-
 Wire format decoding was cross-referenced with
 [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp) (MIT);
 decoding code is our own.

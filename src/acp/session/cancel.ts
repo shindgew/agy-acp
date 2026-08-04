@@ -28,6 +28,7 @@ export function cancelQueuedPrompts(session: SessionState): void {
   const items = session.promptQueue.splice(0, session.promptQueue.length);
   for (const item of items) {
     if (item.version === "v1") {
+      item.detachQueueCancel?.();
       item.resolve({ stopReason: "cancelled" });
     } else {
       cancelQueuedV2Prompt(item);
@@ -52,6 +53,7 @@ export async function handleCancel(
     if (idx >= 0) {
       const [removed] = session.promptQueue.splice(idx, 1);
       if (removed.version === "v1") {
+        removed.detachQueueCancel?.();
         removed.resolve({ stopReason: "cancelled" });
       } else {
         cancelQueuedV2Prompt(removed);

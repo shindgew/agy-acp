@@ -93,7 +93,8 @@ export class StreamPoller {
   }
 
   get hasUnansweredSystemMessage(): boolean {
-    return this._latestSystemMessageStepIdx > this._lastUserStepIdx && this._latestSystemMessageStepIdx !== -1;
+    // _lastUserStepIdx starts at -1, so `>` already excludes "no system message".
+    return this._latestSystemMessageStepIdx > this._lastUserStepIdx;
   }
 
   /**
