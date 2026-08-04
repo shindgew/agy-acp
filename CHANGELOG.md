@@ -7,7 +7,7 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
-## [0.4.3] - Unreleased
+## [0.4.3] - 2026-08-04
 
 ### Fixed
 
