@@ -848,6 +848,46 @@ describe("reconcileWorkingTree", () => {
 
     fs.rmSync(root, { recursive: true, force: true });
   });
+
+  it("does not recurse into a deinitialized submodule", async () => {
+    // A deinitialized submodule's gitlink remains as an empty directory where
+    // git discovers the *parent* repository and lists the gitlink itself as
+    // "./" — recursing into it would repeat the same listing forever and the
+    // snapshot would never complete.
+    const root = tmpDir();
+    const subSrc = path.join(root, "sub-src");
+    const parent = path.join(root, "parent");
+    fs.mkdirSync(subSrc);
+    fs.mkdirSync(parent);
+
+    execFileSync("git", ["-C", subSrc, "init", "-q"]);
+    execFileSync("git", ["-C", subSrc, "config", "user.email", "t@t"]);
+    execFileSync("git", ["-C", subSrc, "config", "user.name", "t"]);
+    fs.writeFileSync(path.join(subSrc, "inside.txt"), "sub", "utf8");
+    execFileSync("git", ["-C", subSrc, "add", "."]);
+    execFileSync("git", ["-C", subSrc, "commit", "-qm", "sub"]);
+
+    execFileSync("git", ["-C", parent, "init", "-q"]);
+    execFileSync("git", ["-C", parent, "config", "user.email", "t@t"]);
+    execFileSync("git", ["-C", parent, "config", "user.name", "t"]);
+    fs.writeFileSync(path.join(parent, "root.txt"), "root", "utf8");
+    execFileSync("git", ["-C", parent, "add", "."]);
+    execFileSync("git", ["-C", parent, "commit", "-qm", "root"]);
+    execFileSync("git", [
+      "-C", parent,
+      "-c", "protocol.file.allow=always",
+      "submodule", "add", subSrc, "vendor"
+    ]);
+    execFileSync("git", ["-C", parent, "commit", "-qm", "add vendor"]);
+    execFileSync("git", ["-C", parent, "submodule", "deinit", "-f", "vendor"]);
+
+    const baseline = await snapshotWorkingTree([parent]);
+    expect(emittedPaths(baseline).sort()).toEqual(
+      [path.join(parent, ".gitmodules"), path.join(parent, "root.txt")].sort()
+    );
+
+    fs.rmSync(root, { recursive: true, force: true });
+  });
 });
 
 describe("buildReconcileEditUpdate", () => {

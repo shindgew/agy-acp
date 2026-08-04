@@ -35,12 +35,15 @@ export function diffBlocks(toolCall: SessionUpdate): DiffBlock[] {
  * edit wrote — if it has diverged further (a later edit landed on top), the
  * block is left alone rather than guessing.
  *
- * Returns the paths actually restored, so callers can tell a real undo apart
- * from a diverged block they must keep reporting.
+ * Returns the blocks actually restored, so callers can attribute exactly the
+ * restoration that happened: a diverged block that was declined still holds
+ * content the client has not seen, and a restored block says nothing about
+ * the rest of its file.
  */
-export function revertEditToolCall(toolCall: SessionUpdate): string[] {
-  const restored: string[] = [];
-  for (const { path, oldText, newText } of diffBlocks(toolCall)) {
+export function revertEditToolCall(toolCall: SessionUpdate): DiffBlock[] {
+  const restored: DiffBlock[] = [];
+  for (const block of diffBlocks(toolCall)) {
+    const { path, oldText, newText } = block;
     const current = existsSync(path) ? readFileSync(path, "utf8") : null;
     if (current === null) continue;
 
@@ -49,17 +52,17 @@ export function revertEditToolCall(toolCall: SessionUpdate): string[] {
       // it since.
       if (current === newText) {
         rmSync(path);
-        restored.push(path);
+        restored.push(block);
       }
       continue;
     }
 
     if (current === newText) {
       writeFileSync(path, oldText, "utf8");
-      restored.push(path);
+      restored.push(block);
     } else if (current.includes(newText)) {
       writeFileSync(path, current.replace(newText, oldText), "utf8");
-      restored.push(path);
+      restored.push(block);
     }
   }
   return restored;

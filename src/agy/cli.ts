@@ -10,7 +10,7 @@ import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
 import type { StepRow } from "./db/types.js";
-import { diffBlocks, revertEditToolCall } from "./edit/revert.js";
+import { diffBlocks, revertEditToolCall, type DiffBlock } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
@@ -23,6 +23,7 @@ import {
   reconcileWorkingTree,
   snapshotWorkingTree,
   toDisplayPath,
+  type ReportedBlock,
   type ReportedContent,
   type WorkingTreeSnapshot
 } from "./edit/reconcile.js";
@@ -76,6 +77,30 @@ function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent
     else byPath.set(abs, [{ oldText, newText }]);
   }
   return [...byPath].map(([filePath, blocks]) => ({ path: filePath, blocks, wholeFile }));
+}
+
+/**
+ * What a completed revert restored, per absolute path. A rejected creation
+ * left nothing on disk and the client rejected it, so the path is forgotten
+ * unconditionally. Anything else is attributed by the *reverse* of the
+ * restored blocks: the client knows the edit was undone, but a restored block
+ * says nothing about the rest of the file, so an unrelated change that landed
+ * next to the edit before the reject still reaches reconciliation.
+ */
+function revertedContents(cwd: string, toolCall: SessionUpdate, restored: DiffBlock[]): ReportedContent[] {
+  const name = (toolCall as unknown as { name?: string }).name;
+  const wholeFile = name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+  const byPath = new Map<string, { created: boolean; blocks: ReportedBlock[] }>();
+  for (const { path: target, oldText, newText } of restored) {
+    const abs = path.resolve(cwd, target);
+    const entry = byPath.get(abs) ?? { created: false, blocks: [] };
+    if (oldText === null) entry.created = true;
+    else entry.blocks.push({ oldText: newText, newText: oldText });
+    byPath.set(abs, entry);
+  }
+  return [...byPath].map(([filePath, { created, blocks }]) =>
+    created ? { path: filePath } : { path: filePath, wholeFile, blocks }
+  );
 }
 
 /** How many unsupported changes to name individually in the warning line. */
@@ -585,7 +610,7 @@ export class AgyCliSession {
           // change. Paths whose content this update no longer accounts for are
           // left for reconciliation to report.
           await observeReported(reportedContents(this.config.cwd, toolCall));
-          let restored: string[] = [];
+          let restored: DiffBlock[] = [];
           try {
             if (fsBridge) {
               const routed = gatedIds.has(id)
@@ -619,11 +644,13 @@ export class AgyCliSession {
           } finally {
             // A reject put the pre-edit text back on disk; that restoration is
             // the answer the client already has, so re-record it rather than
-            // reporting it again as an unstructured change. Only the paths the
-            // revert actually restored: a diverged block it declined to touch
-            // still holds content the client has not seen.
+            // reporting it again as an unstructured change. Only the blocks
+            // the revert actually restored, and only through the reverse
+            // attribution: a diverged block it declined to touch, or an
+            // unrelated change next to the edit, still holds content the
+            // client has not seen.
             if (restored.length > 0) {
-              await observeReported(restored.map((target) => ({ path: path.resolve(this.config.cwd, target) })));
+              await observeReported(revertedContents(this.config.cwd, toolCall, restored));
             }
           }
         }

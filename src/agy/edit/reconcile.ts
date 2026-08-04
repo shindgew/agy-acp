@@ -152,6 +152,32 @@ function splitNulList(stdout: string): string[] {
  * nested repository. Symlinks are never followed (a tracked symlink to a
  * directory is not a gitlink; following it can loop or leave the roots).
  */
+
+/**
+ * True when `dir` is the root of a checked-out repository of its own. A plain
+ * directory — including a deinitialized submodule, whose gitlink remains as an
+ * empty directory — makes git walk up and answer for an ancestor repository,
+ * in which case listing inside it would rediscover the parent (and the
+ * gitlink entry "./" would recurse into the same directory forever).
+ */
+async function isCheckedOutRepository(dir: string): Promise<boolean> {
+  let top: string;
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { maxBuffer: LS_FILES_MAX_BUFFER });
+    top = stdout.trim();
+  } catch {
+    return false;
+  }
+  if (!top) return false;
+  try {
+    // rev-parse may print a different spelling of the same directory (e.g.
+    // /tmp vs /private/tmp), so compare physical identities.
+    return (await fs.realpath(top)) === (await fs.realpath(dir));
+  } catch {
+    return top === dir;
+  }
+}
+
 async function listRoot(root: string): Promise<Listing> {
   let entries: string[];
   try {
@@ -192,9 +218,15 @@ async function listRoot(root: string): Promise<Listing> {
     if (stats.isSymbolicLink()) {
       listing.excluded.push(abs);
     } else if (stats.isDirectory()) {
-      const nested = await listRoot(abs);
-      listing.files.push(...nested.files);
-      listing.excluded.push(...nested.excluded);
+      // Only an actual checked-out nested repository is listed inside. The
+      // self-reference guard rejects a gitlink that git reports for its own
+      // directory ("./" from a deinitialized submodule) even before the
+      // repository check runs.
+      if (abs !== root && (await isCheckedOutRepository(abs))) {
+        const nested = await listRoot(abs);
+        listing.files.push(...nested.files);
+        listing.excluded.push(...nested.excluded);
+      }
     } else if (stats.isFile()) {
       listing.files.push(abs);
     }

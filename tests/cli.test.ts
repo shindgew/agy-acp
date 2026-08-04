@@ -980,6 +980,72 @@ describe("permission bridge", () => {
     fs.rmSync(conversations, { recursive: true, force: true });
   });
 
+  it("reports an unrelated change that survives a rejected edit's revert", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-conv-"));
+    const targetFile = path.join(dir, "a.txt");
+    fs.writeFileSync(targetFile, "alpha\nOLD\nomega\n", "utf8");
+    const rawInputJson = JSON.stringify({
+      TargetFile: targetFile,
+      TargetContent: "OLD",
+      ReplacementContent: "NEW"
+    });
+    const pty = new FakePty(() => {
+      // agy applied the snippet replacement, then a formatter rewrote another
+      // section before the tool-call was polled.
+      fs.writeFileSync(targetFile, "alpha\nNEW\nomega\n", "utf8");
+      fs.writeFileSync(targetFile, "ALPHA\nNEW\nomega\n", "utf8");
+      const db = createConversationDb(conversations, "reject-keeps-shell-change");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+          })
+        })
+      });
+      db.close();
+    });
+    const session = new AgyCliSession(
+      {
+        ...defaultConfig(),
+        cwd: dir,
+        conversationsDir: conversations,
+        interactivePermissions: true,
+        printTimeout: "3s"
+      },
+      undefined,
+      { spawn: () => { pty.start(); return pty; } } as PtyFactory
+    );
+    const updates: SessionUpdate[] = [];
+    const result = session.prompt("edit it", async (update) => { updates.push(update); }, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(conversations, "reject-keeps-shell-change.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    // The revert restored only the reported snippet; the formatter's change
+    // survived and must still be reported, not folded into the rejection.
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("ALPHA\nOLD\nomega\n");
+    const reconciled = updates.filter((update) =>
+      String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: targetFile, oldText: "alpha\nOLD\nomega\n", newText: "ALPHA\nOLD\nomega\n" }]
+    });
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(conversations, { recursive: true, force: true });
+  });
+
   it("leaves an already-applied edit in place when the client keeps it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const targetFile = path.join(dir, "target.txt");
