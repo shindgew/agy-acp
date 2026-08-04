@@ -9,22 +9,27 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [0.4.2] - 2026-08-04
 
-Queued follow-up prompts and steer-by-cancel during active turns, background-task-aware turn completion, and stricter zero-prompt-injection content encoding.
+Queued follow-up prompts and steer-by-cancel during active turns, background-task-aware turn completion, stricter zero-prompt-injection content encoding, ID-based incremental `plan_update` ops and `plan_removed`, immediate command box display with live stdout streaming for `run_command`, and removal of environment-variable configuration in favor of CLI flags and programmatic options.
 
 ### Added
 
 - Opt-in extension semantics for overlapping `session/prompt` requests via `_meta["agy-acp/turnIntent"]`: `"queue"` stores the follow-up in a per-session FIFO and runs it after the active turn reaches idle; `"steer"` cancels the active turn, waits for the backend and conversation writes to settle, and runs the replacement. Prompts without an intent keep standard ACP overlap behavior and are rejected. (#50, #84)
 - Targeted cancellation of queued v2 prompts: the queue acceptance response returns `_meta["agy-acp/queuedPromptId"]`, which `session/cancel` accepts to cancel that item specifically. (#84)
 - Keep print-mode and interactive turns open while agy background tasks finish, draining their output instead of injecting synthetic follow-up prompts. (#68)
+- Emit per-entry IDs and `plan_removed` for incremental `plan_update` operations, with v1 fidelity and v2 wire variants (items + markdown). (#60)
+- Enable immediate command box display and live stdout streaming for `run_command` tool calls. (#72)
 
 ### Changed
 
 - Forward only client-originated content to agy — text, URIs, resource bodies, and the native `@path` image transport — without adapter framing prose or omission notices, in both prompt encoding and display text.
 - Replay historical raw prompts verbatim, preserving leading and trailing whitespace; only fully-enveloped legacy tagged prompts are unwrapped into resource blocks. (#84)
+- **Breaking:** Remove environment-variable configuration. `AGY_ACP_STATE_DIR`, `AGY_ACP_CONVERSATIONS_DIR`, `AGY_ACP_MODE`, `AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS`, `AGY_ACP_INTERACTIVE_PERMISSIONS`, `AGY_ACP_SANDBOX`, `AGY_ACP_NO_SANDBOX`, `AGY_ACP_SKIP_DOWNLOAD`/`AGY_SKIP_DOWNLOAD`, `AGY_ACP_MAX_ACTIVE_SESSIONS`, `AGY_ACP_MODEL_CACHE`, and `AGY_ACP_AGY_BIN` are no longer read. Use the CLI flags (`--mode`, `--dangerously-skip-permissions`, `--no-interactive-permissions`, `--no-sandbox`) instead, or the programmatic `AcpAgentOptions` (`stateDir`, `conversationsDir`, `maxActiveSessions`, `modelCacheEnabled`). Only `AGY_BIN` is retained.
 
 ### Fixed
 
 - Cancellation races across queued, steered, and in-preparation turns: every turn claim is cancellable from admission, client-bound deliveries are bounded by the turn's cancellation, session teardown cannot be blocked by stalled client transports, and targeted queued cancels no longer fall back to session-wide aborts. (#84)
+- Detect in-place SQLite conversation updates in replay staleness checks: the `ReplayCache` fingerprint now covers the WAL/journal files and the SQLite header change counter, so equal-length step rewrites no longer return stale replay data. `ReplayCache.invalidate`/`clear` are available for manual eviction. (#75, #82)
+- Reflect filesystem edits agy makes outside recognized structured edit tool calls (for example via `run_command`) through ACP updates: a working-tree reconciler snapshots each turn's roots, keys files by physical identity, and reports only changes whose bytes were actually observed on disk. (#76, #83)
 
 ## [0.4.1] - 2026-07-31
 
