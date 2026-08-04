@@ -1082,6 +1082,181 @@ describe("queue and steer-by-cancel", () => {
     await waitFor(() => !turns.busy());
   });
 
+  it("settles a v1 turn whose client notification never resolves when cancelled", async () => {
+    // PR #84 review: agy's print-mode poll loop awaits each onUpdate callback,
+    // so a wedged v1 session/update pinned the turn — killing the backend could
+    // not settle it, and the turn slot was never released.
+    let notifyCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      catalog: { models: [], byBase: new Map() },
+      selectedBaseModel: "m",
+      selectedReasoningEffort: "",
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async (_prompt: string, onUpdate: (update: unknown) => Promise<void>) => {
+          // Mirrors runPromptCommand: the poll loop awaits each callback, so a
+          // wedged delivery pins the turn until the callback settles.
+          await onUpdate({
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "chunk" }
+          });
+          return { stopReason: "end_turn" };
+        }
+      }
+    } as unknown as SessionState;
+    const deps: PromptV1Deps = {
+      requireSession: () => session,
+      applyConfigOption: async () => {},
+      persistSession: async () => {},
+      notifyCurrentModeUpdate: async () => {},
+      notifyConfigOptionUpdateV1: async () => {},
+      clientFileSystemV1: () => undefined
+    };
+    const client = {
+      notify: async () => {
+        notifyCalls++;
+        await new Promise<void>(() => {}); // wedged transport
+      }
+    } as any;
+
+    const promptPromise = handlePromptV1({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "hello" }]
+    } as any, client, undefined, deps);
+
+    await waitFor(() => notifyCalls === 1);
+    await handleCancel("s1", new Map([["s1", session]]));
+
+    await expect(promptPromise).resolves.toEqual({ stopReason: "cancelled" });
+    expect(turnsOf(session).busy()).toBe(false);
+  });
+
+  it("steers a v1 turn whose client notification is wedged", async () => {
+    // Same wedge as above, but displaced by a steer: the replacement must not
+    // wait forever behind a turn that can never settle.
+    let notifyCalls = 0;
+    let promptCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      catalog: { models: [], byBase: new Map() },
+      selectedBaseModel: "m",
+      selectedReasoningEffort: "",
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async (_prompt: string, onUpdate: (update: unknown) => Promise<void>) => {
+          promptCalls++;
+          if (promptCalls === 1) {
+            await onUpdate({
+              sessionUpdate: "agent_message_chunk",
+              content: { type: "text", text: "chunk" }
+            });
+          }
+          return { stopReason: "end_turn" };
+        }
+      }
+    } as unknown as SessionState;
+    const deps: PromptV1Deps = {
+      requireSession: () => session,
+      applyConfigOption: async () => {},
+      persistSession: async () => {},
+      notifyCurrentModeUpdate: async () => {},
+      notifyConfigOptionUpdateV1: async () => {},
+      clientFileSystemV1: () => undefined
+    };
+    const client = {
+      notify: async () => {
+        notifyCalls++;
+        await new Promise<void>(() => {}); // wedged transport
+      }
+    } as any;
+
+    const first = handlePromptV1({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "first" }]
+    } as any, client, undefined, deps);
+    await waitFor(() => notifyCalls === 1);
+
+    const steer = handlePromptV1({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "replacement" }],
+      _meta: { "agy-acp/turnIntent": "steer" }
+    } as any, client, undefined, deps);
+
+    await expect(first).resolves.toEqual({ stopReason: "cancelled" });
+    await expect(steer).resolves.toEqual({ stopReason: "end_turn" });
+    expect(promptCalls).toBe(2);
+    expect(turnsOf(session).busy()).toBe(false);
+  });
+
+  it("does not jam the v2 queue behind a wedged user_message notification", async () => {
+    // A queued v2 prompt publishes its user_message during enqueue, serialized
+    // in FIFO order. If that delivery wedges, cancelling the item must unwedge
+    // the chain so later queued prompts still prepare.
+    const updates: any[] = [];
+    let notifyCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" }),
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground"); // hold the slot so prompts queue
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = {
+      notify: async (_method: string, p: any) => {
+        notifyCalls++;
+        if (notifyCalls === 1) await new Promise<void>(() => {}); // wedged transport
+        updates.push(p.update);
+      }
+    } as any;
+
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "first" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps)).resolves.toEqual({});
+    await waitFor(() => notifyCalls === 1); // item 1's user_message is wedged
+
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "second" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps)).resolves.toEqual({});
+
+    // Cancel the wedged item through the real session/cancel path.
+    const queuedId = session.promptQueue[0].id;
+    await handleCancel("s1", new Map([["s1", session]]), { "agy-acp/queuedPromptId": queuedId });
+
+    // Item 2's preparation must proceed despite item 1's wedged delivery.
+    await waitFor(() => updates.some((u) => u.sessionUpdate === "user_message"));
+
+    turns.release(activeClaim);
+  });
+
   it("rejects a non-intent prompt while a steer replacement is in progress", async () => {
     await withConversationsDir(async (dir) => {
       const processes: ControlledFakeProcess[] = [];

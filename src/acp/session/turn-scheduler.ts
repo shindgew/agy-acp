@@ -16,6 +16,10 @@
 //      so cancel/close/evict always have something to abort in every phase.
 //  I3. Cancellation unwinds by throwing (`TurnCancelled`), not by polling a
 //      flag after each await. Callers cannot forget to re-check.
+//  I4. Every client-bound delivery is raced against the turn's claim (or a
+//      queued item's controller). agy's prompt loop awaits each update
+//      callback, so a client transport that never settles would otherwise pin
+//      the slot forever — killing the backend cannot settle a wedged notify.
 
 /** Thrown when a claim is aborted; unwinds the turn pipeline to its reporter. */
 export class TurnCancelled extends Error {
@@ -87,14 +91,21 @@ export class TurnClaim {
   }
 }
 
-/** Await `promise`, rejecting as soon as `claim` is aborted. */
-export function raceClaim<T>(promise: Promise<T>, claim: TurnClaim): Promise<T> {
+/**
+ * Await `promise`, rejecting with `TurnCancelled` as soon as `signal` aborts.
+ *
+ * The single implementation behind invariant I4: every client-bound delivery
+ * goes through here (directly, or via `raceClaim` for turn claims), so a
+ * client transport that never settles unwinds on cancel/close instead of
+ * pinning the turn slot or the queue-preparation chain.
+ */
+export function raceSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    if (claim.aborted) {
+    if (signal.aborted) {
       reject(new TurnCancelled());
       return;
     }
-    const off = onAbort(claim.signal, () => reject(new TurnCancelled()));
+    const off = onAbort(signal, () => reject(new TurnCancelled()));
     promise.then(
       (value) => {
         off();
@@ -106,6 +117,11 @@ export function raceClaim<T>(promise: Promise<T>, claim: TurnClaim): Promise<T> 
       }
     );
   });
+}
+
+/** Await `promise`, rejecting as soon as `claim` is aborted. */
+export function raceClaim<T>(promise: Promise<T>, claim: TurnClaim): Promise<T> {
+  return raceSignal(promise, claim.signal);
 }
 
 /** Lazily attach a scheduler to a session-like object. */

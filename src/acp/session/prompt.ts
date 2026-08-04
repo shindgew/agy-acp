@@ -42,6 +42,7 @@ import {
   isTurnCancelled,
   onAbort,
   raceClaim,
+  raceSignal,
   TurnCancelled,
   turnsOf,
   type TurnClaim
@@ -296,10 +297,15 @@ function v1Adapter(
       const tracker = createTerminalOutputTracker();
       const clientToolCallName = deps.clientToolCallNameV1?.(client);
       return session.agy.prompt(promptText, async (update) => {
-        await client.notify(v1.methods.client.session.update, {
-          sessionId: params.sessionId,
-          update: sessionUpdateToV1(update, tracker, { clientToolCallName })
-        });
+        // I4: agy's print-mode poll loop awaits this callback, so a wedged v1
+        // transport would otherwise pin the turn even after the backend dies.
+        await raceClaim(
+          client.notify(v1.methods.client.session.update, {
+            sessionId: params.sessionId,
+            update: sessionUpdateToV1(update, tracker, { clientToolCallName })
+          }),
+          claim
+        );
       }, async (toolCall, { toolName, questionIndex }) => {
         const elicitationCap = deps.clientElicitationV1?.(client);
         return requestPermissionV1(
@@ -743,14 +749,20 @@ function enqueueV2(
       controller.signal.throwIfAborted();
       const userMessageId = v2UserMessageId(params.prompt as v1.ContentBlock[], promptText);
 
-      await client.notify(v2.methods.client.session.update, {
-        sessionId: params.sessionId,
-        update: {
-          sessionUpdate: "user_message",
-          messageId: userMessageId,
-          content: params.prompt as v2.ContentBlock[]
-        }
-      });
+      // I4: this delivery is serialized across the FIFO, so a wedged transport
+      // would otherwise jam every later queued prompt; cancelling the item
+      // must unwedge the chain.
+      await raceSignal(
+        client.notify(v2.methods.client.session.update, {
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: "user_message",
+            messageId: userMessageId,
+            content: params.prompt as v2.ContentBlock[]
+          }
+        }),
+        controller.signal
+      );
       controller.signal.throwIfAborted();
       if (session.closed) throw new TurnCancelled();
       queued.promptText = promptText;
