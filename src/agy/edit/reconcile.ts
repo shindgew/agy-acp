@@ -144,16 +144,6 @@ function splitNulList(stdout: string): string[] {
 }
 
 /**
- * List candidate files under a root. Prefers git (tracked + untracked but not
- * gitignored, so build output and node_modules stay out); falls back to a
- * bounded recursive walk for non-git roots. Checked-out submodules appear as
- * gitlink directories in the parent listing — expand them by listing inside,
- * which also keeps the parent's ignore rules and index from governing the
- * nested repository. Symlinks are never followed (a tracked symlink to a
- * directory is not a gitlink; following it can loop or leave the roots).
- */
-
-/**
  * True when `dir` is the root of a checked-out repository of its own. A plain
  * directory — including a deinitialized submodule, whose gitlink remains as an
  * empty directory — makes git walk up and answer for an ancestor repository,
@@ -178,6 +168,15 @@ async function isCheckedOutRepository(dir: string): Promise<boolean> {
   }
 }
 
+/**
+ * List candidate files under a root. Prefers git (tracked + untracked but not
+ * gitignored, so build output and node_modules stay out); falls back to a
+ * bounded recursive walk for non-git roots. Checked-out submodules appear as
+ * gitlink directories in the parent listing — expand them by listing inside,
+ * which also keeps the parent's ignore rules and index from governing the
+ * nested repository. Symlinks are never followed (a tracked symlink to a
+ * directory is not a gitlink; following it can loop or leave the roots).
+ */
 async function listRoot(root: string): Promise<Listing> {
   let entries: string[];
   try {
@@ -363,6 +362,10 @@ function isUnder(target: string, prefixes: readonly string[]): boolean {
   return false;
 }
 
+/** How many files collectFiles reads at once; large repos would otherwise
+ *  pay a serial stat+read+hash per file twice a turn. */
+const READ_CONCURRENCY = 16;
+
 /** List and read every file the given roots currently expose. */
 async function collectFiles(roots: WorkspaceRoot[]): Promise<{ files: Map<string, FileRecord>; excluded: string[] }> {
   const files = new Map<string, FileRecord>();
@@ -370,8 +373,18 @@ async function collectFiles(roots: WorkspaceRoot[]): Promise<{ files: Map<string
   for (const root of roots) {
     const listing = await listRoot(root.display);
     excluded.push(...listing.excluded);
-    for (const abs of listing.files) {
-      const record = await readFileRecord(abs);
+    // Read with bounded concurrency, then apply in listing order: root order
+    // and the first-spelling-wins dedup below stay deterministic.
+    const records: Array<FileRecord | null> = new Array(listing.files.length).fill(null);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (next < records.length) {
+        const index = next++;
+        records[index] = await readFileRecord(listing.files[index]);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, records.length) }, worker));
+    for (const record of records) {
       if (!record) continue;
       // A root spelling replaced or retargeted mid-turn (a directory swapped
       // for a symlink) lists files whose physical location is outside every
@@ -449,6 +462,16 @@ function reportedAccountsForDisk(
 }
 
 /**
+ * Digest of a reported whole-file body, in the same shape
+ * {@link readFileRecord} uses for files too large to buffer, so an oversized
+ * text file can be attributed to a whole-file write without buffering it.
+ */
+function oversizedTextDigest(text: string): string {
+  const buf = Buffer.from(text, "utf8");
+  return `oversized:${buf.length}:${createHash("sha1").update(buf).digest("hex")}`;
+}
+
+/**
  * Record the current on-disk content of paths whose change has *already* been
  * reported to the client (a recognized structured edit, or a synthetic one this
  * module produced), so end-of-turn reconciliation only emits what is still
@@ -475,8 +498,17 @@ export async function observeEditedPaths(
       continue;
     }
     if (blocks !== undefined) {
-      if (record.text === null) continue;
-      if (!reportedAccountsForDisk(existing?.text, blocks, wholeFile === true, record.text)) continue;
+      if (record.text === null) {
+        // Binary content cannot round-trip through a text diff block, but an
+        // oversized *text* file can still be attributed to a whole-file write:
+        // hash the reported body and compare it with the streamed disk hash.
+        // (A binary file's plain digest never matches the prefixed form.)
+        const attributed =
+          wholeFile === true && blocks.some((block) => oversizedTextDigest(block.newText) === record.sha1);
+        if (!attributed) continue;
+      } else if (!reportedAccountsForDisk(existing?.text, blocks, wholeFile === true, record.text)) {
+        continue;
+      }
     }
     const retained = existing?.path ?? displayPathFor(canonicalPath, snapshot.roots) ?? abs;
     snapshot.files.set(canonicalPath, { ...record, path: retained });

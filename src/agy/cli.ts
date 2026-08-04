@@ -61,14 +61,19 @@ function permissionSignature(row: StepRow): string {
  */
 const WHOLE_FILE_EDIT_TOOLS = new Set(["write_to_file"]);
 
+/** True when the tool-call's diff blocks carry whole file bodies, not snippets. */
+function wholeFileEdit(toolCall: SessionUpdate): boolean {
+  const name = (toolCall as unknown as { name?: string }).name;
+  return name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+}
+
 /**
  * What a tool-call's diff reported, per absolute path (targets may be
  * session-relative). The blocks let the reconciler tell the change this update
  * accounts for apart from one that reached the file before it was polled.
  */
 function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent[] {
-  const name = (toolCall as unknown as { name?: string }).name;
-  const wholeFile = name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+  const wholeFile = wholeFileEdit(toolCall);
   const byPath = new Map<string, Array<{ oldText: string | null; newText: string }>>();
   for (const { path: target, oldText, newText } of diffBlocks(toolCall)) {
     const abs = path.resolve(cwd, target);
@@ -88,8 +93,7 @@ function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent
  * next to the edit before the reject still reaches reconciliation.
  */
 function revertedContents(cwd: string, toolCall: SessionUpdate, restored: DiffBlock[]): ReportedContent[] {
-  const name = (toolCall as unknown as { name?: string }).name;
-  const wholeFile = name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+  const wholeFile = wholeFileEdit(toolCall);
   const byPath = new Map<string, { created: boolean; blocks: ReportedBlock[] }>();
   for (const { path: target, oldText, newText } of restored) {
     const abs = path.resolve(cwd, target);

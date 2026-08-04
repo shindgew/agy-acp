@@ -436,6 +436,45 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("attributes an oversized whole-file write by digest instead of warning about it", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "big.txt");
+    fs.writeFileSync(file, "a".repeat(MAX_TEXT_BYTES + 1), "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    const written = "b".repeat(MAX_TEXT_BYTES + 1);
+    fs.writeFileSync(file, written, "utf8");
+    await observeEditedPaths(baseline, [
+      { path: file, wholeFile: true, blocks: [{ oldText: null, newText: written }] }
+    ]);
+
+    // The client was told the whole body, so there is nothing left to warn
+    // about even though the file is too large to diff.
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("still warns about an oversized file the reported write does not account for", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "big.txt");
+    fs.writeFileSync(file, "a".repeat(MAX_TEXT_BYTES + 1), "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "b".repeat(MAX_TEXT_BYTES + 1), "utf8");
+    await observeEditedPaths(baseline, [
+      { path: file, wholeFile: true, blocks: [{ oldText: null, newText: "not what is on disk" }] }
+    ]);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "oversized" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("reports a deleted file as unsupported", async () => {
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
