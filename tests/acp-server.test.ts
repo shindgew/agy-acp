@@ -1375,6 +1375,55 @@ describe("ACP v2 (experimental draft)", () => {
     });
   });
 
+  it("does not resurrect a deleted session when an in-flight prompt finishes after session/delete (gh#77)", async () => {
+    await withConversationsDir(async (dir) => {
+      const client = acpV2.client({ name: "test-client" });
+      const connection = client.connect(
+        createAcpV2App({
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
+          spawnProcess: spawnAgyWritingConversation(dir, "conv-resurrect-77", [
+            { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "done" }) }
+          ])
+        })
+      );
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: 2,
+          info: { name: "test-client", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+        const sessionId = session.sessionId;
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId,
+          prompt: [{ type: "text", text: "hi" }]
+        });
+
+        // Delete session immediately while prompt turn is floating in background
+        await connection.agent.request(acpV2.methods.agent.session.delete, { sessionId });
+
+        // Allow floating turn task to finish or error out
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        // Verify session was deleted from disk and NOT resurrected
+        const listed = await connection.agent.request(acpV2.methods.agent.session.list, { cwd: "/repo" });
+        expect(listed.sessions.some((s) => s.sessionId === sessionId)).toBe(false);
+
+        await expect(
+          connection.agent.request(acpV2.methods.agent.session.resume, {
+            sessionId,
+            cwd: "/repo"
+          })
+        ).rejects.toThrow();
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
   it("keeps curated slash command IDs out of the DB step namespace", async () => {
     await withConversationsDir(async (dir) => {
       const updates: Array<Record<string, unknown>> = [];

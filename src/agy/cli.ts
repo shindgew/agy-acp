@@ -882,22 +882,30 @@ export class AgyCliSession {
       };
 
       let polling = true;
+      let pollReject: ((reason?: unknown) => void) | undefined;
+      const pollErrorPromise = new Promise<never>((_, reject) => {
+        pollReject = reject;
+      });
+
       const pollLoop = (async () => {
-        while (polling) {
-          await pollOnce();
-          if (!polling) break;
-          await sleep(POLL_INTERVAL_MS);
+        try {
+          while (polling) {
+            await pollOnce();
+            if (!polling) break;
+            await sleep(POLL_INTERVAL_MS);
+          }
+        } catch (error) {
+          pollReject?.(error);
+          await this.cancel();
         }
       })();
-      // pollLoop runs unawaited while we wait on the child process below; if it
-      // rejects in that window Node would otherwise treat it as an unhandled
-      // rejection and crash the whole server. Attaching a no-op handler here
-      // marks it handled — the real rejection still surfaces from the `await
-      // pollLoop` a few lines down, inside this try/catch.
       pollLoop.catch(() => {});
 
       const [exitCode] = child.exitCode === null
-        ? await this.raceProcessError(exitPromise, errorPromise, command)
+        ? await Promise.race([
+            this.raceProcessError(exitPromise, errorPromise, command),
+            pollErrorPromise
+          ])
         : [child.exitCode, null];
       polling = false;
       await pollLoop;

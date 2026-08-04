@@ -668,6 +668,35 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("writes only the verbatim user prompt back to a reused interactive PTY", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-reuse-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "reuse");
+      insertStep(db, { idx: 1, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done one" }) });
+      db.close();
+      // Fresh TUI owes a second idle marker before the first turn resolves.
+      setTimeout(() => pty.emitData("? for shortcuts"), 60);
+    });
+    const session = interactiveSession(dir, pty);
+
+    // First turn: fresh spawn, prompt rides in argv; PTY writes stay empty.
+    await session.prompt("first", async () => {}, async () => "agy-allow-once");
+    expect(pty.writes).toEqual([]);
+    expect(pty.killed).toBe(false);
+
+    // Second turn reuses the live TUI. The only PTY write must be the user's
+    // own prompt under bracketed paste — never adapter prose or "continue".
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "reuse.db"));
+    insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done two" }) });
+    db.close();
+    setTimeout(() => pty.emitData("? for shortcuts"), 40);
+
+    await session.prompt("second", async () => {}, async () => "agy-allow-once");
+    expect(pty.writes).toEqual(["\x1b[200~second\x1b[201~\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("pauses turn deadline while waiting for ACP client permission response and extends turn timeout", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
@@ -1674,6 +1703,40 @@ describe("cancel", () => {
     expect(fake.killedWith).toBe("SIGINT");
     expect(session.wasCancelled).toBe(true);
     expect((await pending).stopReason).toBe("cancelled");
+  });
+
+  it("cancels agy process immediately and throws when onUpdate callback fails in print mode", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-update-fail-"));
+    try {
+      const calls: SpawnCall[] = [];
+      const fake = new FakeProcess([], { blockStdout: true, exitCode: null });
+      const session = new AgyCliSession(
+        { ...defaultConfig(), conversationsDir: dir },
+        (command, args, options) => {
+          const db = createConversationDb(dir, "print-update-fail");
+          insertStep(db, {
+            idx: 1,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "chunk one" })
+          });
+          db.close();
+          return fake.spawnFactory(calls)(command, args, options);
+        }
+      );
+
+      const callbackError = new Error("ACP client disconnected");
+      await expect(
+        session.prompt("hello", async () => {
+          throw callbackError;
+        })
+      ).rejects.toThrow("ACP client disconnected");
+
+      expect(fake.killedWith).toBe("SIGINT");
+      expect(session.wasCancelled).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("fails the print-mode turn when background drain exceeds printTimeout", async () => {

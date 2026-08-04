@@ -98,6 +98,24 @@ describe("routeEditThroughClient", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("leaves the file alone and returns false when newText appears multiple times (ambiguous match, gh#80)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file = path.join(dir, "a.txt");
+    const content = "line 1 NEW\nline 2 NEW\nline 3";
+    fs.writeFileSync(file, content, "utf8");
+    const { bridge, writes } = recordingBridge();
+
+    const routed = await routeEditThroughClient(
+      diffToolCall([{ path: file, oldText: "OLD", newText: "NEW" }]),
+      bridge
+    );
+
+    expect(routed).toBe(false);
+    expect(writes).toEqual([]);
+    expect(fs.readFileSync(file, "utf8")).toBe(content);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("returns false and restores the post-edit content when the client rejects the write", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
     const file = path.join(dir, "a.txt");
@@ -124,6 +142,86 @@ describe("routeEditThroughClient", () => {
       bridge
     );
     expect(routed).toBe(false);
+  });
+
+  it("is atomic across multi-file edits: returns false and leaves disk untouched if any file diverged or is missing", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file1 = path.join(dir, "a.txt");
+    const file2 = path.join(dir, "b.txt");
+    fs.writeFileSync(file1, "file1 NEW", "utf8");
+    fs.writeFileSync(file2, "file2 DIVERGED", "utf8");
+    const { bridge, writes } = recordingBridge();
+
+    const routed = await routeEditThroughClient(
+      diffToolCall([
+        { path: file1, oldText: "file1 OLD", newText: "file1 NEW" },
+        { path: file2, oldText: "file2 OLD", newText: "file2 EXPECTED" }
+      ]),
+      bridge
+    );
+
+    expect(routed).toBe(false);
+    expect(writes).toEqual([]);
+    // Disk for file1 must remain completely untouched (not reverted)
+    expect(fs.readFileSync(file1, "utf8")).toBe("file1 NEW");
+    expect(fs.readFileSync(file2, "utf8")).toBe("file2 DIVERGED");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("is atomic across multi-file edits: returns false and restores all files if client fails mid-handoff", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file1 = path.join(dir, "a.txt");
+    const file2 = path.join(dir, "b.txt");
+    fs.writeFileSync(file1, "file1 NEW", "utf8");
+    fs.writeFileSync(file2, "file2 NEW", "utf8");
+
+    const bridge: ClientFileSystem = {
+      readTextFile: async () => {},
+      writeTextFile: async (p) => {
+        if (p === file2) throw new Error("client failed on file2");
+      }
+    };
+
+    const routed = await routeEditThroughClient(
+      diffToolCall([
+        { path: file1, oldText: "file1 OLD", newText: "file1 NEW" },
+        { path: file2, oldText: "file2 OLD", newText: "file2 NEW" }
+      ]),
+      bridge
+    );
+
+    expect(routed).toBe(false);
+    // Both files must be restored to post-edit content
+    expect(fs.readFileSync(file1, "utf8")).toBe("file1 NEW");
+    expect(fs.readFileSync(file2, "utf8")).toBe("file2 NEW");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("routes multi-file edits successfully when all files match", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file1 = path.join(dir, "a.txt");
+    const file2 = path.join(dir, "b.txt");
+    fs.writeFileSync(file1, "file1 NEW", "utf8");
+    fs.writeFileSync(file2, "file2 NEW", "utf8");
+
+    const { bridge, writes } = recordingBridge();
+
+    const routed = await routeEditThroughClient(
+      diffToolCall([
+        { path: file1, oldText: "file1 OLD", newText: "file1 NEW" },
+        { path: file2, oldText: "file2 OLD", newText: "file2 NEW" }
+      ]),
+      bridge
+    );
+
+    expect(routed).toBe(true);
+    expect(writes).toEqual([
+      { path: file1, content: "file1 NEW" },
+      { path: file2, content: "file2 NEW" }
+    ]);
+    expect(fs.readFileSync(file1, "utf8")).toBe("file1 NEW");
+    expect(fs.readFileSync(file2, "utf8")).toBe("file2 NEW");
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });
 
@@ -165,5 +263,24 @@ describe("primeEditReadThroughClient + writeEditThroughClient", () => {
       bridge
     );
     expect(routed).toBe(false);
+  });
+
+  it("writeEditThroughClient is atomic: returns false if any file in a multi-file edit is missing", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fsbridge-"));
+    const file1 = path.join(dir, "a.txt");
+    fs.writeFileSync(file1, "file1 content", "utf8");
+    const { bridge, writes } = recordingBridge();
+
+    const routed = await writeEditThroughClient(
+      diffToolCall([
+        { path: file1, oldText: "old1", newText: "file1 content" },
+        { path: "/nonexistent/gone.txt", oldText: "old2", newText: "new2" }
+      ]),
+      bridge
+    );
+
+    expect(routed).toBe(false);
+    expect(writes).toEqual([]);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 });

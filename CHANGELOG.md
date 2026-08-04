@@ -7,6 +7,16 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.4.3] - 2026-08-04
+
+### Fixed
+
+- Make ACP filesystem handoff (`routeEditThroughClient` and `writeEditThroughClient`) atomic across multi-file edits, preflighting diff blocks for file existence and content divergence before modifying disk or invoking client RPCs. (#79)
+- Prevent stale or floating v2 prompt turns from resurrecting closed or deleted sessions or overwriting reloaded sessions in the persisted session store. (#77)
+- Avoid ambiguous edit rollback or ACP filesystem write-through handoff when replacement text appears multiple times in a file, failing safely instead of replacing an arbitrary occurrence. (#80)
+- Prevent generic, id-less `stepType 101` turn-end markers from clearing active background tasks before terminal system completion messages arrive, making `StreamPoller` background task tracking 100% DB-driven via SQLite protobuf `task_details` state. (#86)
+- Terminate `agy` process immediately via SIGINT->SIGKILL escalation when an ACP `session/update` callback rejects during print-mode execution, preventing orphaned backend processes. (#78)
+
 ## [0.4.2] - 2026-08-04
 
 Queued follow-up prompts and steer-by-cancel during active turns, background-task-aware turn completion, stricter zero-prompt-injection content encoding, ID-based incremental `plan_update` ops and `plan_removed`, immediate command box display with live stdout streaming for `run_command`, and removal of environment-variable configuration in favor of CLI flags and programmatic options.
