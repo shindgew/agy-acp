@@ -2488,6 +2488,78 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("preserves full-write oldText across pending completion and historical rereads", () => {
+    const db = createConversationDb(dir, "conv-poll-write-history");
+    const firstWrite = encodeStepPayload({
+      toolRun: encodeToolRun({
+        call: encodeToolCall({
+          callId: "write-a",
+          namePrimary: "write_to_file",
+          rawInputJson: JSON.stringify({ TargetFile: "/repo/a.txt", CodeContent: "A" })
+        })
+      })
+    });
+    insertStep(db, { idx: 1, stepType: 5, status: 9, stepPayload: firstWrite });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-poll-write-history",
+      baseStepIdx: -1,
+      skipNarration: false,
+      cwd: "/repo",
+      snapshot: null
+    });
+
+    const pending = poller.poll() as Array<{ status?: string; content?: Array<Record<string, unknown>> }>;
+    expect(pending[0]).toMatchObject({ status: "pending" });
+    expect(pending[0]?.content?.[0]).toMatchObject({ oldText: null, newText: "A" });
+
+    updateStep(db, 1, { status: 3, stepPayload: firstWrite });
+    const completed = poller.poll() as Array<{ status?: string; content?: Array<Record<string, unknown>> }>;
+    expect(completed[0]).toMatchObject({ status: "completed" });
+    expect(completed[0]?.content?.[0]).toMatchObject({ oldText: null, newText: "A" });
+
+    insertStep(db, {
+      idx: 2,
+      stepType: 5,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "write-b",
+            namePrimary: "write_to_file",
+            rawInputJson: JSON.stringify({ TargetFile: "/repo/a.txt", CodeContent: "B" })
+          })
+        })
+      })
+    });
+    const secondWrite = poller.poll() as Array<{
+      toolCallId?: string;
+      content?: Array<Record<string, unknown>>;
+    }>;
+    expect(secondWrite).toHaveLength(1);
+    expect(secondWrite[0]).toMatchObject({ toolCallId: "write-b" });
+    expect(secondWrite[0]?.content?.[0]).toMatchObject({ oldText: "A", newText: "B" });
+
+    // A later unrelated row makes StreamPoller translate rows 1-3 again. The
+    // completed writes must derive the same snapshots and remain deduplicated.
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "done" })
+    });
+    expect(poller.poll()).toEqual([
+      {
+        sessionUpdate: "agent_message_chunk",
+        messageId: "3",
+        content: { type: "text", text: "done" }
+      }
+    ]);
+
+    poller.close();
+    db.close();
+  });
+
   it("increments revision for auxiliary-column-only mutations", () => {
     const db = createConversationDb(dir, "conv-poll-permission");
     insertStep(db, {
