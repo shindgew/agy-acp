@@ -172,6 +172,14 @@ export function encodeGrepSearchResult(result: {
   return w.finish();
 }
 
+export function encodeTaskDetails(task: { taskId?: string; logUri?: string; description?: string }): Uint8Array {
+  const w = new BinaryWriter();
+  if (task.taskId) w.tag(1, 2).string(task.taskId);
+  if (task.logUri) w.tag(2, 2).string(task.logUri);
+  if (task.description) w.tag(3, 2).string(task.description);
+  return w.finish();
+}
+
 /** permissions column: { 2: { 1: { 1: kind, 2: value }, 2: decision } }. */
 export function encodePermissions(info: { kind?: string; value?: string; decision?: number }): Uint8Array {
   const target = new BinaryWriter();

@@ -390,8 +390,8 @@ export class AcpAgent {
     return handlePromptV2(params, client, this.promptV2Deps());
   }
 
-  cancel(params: { sessionId: string }): Promise<void> {
-    return handleCancel(params.sessionId, this.#sessions);
+  cancel(params: { sessionId: string; _meta?: Record<string, unknown> | null }): Promise<void> {
+    return handleCancel(params.sessionId, this.#sessions, params._meta);
   }
 
   async closeSession(params: CloseSessionRequest): Promise<CloseSessionResponse> {

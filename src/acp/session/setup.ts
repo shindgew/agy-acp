@@ -14,6 +14,9 @@ import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
+import { cancelQueuedPrompts } from "./cancel.js";
+import { sessionTurnBusy } from "./prompt.js";
+import { turnsOf } from "./turn-scheduler.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -54,7 +57,7 @@ export async function buildSession(
     catalog,
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
-    activePrompt: false,
+    promptQueue: [],
     v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
 }
@@ -69,15 +72,20 @@ export async function registerSession(
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
-    replaced.promptAbort?.abort();
+    replaced.closed = true;
+    turnsOf(replaced).close();
+    cancelQueuedPrompts(replaced);
     await replaced.agy.close().catch(() => {});
   }
 
   while (sessions.size >= maxActiveSessions) {
-    const candidate = [...sessions].find(([, current]) => !current.activePrompt);
+    const candidate = [...sessions].find(([, current]) => !sessionTurnBusy(current));
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
+    evicted.closed = true;
+    turnsOf(evicted).close();
+    cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(
         `[agy-acp] WARN: failed to close evicted session ${evictedId}: ${(error as Error).message}`

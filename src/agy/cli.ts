@@ -350,6 +350,12 @@ export class AgyCliSession {
    * appended steps while the process runs, and invoke `onUpdate` with the
    * translated ACP updates in order. Resolves once the process exits and a few
    * trailing polls have drained any steps flushed right around exit.
+   *
+   * Invariant (zero prompt injection): `prompt` is only client-originated
+   * content from ACP session/prompt. Never invent labels, instructions, or
+   * follow-ups (e.g. "continue") — for background wakeups, keep the turn open
+   * and poll instead. PTY writes during a turn are permission keys (or the same
+   * user `prompt` when reusing an interactive TUI), never adapter prose.
    */
   async prompt(
     prompt: string,
@@ -658,8 +664,18 @@ export class AgyCliSession {
             }
           }
         }
-        if (this.#cancelled) break;
-        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
+          // Background work can finish after the TUI looks idle. Stay on this
+          // user turn and keep polling — do not inject a synthetic "continue".
+          // Do not re-arm deadline here: only poller revision progress (above)
+          // refreshes the timeout, so a missing completion cannot hang forever.
+          if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+            const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
+            if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
+            continue;
+          }
+          break;
+        }
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
@@ -899,6 +915,34 @@ export class AgyCliSession {
         );
       }
 
+      // Print-mode child may exit before background task rows finish writing.
+      // Keep draining the DB for this user turn only — no synthetic prompts.
+      // Re-arm the deadline on DB progress so long tasks can finish; still
+      // bound idle silence by printTimeout so a missing completion cannot hang.
+      if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+        const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
+        let deadline = Date.now() + timeoutMs;
+        let seenRevision = poller.revision;
+        while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          if (Date.now() >= deadline) {
+            throw new AgyCliError(
+              `agy print turn timed out after ${this.config.printTimeout} while waiting for background tasks to complete`,
+              command,
+              null,
+              Buffer.concat(stderrChunks).toString("utf8")
+            );
+          }
+          await sleep(POLL_INTERVAL_MS);
+          // pollOnce (not a bare poll) so edits from background tasks are also
+          // observed into the reconciliation baseline.
+          await pollOnce();
+          if (poller.revision !== seenRevision) {
+            seenRevision = poller.revision;
+            deadline = Date.now() + timeoutMs;
+          }
+        }
+      }
+
       if (editBaseline && !this.#cancelled) {
         await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
@@ -983,9 +1027,10 @@ export class AgyCliSession {
   }
 
   async cancel(): Promise<void> {
-    // Always mark cancelled first so a print-mode turn still in its pre-spawn
-    // working-tree snapshot (or any other gap before #process is set) observes
-    // the cancel and returns cancelled instead of racing ahead.
+    // Always mark cancelled first: a print-mode turn may still be in its
+    // pre-spawn working-tree snapshot, or draining background task rows after
+    // the child already exited — both loops only check `#cancelled` (the
+    // process handle alone is no longer enough to interrupt them).
     this.#cancelled = true;
     if (this.#cancelTurn) {
       this.#cancelTurn();

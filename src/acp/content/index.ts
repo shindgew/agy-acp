@@ -1,5 +1,10 @@
 // ACP Content: map prompt ContentBlock[] (text / image / resource) onto agy input.
 // Docs: https://agentclientprotocol.com/protocol/v1/content
+//
+// Zero prompt injection: every substring forwarded to agy must come from the ACP
+// client's session/prompt content (or be agy's native attachment transport for
+// client-provided image bytes). Never invent conversational labels, instructions,
+// follow-ups ("continue"), or framing prose around client data.
 
 import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -9,11 +14,22 @@ import type { ContentBlock } from "@agentclientprotocol/sdk";
 
 const ATTACHMENTS_DIR = ".agy-acp/attachments";
 
+/**
+ * Encode client ContentBlocks into a single agy prompt string.
+ *
+ * - text → block.text as-is
+ * - image / image resource → write bytes, reference with agy `@path` transport
+ * - resource_link (non-image) → uri only (client-supplied)
+ * - embedded text resource → resource.text only (client-supplied body)
+ * - non-image blobs → omitted (no invented "blob omitted" copy)
+ *
+ * Parts are joined with newlines; empty parts are dropped.
+ */
 export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string): Promise<string> {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {
-      parts.push(block.text);
+      if (block.text.length > 0) parts.push(block.text);
       continue;
     }
 
@@ -30,31 +46,34 @@ export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string)
     if (block.type === "resource_link") {
       if (isImageMimeType(block.mimeType) && block.uri) {
         parts.push(agyAttachmentReference(filePathFromUri(block.uri)));
-      } else {
-        parts.push(`Referenced resource: ${block.uri}`);
+      } else if (block.uri) {
+        // Client-supplied URI only — no adapter prose.
+        parts.push(block.uri);
       }
       continue;
     }
 
     if (block.type === "resource") {
-      parts.push(await resourceBlockToPrompt(block, cwd));
+      const encoded = await resourceBlockToPrompt(block, cwd);
+      if (encoded.length > 0) parts.push(encoded);
     }
   }
   return parts.join("\n");
 }
 
+/** Flatten client content to plain text for display/logging — no invented copy. */
 export function contentBlocksToText(blocks: ContentBlock[]): string {
   const parts: string[] = [];
   for (const block of blocks) {
     if (block.type === "text") {
-      parts.push(block.text);
+      if (block.text.length > 0) parts.push(block.text);
     } else if (block.type === "resource_link") {
-      parts.push(`Referenced resource: ${block.uri}`);
+      if (block.uri) parts.push(block.uri);
     } else if (block.type === "resource") {
-      parts.push(resourceBlockToText(block));
-    } else if (block.type === "image") {
-      parts.push(`[image: ${block.mimeType}]`);
+      const text = resourceBlockClientText(block);
+      if (text.length > 0) parts.push(text);
     }
+    // image blocks have no client text payload for display
   }
   return parts.join("\n");
 }
@@ -72,17 +91,22 @@ async function resourceBlockToPrompt(
     );
     return agyAttachmentReference(filePath);
   }
-  return resourceBlockToText(block);
+  return resourceBlockClientText(block);
 }
 
-function resourceBlockToText(block: Extract<ContentBlock, { type: "resource" }>): string {
+/** Client-authored body only; never wrap with URI labels or omission notices. */
+function resourceBlockClientText(block: Extract<ContentBlock, { type: "resource" }>): string {
   const resource = block.resource;
-  if ("text" in resource) {
-    return `Resource ${resource.uri}:\n${resource.text}`;
+  if ("text" in resource && typeof resource.text === "string") {
+    return resource.text;
   }
-  return `Resource ${resource.uri}: [${resource.mimeType ?? "application/octet-stream"} blob omitted]`;
+  return "";
 }
 
+/**
+ * agy native file-attachment transport for client-provided image bytes.
+ * `@` + absolute path is how agy attaches files — not conversational prose.
+ */
 function agyAttachmentReference(filePath: string): string {
   return `@${path.resolve(filePath)}`;
 }

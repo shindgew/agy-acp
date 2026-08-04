@@ -22,6 +22,7 @@ import { createConversationDb, insertStep } from "./fixtures/conversation-db.js"
 import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
+import { turnsOf } from "../src/acp/session/turn-scheduler.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import { parseClientToolCallName } from "../src/acp/initialize.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
@@ -821,7 +822,7 @@ describe("active session retention", () => {
     const close3 = vi.fn(async () => {});
     const session = (id: string, close: () => Promise<void>) => ({
       sessionId: id,
-      activePrompt: false,
+      promptQueue: [],
       agy: { close }
     });
     type SessionRetentionAgent = {
@@ -838,6 +839,35 @@ describe("active session retention", () => {
     expect(close1).not.toHaveBeenCalled();
     expect(close2).toHaveBeenCalledOnce();
     expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s2")).toThrow("Unknown session");
+  });
+
+  it("does not evict a session reserved by a steer", async () => {
+    const agent = new AcpAgent({
+      env: printModeEnv({ AGY_ACP_MAX_ACTIVE_SESSIONS: "2" })
+    });
+    const close1 = vi.fn(async () => {});
+    const close2 = vi.fn(async () => {});
+    const close3 = vi.fn(async () => {});
+    const session = (id: string, close: () => Promise<void>, reserved = false) => {
+      const state = { sessionId: id, promptQueue: [], agy: { close } };
+      if (reserved) turnsOf(state as any).reserveSteer();
+      return state;
+    };
+    type SessionRetentionAgent = {
+      registerSession(id: string, session: unknown): Promise<void>;
+      requireSession(id: string): unknown;
+    };
+    const retention = agent as unknown as SessionRetentionAgent;
+
+    await retention.registerSession("s1", session("s1", close1, true));
+    await retention.registerSession("s2", session("s2", close2));
+    await retention.registerSession("s3", session("s3", close3));
+
+    expect(close1).not.toHaveBeenCalled();
+    expect(close2).toHaveBeenCalledOnce();
+    expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s1")).not.toThrow();
     expect(() => retention.requireSession("s2")).toThrow("Unknown session");
   });
 });
@@ -2174,11 +2204,11 @@ describe("ACP v2 (experimental draft)", () => {
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
 
-function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { AGY_ACP_MODEL_CACHE: "0", ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
@@ -2189,7 +2219,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 /** Run `fn` with a throwaway conversations directory, cleaned up afterwards. */
-async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
+export async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-test-"));
   try {
     await fn(dir);
@@ -2204,7 +2234,7 @@ async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise
  * database (as agy itself would) before exiting, so the ACP server's poller
  * picks them up.
  */
-function spawnAgyWritingConversation(
+export function spawnAgyWritingConversation(
   dir: string,
   conversationId: string,
   steps: Parameters<typeof insertStep>[1][]
@@ -2220,7 +2250,7 @@ function spawnAgyWritingConversation(
   }) as unknown as SpawnFactory;
 }
 
-class FakeProcess extends EventEmitter {
+export class FakeProcess extends EventEmitter {
   stdin = new Writable({ write: (_chunk, _encoding, callback) => callback() });
   stdout: Readable;
   stderr: Readable;

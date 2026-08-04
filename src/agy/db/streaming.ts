@@ -5,6 +5,7 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
 import { newConversationId } from "./scan.js";
+import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 import type { StepRow } from "./types.js";
@@ -50,6 +51,12 @@ export class StreamPoller {
   private rowSnapshot = "";
   private readonly activePending = new Map<string, PendingInteraction>();
   private readonly observedUserStepIdxs = new Set<number>();
+  private _lastUserStepIdx = -1;
+  private _latestSystemMessageStepIdx = -1;
+  private _hasBackgroundWaiting = false;
+  /** Launched background task id -> idx of the first row that carried it. */
+  private readonly _launchedTaskIdxs = new Map<string, number>();
+  private readonly _completedTaskIds = new Set<string>();
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -75,6 +82,30 @@ export class StreamPoller {
   /** User-prompt rows observed during this prompt-scoped polling session. */
   get userStepIdxs(): number[] {
     return [...this.observedUserStepIdxs];
+  }
+
+  get lastUserStepIdx(): number {
+    return this._lastUserStepIdx;
+  }
+
+  get latestSystemMessageStepIdx(): number {
+    return this._latestSystemMessageStepIdx;
+  }
+
+  get hasUnansweredSystemMessage(): boolean {
+    // _lastUserStepIdx starts at -1, so `>` already excludes "no system message".
+    return this._latestSystemMessageStepIdx > this._lastUserStepIdx;
+  }
+
+  /**
+   * True while this user turn should stay open for background work.
+   * Prefer explicit task_details launch/completion tracking; fall back to the
+   * "preserving context / waiting for background" agent text plus a later
+   * system/lifecycle message. Never requires injecting a synthetic prompt.
+   */
+  get hasActiveBackgroundTasks(): boolean {
+    if (this._launchedTaskIdxs.size > this._completedTaskIds.size) return true;
+    return this._hasBackgroundWaiting && !this.hasUnansweredSystemMessage;
   }
 
   /** Newly observed status-9 tool calls from the most recent poll. */
@@ -117,7 +148,54 @@ export class StreamPoller {
 
     const rows = this.db.readAfter(this.opts.baseStepIdx);
     for (const row of rows) {
-      if (row.stepType === 14) this.observedUserStepIdxs.add(row.idx);
+      if (row.stepType === 14) {
+        this.observedUserStepIdxs.add(row.idx);
+        this._lastUserStepIdx = Math.max(this._lastUserStepIdx, row.idx);
+        this._hasBackgroundWaiting = false;
+      }
+      if (row.task?.taskId && !this._launchedTaskIdxs.has(row.task.taskId)) {
+        this._launchedTaskIdxs.set(row.task.taskId, row.idx);
+      }
+      const text = row.stepPayload.agentText?.text ?? "";
+      // Only enter the background-wait path with corroborating task evidence.
+      // A bare prose mention of "preserving context" must not pin the turn open
+      // (and eventually time out) when no background task was launched.
+      if (
+        this._launchedTaskIdxs.size > 0 &&
+        text &&
+        isBackgroundWaitAgentText(text)
+      ) {
+        this._hasBackgroundWaiting = true;
+      }
+      // Defer completion tracking until the lifecycle row is terminal so a
+      // still-streaming system-message envelope cannot close the wait early.
+      if (
+        (row.stepType === 101 || isSystemMessage(text)) &&
+        isTerminalStepStatus(row.status)
+      ) {
+        this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        // Rows are re-read on every poll, so an id-less lifecycle row observed
+        // before a later launch would otherwise close that newer task on the
+        // next revision. Only tasks launched BEFORE this row can complete here.
+        const launchedBefore = [...this._launchedTaskIdxs]
+          .filter(([, launchIdx]) => launchIdx < row.idx)
+          .map(([taskId]) => taskId);
+        let matchedTask = false;
+        for (const taskId of launchedBefore) {
+          if (taskId && textMentionsTaskId(text, taskId)) {
+            this._completedTaskIds.add(taskId);
+            matchedTask = true;
+          }
+        }
+        // Lifecycle/system wake without an embedded task id (common for stop_hook
+        // type 101): close every still-pending launch so the turn cannot hang
+        // forever waiting for a match that never arrives.
+        if (!matchedTask) {
+          for (const taskId of launchedBefore) {
+            this._completedTaskIds.add(taskId);
+          }
+        }
+      }
     }
     if (!rows.hasDecodeError) {
       this.dataVersion = dataVersion;
@@ -196,4 +274,39 @@ export class StreamPoller {
     this.db?.close();
     this.db = null;
   }
+}
+
+/** agy's known lifecycle prose when it parks a turn on a background task. */
+const BACKGROUND_WAIT_SENTINEL =
+  "Preserving context while waiting for background command output...";
+
+function isBackgroundWaitAgentText(text: string): boolean {
+  const trimmed = text.trim();
+  if (trimmed === BACKGROUND_WAIT_SENTINEL) return true;
+  // Slight variants still seen with task_details present.
+  return /waiting for.*background|preserving context while waiting/i.test(trimmed);
+}
+
+/** status 3/6/7 — completed, cancelled/aborted, or failed. */
+function isTerminalStepStatus(status: number): boolean {
+  return status === 3 || status === 6 || status === 7;
+}
+
+/**
+ * True when `text` contains `taskId` as a whole token (not a prefix of a longer
+ * id). Avoids `task-1` matching inside `task-10`.
+ */
+function textMentionsTaskId(text: string, taskId: string): boolean {
+  if (!taskId || !text) return false;
+  let from = 0;
+  while (from <= text.length) {
+    const index = text.indexOf(taskId, from);
+    if (index < 0) return false;
+    const before = index === 0 ? "" : text[index - 1]!;
+    const after = text[index + taskId.length] ?? "";
+    const boundary = (ch: string) => ch === "" || !/[\w-]/.test(ch);
+    if (boundary(before) && boundary(after)) return true;
+    from = index + 1;
+  }
+  return false;
 }
