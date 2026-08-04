@@ -29,11 +29,19 @@ export function diffBlocks(toolCall: SessionUpdate): DiffBlock[] {
   return blocks;
 }
 
+export function hasUniqueOccurrence(str: string, substr: string): boolean {
+  if (!substr) return false;
+  const first = str.indexOf(substr);
+  if (first === -1) return false;
+  return str.indexOf(substr, first + 1) === -1;
+}
+
 /**
  * Restore the pre-edit text this same translator pass recorded for each diff
  * block. Only acts when the file's current content still matches what the
- * edit wrote — if it has diverged further (a later edit landed on top), the
- * block is left alone rather than guessing.
+ * edit wrote — if it has diverged further (a later edit landed on top), or
+ * if the replacement text appears multiple times ambiguously, the block is
+ * left alone rather than guessing.
  *
  * Returns the blocks actually restored, so callers can attribute exactly the
  * restoration that happened: a diverged block that was declined still holds
@@ -60,7 +68,7 @@ export function revertEditToolCall(toolCall: SessionUpdate): DiffBlock[] {
     if (current === newText) {
       writeFileSync(path, oldText, "utf8");
       restored.push(block);
-    } else if (current.includes(newText)) {
+    } else if (hasUniqueOccurrence(current, newText)) {
       writeFileSync(path, current.replace(newText, oldText), "utf8");
       restored.push(block);
     }
