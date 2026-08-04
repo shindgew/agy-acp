@@ -1705,6 +1705,40 @@ describe("cancel", () => {
     expect((await pending).stopReason).toBe("cancelled");
   });
 
+  it("cancels agy process immediately and throws when onUpdate callback fails in print mode", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-update-fail-"));
+    try {
+      const calls: SpawnCall[] = [];
+      const fake = new FakeProcess([], { blockStdout: true, exitCode: null });
+      const session = new AgyCliSession(
+        { ...defaultConfig(), conversationsDir: dir },
+        (command, args, options) => {
+          const db = createConversationDb(dir, "print-update-fail");
+          insertStep(db, {
+            idx: 1,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "chunk one" })
+          });
+          db.close();
+          return fake.spawnFactory(calls)(command, args, options);
+        }
+      );
+
+      const callbackError = new Error("ACP client disconnected");
+      await expect(
+        session.prompt("hello", async () => {
+          throw callbackError;
+        })
+      ).rejects.toThrow("ACP client disconnected");
+
+      expect(fake.killedWith).toBe("SIGINT");
+      expect(session.wasCancelled).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("fails the print-mode turn when background drain exceeds printTimeout", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-bg-timeout-"));
     try {
