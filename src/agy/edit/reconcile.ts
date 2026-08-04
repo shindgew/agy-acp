@@ -362,19 +362,58 @@ export async function snapshotWorkingTree(rootPaths: string[]): Promise<WorkingT
   return { roots, files, excluded };
 }
 
+export interface ReportedBlock {
+  /** Text the block replaced, or null when it reported a whole file body. */
+  oldText: string | null;
+  newText: string;
+}
+
 export interface ReportedContent {
   path: string;
   /**
-   * Content the reported update accounts for on this path: a full body, or the
-   * snippets it inserted. Disk is recorded only while it still holds all of
-   * them — divergence means a later change landed before the tool-call was
-   * polled, so the current bytes were never reported and reconciliation must
-   * still emit them. (This is the same attribution test the write-through and
-   * revert paths apply.) Omit it to record disk unconditionally, which only a
-   * caller that knows the client has the current state may do — a completed
-   * local revert.
+   * The diff blocks the update reported for this path. Disk is recorded only
+   * when they account for every difference from the content already recorded;
+   * otherwise a change reached the file before the tool-call was polled, the
+   * current bytes were never reported, and reconciliation must still emit them.
+   * Omit to record disk unconditionally, which only a caller that knows the
+   * client has the current state may do — a completed local revert.
    */
-  reportedTexts?: string[];
+  blocks?: ReportedBlock[];
+  /** True when `blocks` carry the whole file body (a `write_to_file` call). */
+  wholeFile?: boolean;
+}
+
+/**
+ * True when the reported blocks account for every difference between the
+ * content already recorded for a path and what is on disk now.
+ *
+ * A whole-file write reports the entire body, so equality settles it. A
+ * targeted replacement is checked by applying each reported replacement to
+ * every occurrence of its target: reproducing disk exactly proves nothing
+ * unreported reached the file, while any other outcome fails closed, so a later
+ * edit to a different part of the file is reported as an unstructured change
+ * instead of being absorbed. This never *derives* recorded content — it only
+ * decides whether the bytes on disk were reported — so failing costs one extra,
+ * accurate synthetic edit rather than a lost or invented one.
+ */
+function reportedAccountsForDisk(
+  recorded: string | null | undefined,
+  blocks: ReportedBlock[],
+  wholeFile: boolean,
+  disk: string
+): boolean {
+  if (blocks.length === 0) return false;
+  if (wholeFile || blocks.some((block) => block.oldText === null)) {
+    return blocks.some((block) => block.newText === disk);
+  }
+  if (recorded == null) return false;
+  let expected = recorded;
+  for (const { oldText, newText } of blocks) {
+    // An empty target matches everywhere and would accept any file.
+    if (oldText === null || oldText === "" || !expected.includes(oldText)) return false;
+    expected = expected.split(oldText).join(newText);
+  }
+  return expected === disk;
 }
 
 /**
@@ -390,25 +429,24 @@ export async function observeEditedPaths(
   snapshot: WorkingTreeSnapshot,
   reported: ReportedContent[]
 ): Promise<void> {
-  for (const { path: filePath, reportedTexts } of reported) {
+  for (const { path: filePath, blocks, wholeFile } of reported) {
     const abs = path.resolve(filePath);
     const record = await readFileRecord(abs);
     const canonicalPath = record?.canonicalPath ?? (await canonicalizeMissing(abs));
     if (!rootFor(canonicalPath, snapshot.roots)) continue;
+    const existing = snapshot.files.get(canonicalPath);
     if (!record) {
       // Nothing on disk. Only a caller that knows the client has the current
       // state (a reverted creation) may forget the entry; otherwise something
       // else removed the file and that deletion still has to be reported.
-      if (reportedTexts === undefined) snapshot.files.delete(canonicalPath);
+      if (blocks === undefined) snapshot.files.delete(canonicalPath);
       continue;
     }
-    if (reportedTexts !== undefined) {
-      const text = record.text;
-      if (text === null || !reportedTexts.every((reported) => text.includes(reported))) continue;
+    if (blocks !== undefined) {
+      if (record.text === null) continue;
+      if (!reportedAccountsForDisk(existing?.text, blocks, wholeFile === true, record.text)) continue;
     }
-    const retained = snapshot.files.get(canonicalPath)?.path
-      ?? displayPathFor(canonicalPath, snapshot.roots)
-      ?? abs;
+    const retained = existing?.path ?? displayPathFor(canonicalPath, snapshot.roots) ?? abs;
     snapshot.files.set(canonicalPath, { ...record, path: retained });
   }
 }

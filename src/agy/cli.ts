@@ -54,19 +54,28 @@ function permissionSignature(row: StepRow): string {
 }
 
 /**
+ * agy tools whose diff blocks carry the whole file body rather than a snippet,
+ * so disk is accounted for exactly when it equals the reported content. An
+ * unrecognized name is treated as a targeted replacement, which fails closed.
+ */
+const WHOLE_FILE_EDIT_TOOLS = new Set(["write_to_file"]);
+
+/**
  * What a tool-call's diff reported, per absolute path (targets may be
- * session-relative). The reported texts let the reconciler tell disk that this
- * update accounts for apart from disk a later change has already moved on.
+ * session-relative). The blocks let the reconciler tell the change this update
+ * accounts for apart from one that reached the file before it was polled.
  */
 function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent[] {
-  const byPath = new Map<string, string[]>();
-  for (const block of diffBlocks(toolCall)) {
-    const abs = path.resolve(cwd, block.path);
-    const texts = byPath.get(abs);
-    if (texts) texts.push(block.newText);
-    else byPath.set(abs, [block.newText]);
+  const name = (toolCall as unknown as { name?: string }).name;
+  const wholeFile = name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+  const byPath = new Map<string, Array<{ oldText: string | null; newText: string }>>();
+  for (const { path: target, oldText, newText } of diffBlocks(toolCall)) {
+    const abs = path.resolve(cwd, target);
+    const blocks = byPath.get(abs);
+    if (blocks) blocks.push({ oldText, newText });
+    else byPath.set(abs, [{ oldText, newText }]);
   }
-  return [...byPath].map(([filePath, reportedTexts]) => ({ path: filePath, reportedTexts }));
+  return [...byPath].map(([filePath, blocks]) => ({ path: filePath, blocks, wholeFile }));
 }
 
 /** How many unsupported changes to name individually in the warning line. */

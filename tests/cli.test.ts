@@ -1389,17 +1389,13 @@ describe("prompt", () => {
     }
   });
 
-  it("does not re-emit a structured edit whose reported text no longer matches the pre-turn file", async () => {
+  it("does not re-emit a whole-file write whose reported oldText never existed pre-turn", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-reconcile-"));
     const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-conv-"));
     try {
       const file = path.join(dir, "a.txt");
       fs.writeFileSync(file, "before", "utf8");
-      const rawInputJson = JSON.stringify({
-        TargetFile: file,
-        TargetContent: "shell",
-        ReplacementContent: "final"
-      });
+      const rawInputJson = JSON.stringify({ TargetFile: file, CodeContent: "final" });
       const updates: SessionUpdate[] = [];
       const session = new AgyCliSession(
         { ...defaultConfig(), cwd: dir, conversationsDir: conversations },

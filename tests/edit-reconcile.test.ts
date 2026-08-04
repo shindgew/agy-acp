@@ -93,12 +93,11 @@ describe("reconcileWorkingTree", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("observes disk instead of replaying a reported diff that no longer matches", async () => {
-    // A shell command changed the file before the structured write completed,
-    // so the reported oldText ("shell") is not the pre-turn text ("before").
-    // Observing disk keeps the client's view consistent; replaying the reported
-    // snippet against the pre-turn text would fail and emit a second,
-    // contradictory before→final edit.
+  it("accepts a whole-file write whose reported oldText never existed pre-turn", async () => {
+    // A shell command changed the file before the write completed, so the
+    // reported oldText ("shell") is not the pre-turn text. The reported body is
+    // the whole file and equals disk, so nothing unreported survives and no
+    // second, contradictory before→final edit is emitted.
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
     fs.writeFileSync(file, "before", "utf8");
@@ -107,15 +106,70 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "shell", "utf8");
     fs.writeFileSync(file, "final", "utf8");
-    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["final"] }]);
+    await observeEditedPaths(baseline, [
+      { path: file, wholeFile: true, blocks: [{ oldText: "shell", newText: "final" }] }
+    ]);
 
     expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("accepts a replacement that accounts for every difference on disk", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "alpha\nOLD\nomega\n", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "alpha\nNEW\nomega\n", "utf8");
+    await observeEditedPaths(baseline, [{ path: file, blocks: [{ oldText: "OLD", newText: "NEW" }] }]);
+
+    expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("reflects a later edit outside the reported replacement", async () => {
+    // A formatter (or shell command) rewrote another section before the
+    // tool-call was polled. Disk still contains the reported snippet, but the
+    // rest of the file changed too, so the surviving content must be reported.
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "alpha\nOLD\nomega\n", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "ALPHA\nNEW\nomega\n", "utf8");
+    await observeEditedPaths(baseline, [{ path: file, blocks: [{ oldText: "OLD", newText: "NEW" }] }]);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual([
+      { path: file, oldText: "alpha\nOLD\nomega\n", newText: "ALPHA\nNEW\nomega\n" }
+    ]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not accept an empty replacement target as accounting for any file", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "changed by shell", "utf8");
+    await observeEditedPaths(baseline, [{ path: file, blocks: [{ oldText: "", newText: "" }] }]);
+
+    const { reflected } = await reconcileWorkingTree(baseline);
+    expect(reflected).toEqual([{ path: file, oldText: "before", newText: "changed by shell" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("leaves a path the reported edit no longer accounts for to reconciliation", async () => {
-    // The reported content is gone from disk, so this update never told the
+    // The reported target is gone from disk, so this update never told the
     // client what the file now holds: reconciliation still has to.
     const dir = gitRepo();
     const file = path.join(dir, "a.txt");
@@ -124,7 +178,9 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "overwritten by shell", "utf8");
-    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["structured"] }]);
+    await observeEditedPaths(baseline, [
+      { path: file, blocks: [{ oldText: "structured", newText: "changed" }] }
+    ]);
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(unsupported).toEqual([]);
@@ -141,7 +197,9 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.rmSync(file);
-    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["structured"] }]);
+    await observeEditedPaths(baseline, [
+      { path: file, blocks: [{ oldText: "before", newText: "structured" }] }
+    ]);
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
