@@ -34,8 +34,12 @@ export function diffBlocks(toolCall: SessionUpdate): DiffBlock[] {
  * block. Only acts when the file's current content still matches what the
  * edit wrote — if it has diverged further (a later edit landed on top), the
  * block is left alone rather than guessing.
+ *
+ * Returns the paths actually restored, so callers can tell a real undo apart
+ * from a diverged block they must keep reporting.
  */
-export function revertEditToolCall(toolCall: SessionUpdate): void {
+export function revertEditToolCall(toolCall: SessionUpdate): string[] {
+  const restored: string[] = [];
   for (const { path, oldText, newText } of diffBlocks(toolCall)) {
     const current = existsSync(path) ? readFileSync(path, "utf8") : null;
     if (current === null) continue;
@@ -43,14 +47,20 @@ export function revertEditToolCall(toolCall: SessionUpdate): void {
     if (oldText === null) {
       // This block created the file; only remove it if nothing else touched
       // it since.
-      if (current === newText) rmSync(path);
+      if (current === newText) {
+        rmSync(path);
+        restored.push(path);
+      }
       continue;
     }
 
     if (current === newText) {
       writeFileSync(path, oldText, "utf8");
+      restored.push(path);
     } else if (current.includes(newText)) {
       writeFileSync(path, current.replace(newText, oldText), "utf8");
+      restored.push(path);
     }
   }
+  return restored;
 }

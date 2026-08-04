@@ -362,6 +362,21 @@ export async function snapshotWorkingTree(rootPaths: string[]): Promise<WorkingT
   return { roots, files, excluded };
 }
 
+export interface ReportedContent {
+  path: string;
+  /**
+   * Content the reported update accounts for on this path: a full body, or the
+   * snippets it inserted. Disk is recorded only while it still holds all of
+   * them — divergence means a later change landed before the tool-call was
+   * polled, so the current bytes were never reported and reconciliation must
+   * still emit them. (This is the same attribution test the write-through and
+   * revert paths apply.) Omit it to record disk unconditionally, which only a
+   * caller that knows the client has the current state may do — a completed
+   * local revert.
+   */
+  reportedTexts?: string[];
+}
+
 /**
  * Record the current on-disk content of paths whose change has *already* been
  * reported to the client (a recognized structured edit, or a synthetic one this
@@ -371,17 +386,25 @@ export async function snapshotWorkingTree(rootPaths: string[]): Promise<WorkingT
  * reverted. Paths outside the configured roots are ignored, which keeps the
  * snapshot to files this workspace is responsible for.
  */
-export async function observeEditedPaths(snapshot: WorkingTreeSnapshot, paths: string[]): Promise<void> {
-  for (const filePath of paths) {
+export async function observeEditedPaths(
+  snapshot: WorkingTreeSnapshot,
+  reported: ReportedContent[]
+): Promise<void> {
+  for (const { path: filePath, reportedTexts } of reported) {
     const abs = path.resolve(filePath);
     const record = await readFileRecord(abs);
     const canonicalPath = record?.canonicalPath ?? (await canonicalizeMissing(abs));
     if (!rootFor(canonicalPath, snapshot.roots)) continue;
     if (!record) {
-      // The reported edit removed the file (a reverted creation, a delete).
-      // Forgetting it keeps a later recreation reportable as a creation.
-      snapshot.files.delete(canonicalPath);
+      // Nothing on disk. Only a caller that knows the client has the current
+      // state (a reverted creation) may forget the entry; otherwise something
+      // else removed the file and that deletion still has to be reported.
+      if (reportedTexts === undefined) snapshot.files.delete(canonicalPath);
       continue;
+    }
+    if (reportedTexts !== undefined) {
+      const text = record.text;
+      if (text === null || !reportedTexts.every((reported) => text.includes(reported))) continue;
     }
     const retained = snapshot.files.get(canonicalPath)?.path
       ?? displayPathFor(canonicalPath, snapshot.roots)

@@ -914,6 +914,72 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("reports the surviving content when a rejected edit's revert cannot restore it", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-conv-"));
+    const targetFile = path.join(dir, "a.txt");
+    fs.writeFileSync(targetFile, "before", "utf8");
+    const rawInputJson = JSON.stringify({
+      TargetFile: targetFile,
+      TargetContent: "before",
+      ReplacementContent: "structured"
+    });
+    const pty = new FakePty(() => {
+      // agy applied the structured edit, then a shell command overwrote it, so
+      // the revert has nothing it can safely restore.
+      fs.writeFileSync(targetFile, "structured", "utf8");
+      fs.writeFileSync(targetFile, "shell final", "utf8");
+      const db = createConversationDb(conversations, "diverged-reject");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+          })
+        })
+      });
+      db.close();
+    });
+    const session = new AgyCliSession(
+      {
+        ...defaultConfig(),
+        cwd: dir,
+        conversationsDir: conversations,
+        interactivePermissions: true,
+        printTimeout: "3s"
+      },
+      undefined,
+      { spawn: () => { pty.start(); return pty; } } as PtyFactory
+    );
+    const updates: SessionUpdate[] = [];
+    const result = session.prompt("edit it", async (update) => { updates.push(update); }, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(conversations, "diverged-reject.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    // Rejecting could not undo the diverged file, so its surviving content is
+    // reported instead of being suppressed as already reflected.
+    const reconciled = updates.filter((update) =>
+      String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: targetFile, oldText: "before", newText: "shell final" }]
+    });
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("shell final");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(conversations, { recursive: true, force: true });
+  });
+
   it("leaves an already-applied edit in place when the client keeps it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const targetFile = path.join(dir, "target.txt");

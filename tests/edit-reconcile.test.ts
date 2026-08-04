@@ -68,7 +68,7 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "after-structured", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
 
     expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
@@ -83,7 +83,7 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "structured", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
     fs.writeFileSync(file, "shell", "utf8");
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
@@ -107,9 +107,45 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "shell", "utf8");
     fs.writeFileSync(file, "final", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["final"] }]);
 
     expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("leaves a path the reported edit no longer accounts for to reconciliation", async () => {
+    // The reported content is gone from disk, so this update never told the
+    // client what the file now holds: reconciliation still has to.
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.writeFileSync(file, "overwritten by shell", "utf8");
+    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["structured"] }]);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(unsupported).toEqual([]);
+    expect(reflected).toEqual([{ path: file, oldText: "before", newText: "overwritten by shell" }]);
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps reporting a deletion when the reported edit did not cause it", async () => {
+    const dir = gitRepo();
+    const file = path.join(dir, "a.txt");
+    fs.writeFileSync(file, "before", "utf8");
+    execFileSync("git", ["-C", dir, "add", "."]);
+
+    const baseline = await snapshotWorkingTree([dir]);
+    fs.rmSync(file);
+    await observeEditedPaths(baseline, [{ path: file, reportedTexts: ["structured"] }]);
+
+    const { reflected, unsupported } = await reconcileWorkingTree(baseline);
+    expect(reflected).toEqual([]);
+    expect(unsupported).toEqual([{ path: file, reason: "deleted" }]);
 
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -122,10 +158,10 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "edited", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
     // Local review rejected the edit: revert put the pre-edit text back.
     fs.writeFileSync(file, "before", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
 
     expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
@@ -176,7 +212,7 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(ignoreFile, "", "utf8");
-    await observeEditedPaths(baseline, [ignoreFile]);
+    await observeEditedPaths(baseline, [{ path: ignoreFile }]);
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
     expect(reflected).toEqual([]);
@@ -392,7 +428,7 @@ describe("reconcileWorkingTree", () => {
     fs.writeFileSync(file, "created", "utf8");
 
     const baseline = await snapshotWorkingTree([dir]);
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
     expect(baseline.files.size).toBe(0);
     fs.rmSync(file);
 
@@ -432,7 +468,7 @@ describe("reconcileWorkingTree", () => {
     const baseline = await snapshotWorkingTree([dir]);
     fs.mkdirSync(createdDir);
     fs.writeFileSync(file, "created", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
     fs.rmSync(createdDir, { recursive: true });
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
@@ -450,7 +486,7 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "created", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
 
     expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
@@ -465,7 +501,7 @@ describe("reconcileWorkingTree", () => {
 
     const baseline = await snapshotWorkingTree([dir]);
     fs.writeFileSync(file, "created", "utf8");
-    await observeEditedPaths(baseline, [file]);
+    await observeEditedPaths(baseline, [{ path: file }]);
     fs.writeFileSync(file, "changed by shell", "utf8");
 
     const { reflected, unsupported } = await reconcileWorkingTree(baseline);
@@ -509,7 +545,7 @@ describe("reconcileWorkingTree", () => {
       fs.writeFileSync(file, "after", "utf8");
       // A structured tool may report the canonical absolute path even though
       // the workspace scan retained the cwd alias.
-      await observeEditedPaths(baseline, [file]);
+      await observeEditedPaths(baseline, [{ path: file }]);
 
       expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
@@ -558,7 +594,7 @@ describe("reconcileWorkingTree", () => {
       const aliasedFile = path.join(alias, "new.txt");
       const baseline = await snapshotWorkingTree([alias, dir]);
       fs.writeFileSync(file, "structured", "utf8");
-      await observeEditedPaths(baseline, [file]);
+      await observeEditedPaths(baseline, [{ path: file }]);
 
       expect(await reconcileWorkingTree(baseline)).toEqual({ reflected: [], unsupported: [] });
 
@@ -612,7 +648,7 @@ describe("reconcileWorkingTree", () => {
       fs.symlinkSync(outside, link, "dir");
       const baseline = await snapshotWorkingTree([dir]);
       fs.writeFileSync(file, "created", "utf8");
-      await observeEditedPaths(baseline, [file]);
+      await observeEditedPaths(baseline, [{ path: file }]);
       fs.rmSync(file);
       fs.rmSync(link);
 
@@ -633,7 +669,7 @@ describe("reconcileWorkingTree", () => {
       const baseline = await snapshotWorkingTree([dir]);
       fs.writeFileSync(file, "created", "utf8");
       fs.writeFileSync(target, "outside", "utf8");
-      await observeEditedPaths(baseline, [file]);
+      await observeEditedPaths(baseline, [{ path: file }]);
       fs.rmSync(file);
       fs.symlinkSync(target, file);
 
@@ -658,7 +694,7 @@ describe("reconcileWorkingTree", () => {
       const baseline = await snapshotWorkingTree([dir]);
       fs.mkdirSync(createdDir);
       fs.writeFileSync(file, "created", "utf8");
-      await observeEditedPaths(baseline, [file]);
+      await observeEditedPaths(baseline, [{ path: file }]);
       fs.rmSync(createdDir, { recursive: true });
       fs.writeFileSync(target, "outside secret", "utf8");
       fs.symlinkSync(outside, createdDir, "dir");

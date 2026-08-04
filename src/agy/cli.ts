@@ -23,6 +23,7 @@ import {
   reconcileWorkingTree,
   snapshotWorkingTree,
   toDisplayPath,
+  type ReportedContent,
   type WorkingTreeSnapshot
 } from "./edit/reconcile.js";
 import {
@@ -52,9 +53,20 @@ function permissionSignature(row: StepRow): string {
   return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
 }
 
-/** Absolute paths a tool-call's diff reported. Targets may be session-relative. */
-function editedPaths(cwd: string, toolCall: SessionUpdate): string[] {
-  return [...new Set(diffBlocks(toolCall).map((block) => path.resolve(cwd, block.path)))];
+/**
+ * What a tool-call's diff reported, per absolute path (targets may be
+ * session-relative). The reported texts let the reconciler tell disk that this
+ * update accounts for apart from disk a later change has already moved on.
+ */
+function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent[] {
+  const byPath = new Map<string, string[]>();
+  for (const block of diffBlocks(toolCall)) {
+    const abs = path.resolve(cwd, block.path);
+    const texts = byPath.get(abs);
+    if (texts) texts.push(block.newText);
+    else byPath.set(abs, [block.newText]);
+  }
+  return [...byPath].map(([filePath, reportedTexts]) => ({ path: filePath, reportedTexts }));
 }
 
 /** How many unsupported changes to name individually in the warning line. */
@@ -351,8 +363,8 @@ export class AgyCliSession {
     } catch {
       editBaseline = null;
     }
-    const observeReportedEdit = (toolCall: SessionUpdate): Promise<void> =>
-      this.observeReportedEdit(editBaseline, toolCall);
+    const observeReported = (reported: ReportedContent[]): Promise<void> =>
+      this.observeReported(editBaseline, reported);
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
@@ -558,12 +570,13 @@ export class AgyCliSession {
           // take the write itself, hand it off so its native diff/review UI
           // (e.g. Zed's Review Changes panel) tracks it.
           //
-          // Disk holds exactly the content this update reports, right now:
-          // record it before any write-through revert/replay so end-of-turn
-          // reconciliation cannot mistake the client's own write (or the
-          // intermediate revert) for an unreflected change.
-          await observeReportedEdit(toolCall);
-          let rejected = false;
+          // Record what disk holds for the reported paths before any
+          // write-through revert/replay, so reconciliation cannot mistake the
+          // client's own write (or the intermediate revert) for an unreflected
+          // change. Paths whose content this update no longer accounts for are
+          // left for reconciliation to report.
+          await observeReported(reportedContents(this.config.cwd, toolCall));
+          let restored: string[] = [];
           try {
             if (fsBridge) {
               const routed = gatedIds.has(id)
@@ -592,14 +605,17 @@ export class AgyCliSession {
             deadline = Date.now() + timeoutMs;
             if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
             if (normalizePermissionChoice(choice) === "agy-reject-once") {
-              revertEditToolCall(toolCall);
-              rejected = true;
+              restored = revertEditToolCall(toolCall);
             }
           } finally {
             // A reject put the pre-edit text back on disk; that restoration is
             // the answer the client already has, so re-record it rather than
-            // reporting it again as an unstructured change.
-            if (rejected) await observeReportedEdit(toolCall);
+            // reporting it again as an unstructured change. Only the paths the
+            // revert actually restored: a diverged block it declined to touch
+            // still holds content the client has not seen.
+            if (restored.length > 0) {
+              await observeReported(restored.map((target) => ({ path: path.resolve(this.config.cwd, target) })));
+            }
           }
         }
         if (this.#cancelled) break;
@@ -650,14 +666,15 @@ export class AgyCliSession {
    * end-of-turn reconciliation only emits changes the client has *not* been
    * told about. Best effort: a snapshot we fail to refresh at worst re-reports
    * a change the client already has, which is preferable to failing the turn.
+   * (See {@link ReportedContent} for how divergence is handled.)
    */
-  private async observeReportedEdit(
+  private async observeReported(
     baseline: WorkingTreeSnapshot | null,
-    toolCall: SessionUpdate
+    reported: ReportedContent[]
   ): Promise<void> {
     if (!baseline) return;
     try {
-      await observeEditedPaths(baseline, editedPaths(this.config.cwd, toolCall));
+      await observeEditedPaths(baseline, reported);
     } catch (error) {
       console.error(`[agy-acp] WARN: could not record reported edit state: ${(error as Error).message}`);
     }
@@ -801,7 +818,7 @@ export class AgyCliSession {
           // proposed content that may never land.
           const rawUpdate = update as unknown as { status?: string };
           if (isEditToolCall(update) && rawUpdate.status === "completed") {
-            await this.observeReportedEdit(editBaseline, update);
+            await this.observeReported(editBaseline, reportedContents(this.config.cwd, update));
           }
         }
       };
