@@ -11,6 +11,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ### Fixed
 
+- Prevent stale or floating v2 prompt turns from resurrecting closed or deleted sessions or overwriting reloaded sessions in the persisted session store. (#77)
 - Avoid ambiguous edit rollback or ACP filesystem write-through handoff when replacement text appears multiple times in a file, failing safely instead of replacing an arbitrary occurrence. (#80)
 - Prevent generic, id-less `stepType 101` turn-end markers from clearing active background tasks before terminal system completion messages arrive, making `StreamPoller` background task tracking 100% DB-driven via SQLite protobuf `task_details` state. (#86)
 - Terminate `agy` process immediately via SIGINT->SIGKILL escalation when an ACP `session/update` callback rejects during print-mode execution, preventing orphaned backend processes. (#78)

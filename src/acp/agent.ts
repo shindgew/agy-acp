@@ -568,6 +568,9 @@ export class AcpAgent {
   }
 
   private persistSession(sessionId: string, session: SessionState): Promise<void> {
+    if (session.closed || this.#sessions.get(sessionId) !== session) {
+      return Promise.resolve();
+    }
     return persistSession(this.#store, sessionId, session);
   }
 }
