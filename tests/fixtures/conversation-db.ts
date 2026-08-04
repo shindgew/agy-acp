@@ -23,17 +23,19 @@ export function insertStep(
     stepPayload: Uint8Array;
     permissions?: Uint8Array;
     errorDetails?: Uint8Array;
+    task?: Uint8Array;
   }
 ): void {
   db.prepare(
-    "INSERT INTO steps (idx, step_type, status, step_payload, permissions, error_details) VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT INTO steps (idx, step_type, status, step_payload, permissions, error_details, task_details) VALUES (?, ?, ?, ?, ?, ?, ?)"
   ).run(
     row.idx,
     row.stepType,
     row.status ?? 3,
     Buffer.from(row.stepPayload),
     row.permissions ? Buffer.from(row.permissions) : null,
-    row.errorDetails ? Buffer.from(row.errorDetails) : null
+    row.errorDetails ? Buffer.from(row.errorDetails) : null,
+    row.task ? Buffer.from(row.task) : null
   );
 }
 

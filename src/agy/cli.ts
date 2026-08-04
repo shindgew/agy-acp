@@ -283,6 +283,12 @@ export class AgyCliSession {
    * appended steps while the process runs, and invoke `onUpdate` with the
    * translated ACP updates in order. Resolves once the process exits and a few
    * trailing polls have drained any steps flushed right around exit.
+   *
+   * Invariant (zero prompt injection): `prompt` is only client-originated
+   * content from ACP session/prompt. Never invent labels, instructions, or
+   * follow-ups (e.g. "continue") — for background wakeups, keep the turn open
+   * and poll instead. PTY writes during a turn are permission keys (or the same
+   * user `prompt` when reusing an interactive TUI), never adapter prose.
    */
   async prompt(
     prompt: string,
@@ -549,8 +555,18 @@ export class AgyCliSession {
           if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
           if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
         }
-        if (this.#cancelled) break;
-        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
+          // Background work can finish after the TUI looks idle. Stay on this
+          // user turn and keep polling — do not inject a synthetic "continue".
+          // Do not re-arm deadline here: only poller revision progress (above)
+          // refreshes the timeout, so a missing completion cannot hang forever.
+          if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+            const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
+            if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
+            continue;
+          }
+          break;
+        }
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
@@ -674,6 +690,34 @@ export class AgyCliSession {
         );
       }
 
+      // Print-mode child may exit before background task rows finish writing.
+      // Keep draining the DB for this user turn only — no synthetic prompts.
+      // Re-arm the deadline on DB progress so long tasks can finish; still
+      // bound idle silence by printTimeout so a missing completion cannot hang.
+      if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+        const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
+        let deadline = Date.now() + timeoutMs;
+        let seenRevision = poller.revision;
+        while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          if (Date.now() >= deadline) {
+            throw new AgyCliError(
+              `agy print turn timed out after ${this.config.printTimeout} while waiting for background tasks to complete`,
+              command,
+              null,
+              Buffer.concat(stderrChunks).toString("utf8")
+            );
+          }
+          await sleep(POLL_INTERVAL_MS);
+          for (const update of poller.poll()) {
+            await onUpdate(update);
+          }
+          if (poller.revision !== seenRevision) {
+            seenRevision = poller.revision;
+            deadline = Date.now() + timeoutMs;
+          }
+        }
+      }
+
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
@@ -765,11 +809,14 @@ export class AgyCliSession {
       await this.stopPty();
       return;
     }
+    // Always mark cancelled first: print-mode may still be draining background
+    // task rows after the child has already exited, and that loop only checks
+    // `#cancelled` (the process handle alone is no longer enough to interrupt).
+    this.#cancelled = true;
     const child = this.#process;
     if (!child || child.exitCode !== null) {
       return;
     }
-    this.#cancelled = true;
     const exitPromise = once(child, "exit");
     // SIGINT (rather than SIGTERM) gives agy a chance to flush its last
     // conversation-database write before exiting. Windows has no real SIGINT,
