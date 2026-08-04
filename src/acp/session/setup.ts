@@ -165,6 +165,7 @@ export function persistSession(
   sessionId: string,
   session: SessionState
 ): Promise<void> {
+  if (session.closed) return Promise.resolve();
   return store.persist(sessionId, sessionRecord(session));
 }
 
