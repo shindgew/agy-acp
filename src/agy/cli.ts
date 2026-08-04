@@ -1281,7 +1281,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   return {
     cwd: input.cwd,
     additionalDirectories: input.additionalDirectories ?? [],
-    agyPath: optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN) ?? "agy",
+    agyPath: optional(env.AGY_BIN) ?? "agy",
     model: undefined,
     effort: undefined,
     mode,

@@ -23,7 +23,7 @@ export interface EnsureAgyOptions {
 }
 
 function configuredAgyPath(env: NodeJS.ProcessEnv): string | undefined {
-  return optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN);
+  return optional(env.AGY_BIN);
 }
 
 

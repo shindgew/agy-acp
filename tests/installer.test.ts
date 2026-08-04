@@ -57,7 +57,7 @@ describe("ensureAgyInstalled", () => {
     fs.chmodSync(agyPath, 0o755);
 
     const resolved = await ensureAgyInstalled({
-      env: { HOME: dir, AGY_ACP_AGY_BIN: agyPath },
+      env: { HOME: dir, AGY_BIN: agyPath },
       fetchImpl: async () => {
         throw new Error("fetch should not be called");
       }

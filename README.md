@@ -49,7 +49,7 @@ Add `agy-acp` as a custom agent in Zed:
 | Variable | Default / notes |
 |---|---|
 | `PATH` | Must include `agy` if the editor doesn't inherit your shell `PATH` |
-| `AGY_ACP_AGY_BIN` | Override the `agy` binary path (also accepts `AGY_BIN`) |
+| `AGY_BIN` | Override the `agy` binary path |
 
 ## Architecture
 
