@@ -1383,6 +1383,125 @@ describe("queue and steer-by-cancel", () => {
     turns.release(nextActive);
   });
 
+  it("cancels a claimed queued turn by id without aborting a concurrent steer", async () => {
+    // PR #84 review: a targeted cancel whose item had already left the FIFO
+    // fell through to abortAll(), killing the unrelated steer reservation too.
+    const updates: any[] = [];
+    let promptCalls = 0;
+    let settlePrompt: (outcome: { stopReason: string }) => void = () => {};
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => { settlePrompt({ stopReason: "cancelled" }); },
+        prompt: async () => {
+          promptCalls++;
+          return new Promise<{ stopReason: string }>((resolve) => { settlePrompt = resolve; });
+        },
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = { notify: async (_m: string, p: any) => { updates.push(p.update); } } as any;
+
+    // Queue item 1 behind a held slot, then let it claim the turn.
+    const held = turns.claimIdle("foreground");
+    const queuedResponse = await handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "queued" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps);
+    const queuedId = (queuedResponse as any)._meta["agy-acp/queuedPromptId"] as string;
+    await waitFor(() => updates.some((u) => u.sessionUpdate === "user_message"));
+    turns.release(held);
+    notifyIdleAndDrainQueue(session);
+    await waitFor(() => promptCalls === 1); // the queued turn is running
+
+    // A steer reserves the next turn; displacement starts on the next task, so
+    // the reservation exists but the queued turn's claim is still untouched.
+    const steer = handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "steer" }],
+      _meta: { "agy-acp/turnIntent": "steer" }
+    } as any, client, deps);
+    await steer; // acceptance only
+
+    // Targeted cancel of the queued item must abort only its claimed turn.
+    await handleCancel("s1", new Map([["s1", session]]), { "agy-acp/queuedPromptId": queuedId });
+
+    // The steer survives, displaces the cancelled turn, and runs.
+    await waitFor(() => promptCalls === 2);
+    settlePrompt({ stopReason: "end_turn" });
+    await waitFor(() =>
+      updates.some(
+        (u) => u.sessionUpdate === "state_update" && u.state === "idle" && u.stopReason === "end_turn"
+      )
+    );
+    expect(turns.busy()).toBe(false);
+  });
+
+  it("treats a stale queued cancellation id as a no-op", async () => {
+    // PR #84 review: an unmatched targeted cancel fell through to abortAll(),
+    // so a stale id could cancel whichever newer turn happened to be active.
+    let promptCalls = 0;
+    let cancelCalls = 0;
+    let settlePrompt: (outcome: { stopReason: string }) => void = () => {};
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {
+          cancelCalls++;
+          settlePrompt({ stopReason: "cancelled" });
+        },
+        prompt: async () => {
+          promptCalls++;
+          return new Promise<{ stopReason: string }>((resolve) => { settlePrompt = resolve; });
+        },
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = { notify: async () => {} } as any;
+
+    // A foreground v2 turn is running.
+    await handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "active" }]
+    } as any, client, deps);
+    await waitFor(() => promptCalls === 1);
+
+    // A targeted cancel for an unknown id must not touch the active turn.
+    await handleCancel("s1", new Map([["s1", session]]), { "agy-acp/queuedPromptId": "q-stale" });
+    expect(cancelCalls).toBe(0);
+    expect(turns.busy()).toBe(true);
+
+    // A plain session/cancel still stops the active turn.
+    await handleCancel("s1", new Map([["s1", session]]));
+    await waitFor(() => !turns.busy());
+    expect(cancelCalls).toBeGreaterThan(0);
+  });
+
   it("rejects a non-intent prompt while a steer replacement is in progress", async () => {
     await withConversationsDir(async (dir) => {
       const processes: ControlledFakeProcess[] = [];

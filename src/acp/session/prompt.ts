@@ -590,7 +590,7 @@ function enqueueV1(
 async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
   const { params, client, signal, deps, resolve, reject } = item;
   const session = deps.requireSession(params.sessionId);
-  const claim = turnsOf(session).claimIdle("queued", signal);
+  const claim = turnsOf(session).claimIdle("queued", signal, item.id);
 
   await completeTurn(
     session,
@@ -792,7 +792,7 @@ function enqueueV2(
 async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
   const { params, client, controller, deps } = item;
   const session = deps.requireSession(params.sessionId);
-  const claim = turnsOf(session).claimIdle("queued", controller.signal);
+  const claim = turnsOf(session).claimIdle("queued", controller.signal, item.id);
   const emitTerminal = v2TerminalEmitter(client, params.sessionId, session, claim);
 
   // Cancelling this turn must also abort preparation: if user_message

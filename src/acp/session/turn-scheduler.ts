@@ -53,11 +53,18 @@ export type TurnKind = "foreground" | "queued" | "steer";
 /** A request's ownership of (or reservation on) the session's single turn slot. */
 export class TurnClaim {
   readonly kind: TurnKind;
+  /**
+   * For claimed queued prompts, the client-visible queue id. Lets a targeted
+   * `session/cancel` find the turn its queued item grew into, so it aborts
+   * exactly that claim instead of falling back to a session-wide abort.
+   */
+  readonly tag?: string;
   private readonly controller = new AbortController();
   private isReleased = false;
 
-  constructor(kind: TurnKind, parent?: AbortSignal) {
+  constructor(kind: TurnKind, parent?: AbortSignal, tag?: string) {
     this.kind = kind;
+    this.tag = tag;
     // A request-scoped signal (v1 `session/prompt` cancellation) folds into the
     // claim, so downstream code only ever consults one signal.
     if (parent) onAbort(parent, () => this.abort());
@@ -149,13 +156,13 @@ export class TurnScheduler {
    * Take the slot for a request that found the session idle. Synchronous by
    * design: no await may separate the busy check from the claim (I1).
    */
-  claimIdle(kind: Exclude<TurnKind, "steer">, parent?: AbortSignal): TurnClaim {
+  claimIdle(kind: Exclude<TurnKind, "steer">, parent?: AbortSignal, tag?: string): TurnClaim {
     if (this.busy()) {
       // Callers must check `busy()` with no await in between; overwriting the
       // slot here would silently orphan a running turn.
       throw new Error("cannot claim a busy session turn slot");
     }
-    const claim = new TurnClaim(kind, parent);
+    const claim = new TurnClaim(kind, parent, tag);
     this.active = claim;
     if (this.closed) claim.abort();
     return claim;

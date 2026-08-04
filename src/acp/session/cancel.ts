@@ -58,6 +58,14 @@ export async function handleCancel(
       }
       return;
     }
+    // The item may already have left the FIFO and claimed the turn slot: abort
+    // exactly that claim — never unrelated turns or steer reservations. A
+    // stale id matches nothing and must not fall back to a global abort.
+    const claimed = turnsOf(session).activeClaim;
+    if (claimed?.tag === queuedPromptId) {
+      claimed.abort();
+    }
+    return;
   }
 
   // Aborts the running turn *and* any steer holding a reservation — a steer
