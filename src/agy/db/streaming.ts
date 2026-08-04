@@ -99,13 +99,10 @@ export class StreamPoller {
 
   /**
    * True while this user turn should stay open for background work.
-   * Prefer explicit task_details launch/completion tracking; fall back to the
-   * "preserving context / waiting for background" agent text plus a later
-   * system/lifecycle message. Never requires injecting a synthetic prompt.
+   * Driven strictly by SQLite protobuf task_details launch and completion state.
    */
   get hasActiveBackgroundTasks(): boolean {
-    if (this._launchedTaskIdxs.size > this._completedTaskIds.size) return true;
-    return this._hasBackgroundWaiting && !this.hasUnansweredSystemMessage;
+    return this._launchedTaskIdxs.size > this._completedTaskIds.size;
   }
 
   /** Newly observed status-9 tool calls from the most recent poll. */
@@ -151,26 +148,17 @@ export class StreamPoller {
       if (row.stepType === 14) {
         this.observedUserStepIdxs.add(row.idx);
         this._lastUserStepIdx = Math.max(this._lastUserStepIdx, row.idx);
-        this._hasBackgroundWaiting = false;
       }
       if (row.task?.taskId && !this._launchedTaskIdxs.has(row.task.taskId)) {
         this._launchedTaskIdxs.set(row.task.taskId, row.idx);
       }
       const text = row.stepPayload.agentText?.text ?? "";
-      // Only enter the background-wait path with corroborating task evidence.
-      // A bare prose mention of "preserving context" must not pin the turn open
-      // (and eventually time out) when no background task was launched.
-      if (
-        this._launchedTaskIdxs.size > 0 &&
-        text &&
-        isBackgroundWaitAgentText(text)
-      ) {
-        this._hasBackgroundWaiting = true;
-      }
-      // Defer completion tracking until the lifecycle row is terminal so a
+      // Defer completion tracking until a system message is terminal so a
       // still-streaming system-message envelope cannot close the wait early.
+      // Generic stepType 101 turn-end markers without a system message payload
+      // must NOT clear active tasks, as agy appends 101 at the end of every turn.
       if (
-        (row.stepType === 101 || isSystemMessage(text)) &&
+        isSystemMessage(text) &&
         isTerminalStepStatus(row.status)
       ) {
         this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
@@ -187,8 +175,8 @@ export class StreamPoller {
             matchedTask = true;
           }
         }
-        // Lifecycle/system wake without an embedded task id (common for stop_hook
-        // type 101): close every still-pending launch so the turn cannot hang
+        // Lifecycle/system wake without an embedded task id (common for system message
+        // wakes): close every still-pending launch so the turn cannot hang
         // forever waiting for a match that never arrives.
         if (!matchedTask) {
           for (const taskId of launchedBefore) {
@@ -274,17 +262,6 @@ export class StreamPoller {
     this.db?.close();
     this.db = null;
   }
-}
-
-/** agy's known lifecycle prose when it parks a turn on a background task. */
-const BACKGROUND_WAIT_SENTINEL =
-  "Preserving context while waiting for background command output...";
-
-function isBackgroundWaitAgentText(text: string): boolean {
-  const trimmed = text.trim();
-  if (trimmed === BACKGROUND_WAIT_SENTINEL) return true;
-  // Slight variants still seen with task_details present.
-  return /waiting for.*background|preserving context while waiting/i.test(trimmed);
 }
 
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
