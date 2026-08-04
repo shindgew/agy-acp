@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as acp from "@agentclientprotocol/sdk";
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
-import { createAcpApp, createAcpV2App } from "../src/agent.js";
+import { createAcpApp, createAcpV2App, type AcpAgentOptions } from "../src/agent.js";
 import { cancelQueuedPrompts, handleCancel } from "../src/acp/session/cancel.js";
 import { handleCloseSession } from "../src/acp/session/close.js";
 import {
@@ -26,8 +26,12 @@ import type { SpawnFactory } from "../src/agy/cli.js";
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
 
-function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { AGY_ACP_MODEL_CACHE: "0", ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
+function printModeOptions(overrides: AcpAgentOptions = {}): AcpAgentOptions {
+  return {
+    argv: ["--no-interactive-permissions"],
+    stateDir: overrides.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "agy-test-state-")),
+    ...overrides
+  };
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
@@ -411,7 +415,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -478,7 +482,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -550,7 +554,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-queue", [
             { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt 1" }) },
             { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ans 1" }) },
@@ -635,7 +639,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -704,7 +708,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -773,7 +777,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -852,7 +856,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1522,7 +1526,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1593,7 +1597,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1672,7 +1676,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1758,7 +1762,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1836,7 +1840,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1921,7 +1925,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -2009,7 +2013,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -2080,7 +2084,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -2154,7 +2158,7 @@ describe("queue and steer-by-cancel", () => {
       );
       const connection = client.connect(
         createAcpApp({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir }),
           spawnProcess
         })
       );
