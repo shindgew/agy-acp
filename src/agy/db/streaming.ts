@@ -93,7 +93,8 @@ export class StreamPoller {
   }
 
   get hasUnansweredSystemMessage(): boolean {
-    return this._latestSystemMessageStepIdx > this._lastUserStepIdx && this._latestSystemMessageStepIdx !== -1;
+    // _lastUserStepIdx starts at -1, so `>` already excludes "no system message".
+    return this._latestSystemMessageStepIdx > this._lastUserStepIdx;
   }
 
   /**
@@ -236,6 +237,10 @@ export class StreamPoller {
       latest !== undefined &&
       latest.stepType !== 14 &&
       (latest.status === 3 || latest.status === 6 || latest.status === 7);
+    // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
+    // change. Rebuild derived file history from those rows so completed writes
+    // from a prior poll cannot become the oldText of an earlier historical row.
+    this.translator.resetFileContentsForFullReplay();
     const updates = this.translator.translate(rows);
     const rowsByToolCallId = new Map(rows.map((row) => [toolCallId(row), row]));
     const blockedIds = new Set(rows.filter((row) => row.status === 9).map(toolCallId));

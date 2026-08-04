@@ -23,13 +23,9 @@ export interface EnsureAgyOptions {
 }
 
 function configuredAgyPath(env: NodeJS.ProcessEnv): string | undefined {
-  return optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN);
+  return optional(env.AGY_BIN);
 }
 
-function skipDownload(env: NodeJS.ProcessEnv): boolean {
-  const value = optional(env.AGY_ACP_SKIP_DOWNLOAD) ?? optional(env.AGY_SKIP_DOWNLOAD);
-  return value === "1" || value?.toLowerCase() === "true";
-}
 
 export function defaultInstallBinDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
   const home = optional(env.HOME) ?? optional(env.USERPROFILE);
@@ -107,10 +103,6 @@ export async function ensureAgyInstalled(options: EnsureAgyOptions = {}): Promis
   const configured = configuredAgyPath(env);
   if (configured) {
     warn(`[agy-acp] WARN: configured agy binary is not executable: ${configured}`);
-    return null;
-  }
-  if (skipDownload(env)) {
-    warn("[agy-acp] WARN: agy not found and automatic download is disabled.");
     return null;
   }
 

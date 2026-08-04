@@ -3,9 +3,12 @@
 
 import type { DeleteSessionRequest, DeleteSessionResponse } from "@agentclientprotocol/sdk";
 import type { SessionStore } from "./store.js";
+import type { SessionState } from "./types.js";
+import { cancelQueuedPrompts } from "./cancel.js";
+import { turnsOf, type TurnScheduler } from "./turn-scheduler.js";
 
 export interface SessionDeleteTarget {
-  promptAbort?: AbortController | null;
+  turns?: TurnScheduler;
   agy: { close(): Promise<void> };
 }
 
@@ -22,7 +25,12 @@ export async function handleDeleteSession(
 ): Promise<DeleteSessionResponse> {
   const session = activeSessions.get(params.sessionId);
   activeSessions.delete(params.sessionId);
-  session?.promptAbort?.abort();
+  if (session) {
+    (session as SessionState).closed = true;
+    // Abort running turns and steer reservations before touching the backend.
+    turnsOf(session as SessionState).close();
+    cancelQueuedPrompts(session as SessionState);
+  }
   await session?.agy.close();
   await store.delete(params.sessionId);
   return {};

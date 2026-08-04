@@ -13,12 +13,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-/** Where session bindings live, given a process environment. Exposed as a
+/** Where session bindings live. Exposed as a
  *  function (rather than a module-level constant) so callers — including
- *  tests — control it via the same `env` they already thread through
- *  `configFromEnv`, instead of it being fixed at module-load time. */
-export function defaultStateDir(env: NodeJS.ProcessEnv): string {
-  return optional(env.AGY_ACP_STATE_DIR) ?? path.join(os.homedir(), ".agy-acp-state");
+ *  tests — can control it, instead of it being fixed at module-load time. */
+export function defaultStateDir(): string {
+  return path.join(os.homedir(), ".agy-acp-state");
 }
 
 /** Persisted ACP session binding (fields aligned with session config + setup). */
@@ -167,7 +166,3 @@ function normalizeMessageIdMap(value: unknown): Record<string, string> {
   ) as Record<string, string>;
 }
 
-function optional(value: string | undefined): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
-}

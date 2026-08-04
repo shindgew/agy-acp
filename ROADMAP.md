@@ -84,7 +84,7 @@ Need interactive agy control plane or client terminal protocol beyond DB polling
 
 - [x] [`name`](https://agentclientprotocol.com/rfds/tool-call-name): optional programmatic tool-call name alongside `title` / `kind` (unstable)
 - [ ] [`ContentBlock`](https://agentclientprotocol.com/protocol/v1/content): agent-outbound images / richer blocks when agy produces them
-- [ ] [`plan_update`](https://agentclientprotocol.com/rfds/plan-operations): unstable id-based plan ops (+ `plan_removed`) if a client prefers that over classic `plan`
+- [x] [`plan_update`](https://agentclientprotocol.com/rfds/plan-operations): unstable id-based plan ops (+ `plan_removed`) if a client prefers that over classic `plan`
 
 ### Lower priority / unstable ACP
 
@@ -132,7 +132,7 @@ differs or is incomplete.
 - [x] [`ContentBlock`](https://agentclientprotocol.com/protocol/v2/content): prompt caps `image`, `embeddedContext`
 - [x] [`additionalDirectories`](https://agentclientprotocol.com/rfds/additional-directories): capability advertised
 - [x] [`terminal_update`](https://agentclientprotocol.com/rfds/v2/terminal-output): agent-owned execute terminals + `type: "terminal"` embeds (DB snapshots)
-- [x] [`plan_update`](https://agentclientprotocol.com/protocol/v2/agent-plan): brain plans ([`markdown`](https://agentclientprotocol.com/rfds/v2/plan-variants) preferred, else `items`); no `plan_removed`
+- [x] [`plan_update`](https://agentclientprotocol.com/protocol/v2/agent-plan): brain plans ([`markdown`](https://agentclientprotocol.com/rfds/v2/plan-variants) preferred, else `items`); `plan_removed` supported
 - [x] [`available_commands_update`](https://agentclientprotocol.com/protocol/v2/slash-commands): same curated list + config intercept as v1
 - [x] [`terminal_output_chunk`](https://agentclientprotocol.com/rfds/v2/terminal-output): incremental output while a command is actively running
 - [x] [`tool_call_content_chunk`](https://agentclientprotocol.com/protocol/v2/schema#toolcallcontentchunk): progressive tool call output and content updates

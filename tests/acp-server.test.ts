@@ -9,6 +9,7 @@ import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprot
 import * as acpV2 from "@agentclientprotocol/sdk/experimental/v2";
 import {
   AcpAgent,
+  type AcpAgentOptions,
   buildModelCatalog,
   createAcpApp,
   createAcpV2App,
@@ -22,6 +23,7 @@ import { createConversationDb, insertStep } from "./fixtures/conversation-db.js"
 import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
+import { turnsOf } from "../src/acp/session/turn-scheduler.js";
 import { terminalIdForToolCall } from "../src/acp/terminal/index.js";
 import { parseClientToolCallName } from "../src/acp/initialize.js";
 import type { SessionConfigOption, SessionUpdate } from "@agentclientprotocol/sdk";
@@ -95,7 +97,7 @@ describe("authentication", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       await connection.agent.request(methods.agent.initialize, {
@@ -125,7 +127,7 @@ describe("authentication", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       await connection.agent.request(methods.agent.initialize, {
@@ -171,11 +173,12 @@ describe("authentication", () => {
       }
     }
     const connection = acpClient({ name: "test-client" }).connect(
-      createAcpApp({
-        env: printModeEnv(),
-        spawnProcess: spawnProcess as unknown as SpawnFactory,
-        ptyFactory: { spawn: () => new LogoutPty() } as unknown as PtyFactory
-      })
+      createAcpApp(
+        printModeOptions({
+          spawnProcess: spawnProcess as unknown as SpawnFactory,
+          ptyFactory: { spawn: () => new LogoutPty() } as unknown as PtyFactory
+        })
+      )
     );
     try {
       await connection.agent.request(methods.agent.initialize, {
@@ -297,7 +300,8 @@ describe("edit fs write-through (full ACP round trip)", () => {
         .onNotification(methods.client.session.update, () => {});
 
       const connection = testClient.connect(createAcpApp({
-        env: { AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir },
+        conversationsDir: dir,
+        stateDir: dir,
         spawnProcess: ((_command: string, args: string[]) => {
           if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
           return new FakeProcess([]);
@@ -342,7 +346,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAcpApp({
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-1", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello" }) }
         ])
@@ -379,7 +383,7 @@ describe("session prompt", () => {
           updates.push(ctx.params.update);
         });
       const connection = client.connect(createAcpApp({
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-2", [
           {
             idx: 1,
@@ -430,7 +434,7 @@ describe("session/load and session/resume", () => {
   it("replays prior conversation history on load, but not on resume, after a simulated restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-persisted", [
           {
             idx: 1,
@@ -542,7 +546,7 @@ describe("session/load and session/resume", () => {
   it("lists persisted sessions after a restart", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-list", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "listed" }) }
         ])
@@ -592,7 +596,7 @@ describe("session/load and session/resume", () => {
   it("deletes a persisted session via session/delete (ACP v1 & v2)", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-delete-1", [
           { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "world" }) }
         ])
@@ -657,7 +661,7 @@ describe("session/load and session/resume", () => {
   it("rejects loading a session that was never persisted", async () => {
     await withConversationsDir(async (dir) => {
       const connection = acpClient({ name: "test-client" }).connect(createAcpApp({
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "unused", [])
       }));
       try {
@@ -774,11 +778,6 @@ describe("buildModelCatalog", () => {
 describe("model discovery cache", () => {
   it("reuses discovered models in memory and across agent instances", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-"));
-    const env = printModeEnv({
-      NODE_ENV: "test",
-      AGY_ACP_MODEL_CACHE: "1",
-      AGY_ACP_STATE_DIR: stateDir
-    });
     let modelCalls = 0;
     const spawnProcess = (_command: string, args: string[]) => {
       if (args[0] === "models") {
@@ -787,20 +786,28 @@ describe("model discovery cache", () => {
       }
       return new FakeProcess(["ok"]);
     };
-    const config = configFromEnv({ cwd: "/repo", env });
+    const config = configFromEnv({ cwd: "/repo" });
     type ModelCacheAgent = {
       modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
     };
 
     try {
-      const first = new AcpAgent({ env, spawnProcess: spawnProcess as unknown as SpawnFactory });
+      const first = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
       const firstModels = await (first as unknown as ModelCacheAgent).modelOptionsForConfig(config);
       const secondModels = await (first as unknown as ModelCacheAgent).modelOptionsForConfig(config);
       expect(firstModels).toEqual(secondModels);
       expect(modelCalls).toBe(1);
 
       await waitFor(() => fs.existsSync(path.join(stateDir, "models.json")));
-      const restored = new AcpAgent({ env, spawnProcess: spawnProcess as unknown as SpawnFactory });
+      const restored = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
       await expect(
         (restored as unknown as ModelCacheAgent).modelOptionsForConfig(config)
       ).resolves.toEqual(firstModels);
@@ -814,14 +821,14 @@ describe("model discovery cache", () => {
 describe("active session retention", () => {
   it("evicts and closes the least recently used inactive session", async () => {
     const agent = new AcpAgent({
-      env: printModeEnv({ AGY_ACP_MAX_ACTIVE_SESSIONS: "2" })
+      maxActiveSessions: 2
     });
     const close1 = vi.fn(async () => {});
     const close2 = vi.fn(async () => {});
     const close3 = vi.fn(async () => {});
     const session = (id: string, close: () => Promise<void>) => ({
       sessionId: id,
-      activePrompt: false,
+      promptQueue: [],
       agy: { close }
     });
     type SessionRetentionAgent = {
@@ -838,6 +845,35 @@ describe("active session retention", () => {
     expect(close1).not.toHaveBeenCalled();
     expect(close2).toHaveBeenCalledOnce();
     expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s2")).toThrow("Unknown session");
+  });
+
+  it("does not evict a session reserved by a steer", async () => {
+    const agent = new AcpAgent({
+      maxActiveSessions: 2
+    });
+    const close1 = vi.fn(async () => {});
+    const close2 = vi.fn(async () => {});
+    const close3 = vi.fn(async () => {});
+    const session = (id: string, close: () => Promise<void>, reserved = false) => {
+      const state = { sessionId: id, promptQueue: [], agy: { close } };
+      if (reserved) turnsOf(state as any).reserveSteer();
+      return state;
+    };
+    type SessionRetentionAgent = {
+      registerSession(id: string, session: unknown): Promise<void>;
+      requireSession(id: string): unknown;
+    };
+    const retention = agent as unknown as SessionRetentionAgent;
+
+    await retention.registerSession("s1", session("s1", close1, true));
+    await retention.registerSession("s2", session("s2", close2));
+    await retention.registerSession("s3", session("s3", close3));
+
+    expect(close1).not.toHaveBeenCalled();
+    expect(close2).toHaveBeenCalledOnce();
+    expect(close3).not.toHaveBeenCalled();
+    expect(() => retention.requireSession("s1")).not.toThrow();
     expect(() => retention.requireSession("s2")).toThrow("Unknown session");
   });
 });
@@ -858,7 +894,7 @@ describe("session modes and config option sync", () => {
       }
     );
     const connection = client.connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -948,7 +984,7 @@ describe("session modes and config option sync", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -982,7 +1018,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       await connection.agent.request(methods.agent.session.new, {
@@ -1022,7 +1058,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -1085,7 +1121,7 @@ describe("available_commands_update and slash commands", () => {
       }
     );
     const connection = client.connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -1131,7 +1167,7 @@ describe("session model config", () => {
       .onNotification(methods.client.session.update, (ctx) => {
         updates.push(ctx.params.update as { content: { text: string } });
       });
-    const connection = client.connect(createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory }));
+    const connection = client.connect(createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory })));
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
         cwd: "/repo",
@@ -1228,7 +1264,7 @@ describe("session model config", () => {
       return new FakeProcess(["ok"]);
     };
     const connection = acpClient({ name: "test-client" }).connect(
-      createAcpApp({ env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory })
+      createAcpApp(printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory }))
     );
     try {
       const session = await connection.agent.request(methods.agent.session.new, {
@@ -1289,7 +1325,7 @@ describe("ACP v2 (experimental draft)", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-1", [
             { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "hello v2" }) }
           ])
@@ -1350,7 +1386,7 @@ describe("ACP v2 (experimental draft)", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-slash-id", [
             { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) }
           ])
@@ -1416,7 +1452,7 @@ describe("ACP v2 (experimental draft)", () => {
       );
       const connection = client.connect(
         createAcpV2App({
-          env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+          ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
           spawnProcess
         })
       );
@@ -1456,7 +1492,7 @@ describe("ACP v2 (experimental draft)", () => {
   it("replays a persisted v2 user message from its live message ID", async () => {
     await withConversationsDir(async (dir) => {
       const appOptions = {
-        env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
         spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-replay", [
           { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "hi" }) },
           {
@@ -1601,9 +1637,12 @@ describe("ACP v2 (experimental draft)", () => {
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update.sessionUpdate).toBe("plan_update");
     expect(v2Update.plan).toEqual({
-      type: "markdown",
+      type: "items",
       planId: "file:/tmp/brain/plan.md",
-      content: markdown
+      entries: [
+        { content: "One", priority: "high", status: "pending" },
+        { content: "Two", priority: "high", status: "completed" }
+      ]
     });
 
     const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
@@ -1612,11 +1651,34 @@ describe("ACP v2 (experimental draft)", () => {
     expect(v1Wire._meta).toBeUndefined();
   });
 
+  it("maps classic plan to v2 plan_update markdown when entries is empty", () => {
+    const markdown = "# Plan\n\nNo items\n";
+    const update = {
+      sessionUpdate: "plan",
+      entries: [],
+      _meta: {
+        "agy-acp/planId": "file:/tmp/brain/plan.md",
+        "agy-acp/planPath": "/tmp/brain/plan.md",
+        "agy-acp/planMarkdown": markdown
+      }
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "markdown",
+        planId: "file:/tmp/brain/plan.md",
+        content: markdown
+      }
+    });
+  });
+
   it("maps classic plan to v2 plan_update items without markdown meta", () => {
     const update = {
       sessionUpdate: "plan",
-      entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
-    } as SessionUpdate;
+      entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
+    } as unknown as SessionUpdate;
 
     const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
     expect(v2Update).toEqual({
@@ -1624,9 +1686,33 @@ describe("ACP v2 (experimental draft)", () => {
       plan: {
         type: "items",
         planId: "agy-plan",
-        entries: [{ content: "Ship it", priority: "medium", status: "pending" }]
+        entries: [{ id: "entry_f323ded6", content: "Ship it", priority: "medium", status: "pending" }]
       }
     });
+  });
+
+  it("maps plan_removed to v2 plan_removed update with planId", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v2Update = sessionUpdateToV2(update) as Record<string, unknown>;
+    expect(v2Update).toEqual({
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    });
+  });
+
+  it("translates plan_removed to empty plan on v1 wire", () => {
+    const update = {
+      sessionUpdate: "plan_removed",
+      planId: "file:/tmp/brain/plan.md"
+    } as SessionUpdate;
+
+    const v1Wire = sessionUpdateToV1(update) as Record<string, unknown>;
+    expect(v1Wire.sessionUpdate).toBe("plan");
+    expect(v1Wire.entries).toEqual([]);
   });
 
   it("expands execute tool calls into terminal_update + tool_call_update", () => {
@@ -2124,11 +2210,15 @@ describe("ACP v2 (experimental draft)", () => {
 const TEST_MODELS_OUTPUT =
   "gemini-3.5-flash-medium\ngemini-3.5-flash-high\nclaude-opus-4-6-thinking\nclaude-sonnet-4-6\n";
 
-function printModeEnv(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  return { AGY_ACP_MODEL_CACHE: "0", ...overrides, AGY_ACP_INTERACTIVE_PERMISSIONS: "0" };
+function printModeOptions(overrides: AcpAgentOptions = {}): AcpAgentOptions {
+  return {
+    argv: ["--no-interactive-permissions"],
+    stateDir: overrides.stateDir ?? fs.mkdtempSync(path.join(os.tmpdir(), "agy-test-state-")),
+    ...overrides
+  };
 }
 
-async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
   while (!predicate()) {
     if (Date.now() - start > timeoutMs) {
@@ -2139,7 +2229,7 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void
 }
 
 /** Run `fn` with a throwaway conversations directory, cleaned up afterwards. */
-async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
+export async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-test-"));
   try {
     await fn(dir);
@@ -2154,7 +2244,7 @@ async function withConversationsDir(fn: (dir: string) => Promise<void>): Promise
  * database (as agy itself would) before exiting, so the ACP server's poller
  * picks them up.
  */
-function spawnAgyWritingConversation(
+export function spawnAgyWritingConversation(
   dir: string,
   conversationId: string,
   steps: Parameters<typeof insertStep>[1][]
@@ -2170,7 +2260,7 @@ function spawnAgyWritingConversation(
   }) as unknown as SpawnFactory;
 }
 
-class FakeProcess extends EventEmitter {
+export class FakeProcess extends EventEmitter {
   stdin = new Writable({ write: (_chunk, _encoding, callback) => callback() });
   stdout: Readable;
   stderr: Readable;
@@ -2223,7 +2313,7 @@ describe("tool call name field (gh#52)", () => {
       if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
       return new FakeProcess(["ok"]);
     };
-    const options = { env: printModeEnv(), spawnProcess: spawnProcess as unknown as SpawnFactory };
+    const options = printModeOptions({ spawnProcess: spawnProcess as unknown as SpawnFactory });
     const connectionV1 = acpClient({ name: "test-client" }).connect(createAcpApp(options));
     const connectionV2 = acpV2.client({ name: "test-client" }).connect(createAcpV2App(options));
 
@@ -2257,7 +2347,7 @@ describe("tool call name field (gh#52)", () => {
         })
         .connect(
           createAcpV2App({
-            env: printModeEnv({ AGY_ACP_CONVERSATIONS_DIR: dir, AGY_ACP_STATE_DIR: dir }),
+            ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
             spawnProcess: spawnAgyWritingConversation(dir, "v2-name-session", [
               {
                 idx: 1,

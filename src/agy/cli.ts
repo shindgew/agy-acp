@@ -1,4 +1,5 @@
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, existsSync, statSync } from "node:fs";
@@ -9,13 +10,23 @@ import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
 import type { StepRow } from "./db/types.js";
-import { revertEditToolCall } from "./edit/revert.js";
+import { diffBlocks, revertEditToolCall, type DiffBlock } from "./edit/revert.js";
 import {
   primeEditReadThroughClient,
   routeEditThroughClient,
   writeEditThroughClient,
   type ClientFileSystem
 } from "./edit/bridge.js";
+import {
+  buildReconcileEditUpdate,
+  observeEditedPaths,
+  reconcileWorkingTree,
+  snapshotWorkingTree,
+  toDisplayPath,
+  type ReportedBlock,
+  type ReportedContent,
+  type WorkingTreeSnapshot
+} from "./edit/reconcile.js";
 import {
   canBridgeInteraction,
   interactionKeys,
@@ -42,6 +53,62 @@ function permissionSignature(row: StepRow): string {
   const p = row.permission;
   return p ? `${p.kind}\u0000${p.value}\u0000${p.decision}` : "none";
 }
+
+/**
+ * agy tools whose diff blocks carry the whole file body rather than a snippet,
+ * so disk is accounted for exactly when it equals the reported content. An
+ * unrecognized name is treated as a targeted replacement, which fails closed.
+ */
+const WHOLE_FILE_EDIT_TOOLS = new Set(["write_to_file"]);
+
+/** True when the tool-call's diff blocks carry whole file bodies, not snippets. */
+function wholeFileEdit(toolCall: SessionUpdate): boolean {
+  const name = (toolCall as unknown as { name?: string }).name;
+  return name !== undefined && WHOLE_FILE_EDIT_TOOLS.has(name);
+}
+
+/**
+ * What a tool-call's diff reported, per absolute path (targets may be
+ * session-relative). The blocks let the reconciler tell the change this update
+ * accounts for apart from one that reached the file before it was polled.
+ */
+function reportedContents(cwd: string, toolCall: SessionUpdate): ReportedContent[] {
+  const wholeFile = wholeFileEdit(toolCall);
+  const byPath = new Map<string, Array<{ oldText: string | null; newText: string }>>();
+  for (const { path: target, oldText, newText } of diffBlocks(toolCall)) {
+    const abs = path.resolve(cwd, target);
+    const blocks = byPath.get(abs);
+    if (blocks) blocks.push({ oldText, newText });
+    else byPath.set(abs, [{ oldText, newText }]);
+  }
+  return [...byPath].map(([filePath, blocks]) => ({ path: filePath, blocks, wholeFile }));
+}
+
+/**
+ * What a completed revert restored, per absolute path. A rejected creation
+ * left nothing on disk and the client rejected it, so the path is forgotten
+ * unconditionally. Anything else is attributed by the *reverse* of the
+ * restored blocks: the client knows the edit was undone, but a restored block
+ * says nothing about the rest of the file, so an unrelated change that landed
+ * next to the edit before the reject still reaches reconciliation.
+ */
+function revertedContents(cwd: string, toolCall: SessionUpdate, restored: DiffBlock[]): ReportedContent[] {
+  const wholeFile = wholeFileEdit(toolCall);
+  const byPath = new Map<string, { created: boolean; blocks: ReportedBlock[] }>();
+  for (const { path: target, oldText, newText } of restored) {
+    const abs = path.resolve(cwd, target);
+    const entry = byPath.get(abs) ?? { created: false, blocks: [] };
+    if (oldText === null) entry.created = true;
+    else entry.blocks.push({ oldText: newText, newText: oldText });
+    byPath.set(abs, entry);
+  }
+  return [...byPath].map(([filePath, { created, blocks }]) =>
+    created ? { path: filePath } : { path: filePath, wholeFile, blocks }
+  );
+}
+
+/** How many unsupported changes to name individually in the warning line. */
+const UNSUPPORTED_DETAIL_LIMIT = 10;
 
 export type SpawnedProcess = ChildProcessWithoutNullStreams;
 
@@ -124,6 +191,8 @@ export interface AgyCliConfigInput {
   additionalDirectories?: string[];
   env?: NodeJS.ProcessEnv;
   argv?: string[];
+  /** Override the conversations directory (defaults to ~/.gemini/antigravity-cli/conversations). */
+  conversationsDir?: string;
 }
 
 export class AgyCliError extends Error {
@@ -298,19 +367,27 @@ export class AgyCliSession {
     elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
     this.#lastPromptUserStepIdxs = [];
-    if (this.config.interactivePermissions) {
-      if (!onPermission) throw new Error("interactive permissions require a permission callback");
-      return this.runInteractivePrompt(prompt, onUpdate, onPermission, fsBridge, elicitationCap);
+    if (this.config.interactivePermissions && !onPermission) {
+      throw new Error("interactive permissions require a permission callback");
     }
-    const command = this.commandForPrompt(prompt);
+    this.#cancelled = false;
+    this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
     try {
-      return await this.runPromptCommand(command, prompt, onUpdate);
-    } catch (error) {
-      if (this.shouldInstallAfterError(error)) {
-        await this.installAgy();
-        return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate);
+      if (this.config.interactivePermissions) {
+        return await this.runInteractivePrompt(prompt, onUpdate, onPermission!, fsBridge, elicitationCap);
       }
-      throw error;
+      const command = this.commandForPrompt(prompt);
+      try {
+        return await this.runPromptCommand(command, prompt, onUpdate, fsBridge);
+      } catch (error) {
+        if (this.shouldInstallAfterError(error)) {
+          await this.installAgy();
+          return await this.runPromptCommand(this.commandForPrompt(prompt), prompt, onUpdate, fsBridge);
+        }
+        throw error;
+      }
+    } finally {
+      this.#cancelTurn = undefined;
     }
   }
 
@@ -321,8 +398,19 @@ export class AgyCliSession {
     fsBridge?: ClientFileSystem,
     elicitationCap?: ClientElicitationCapability
   ): Promise<PromptOutcome> {
-    this.#cancelled = false;
-    this.#cancelWait = new Promise((resolve) => { this.#cancelTurn = resolve; });
+    // Snapshot the pre-edit working tree so edits agy makes outside recognized
+    // structured-edit tool-calls (shell commands, unrecognized payloads) still
+    // get reflected through ACP. Emitting the synthetic session/update needs no
+    // client fs capability, so do this for every client (v1 and v2); the client
+    // write-through is layered on later only when a bridge is available.
+    let editBaseline: WorkingTreeSnapshot | null = null;
+    try {
+      editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
+    } catch {
+      editBaseline = null;
+    }
+    const observeReported = (reported: ReportedContent[]): Promise<void> =>
+      this.observeReported(editBaseline, reported);
     const signature = JSON.stringify([this.config.model, this.config.effort, this.config.mode]);
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
@@ -527,33 +615,56 @@ export class AgyCliSession {
           // live gate above and agy applied it. Either way, if the client can
           // take the write itself, hand it off so its native diff/review UI
           // (e.g. Zed's Review Changes panel) tracks it.
-          if (fsBridge) {
-            const routed = gatedIds.has(id)
-              // Pre-edit state was already primed above (race-free) — just
-              // hand over the final content, no local revert needed.
-              ? await this.raceTurnCallback(writeEditThroughClient(toolCall, fsBridge), deadline)
-              // No prior gate — this is the only chance we get, so fall back
-              // to revert-then-replay (races the client's file watcher if
-              // the file happens to be open there, but it's the best we can
-              // do after the fact).
-              : await this.raceTurnCallback(routeEditThroughClient(toolCall, fsBridge), deadline);
-            if (routed === true) continue;
-          }
-          if (gatedIds.has(id)) {
-            // Already approved through the live gate above and the client
-            // has no write-through — nothing more to do here.
-            continue;
-          }
+          //
+          // Record what disk holds for the reported paths before any
+          // write-through revert/replay, so reconciliation cannot mistake the
+          // client's own write (or the intermediate revert) for an unreflected
+          // change. Paths whose content this update no longer accounts for are
+          // left for reconciliation to report.
+          await observeReported(reportedContents(this.config.cwd, toolCall));
+          let restored: DiffBlock[] = [];
+          try {
+            if (fsBridge) {
+              const routed = gatedIds.has(id)
+                // Pre-edit state was already primed above (race-free) — just
+                // hand over the final content, no local revert needed.
+                ? await this.raceTurnCallback(writeEditThroughClient(toolCall, fsBridge), deadline)
+                // No prior gate — this is the only chance we get, so fall back
+                // to revert-then-replay (races the client's file watcher if
+                // the file happens to be open there, but it's the best we can
+                // do after the fact).
+                : await this.raceTurnCallback(routeEditThroughClient(toolCall, fsBridge), deadline);
+              if (routed === true) continue;
+            }
+            if (gatedIds.has(id)) {
+              // Already approved through the live gate above and the client
+              // has no write-through — nothing more to do here.
+              continue;
+            }
 
-          // Genuinely ungated (no live agy gate ever asked) and no client
-          // write-through available — offer local review: keep is a no-op,
-          // reject restores prior text.
-          const choice = await this.raceTurnCallback(
-            onPermission(toolCall, { toolName: interaction.toolName })
-          );
-          deadline = Date.now() + timeoutMs;
-          if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
-          if (normalizePermissionChoice(choice) === "agy-reject-once") revertEditToolCall(toolCall);
+            // Genuinely ungated (no live agy gate ever asked) and no client
+            // write-through available — offer local review: keep is a no-op,
+            // reject restores prior text.
+            const choice = await this.raceTurnCallback(
+              onPermission(toolCall, { toolName: interaction.toolName })
+            );
+            deadline = Date.now() + timeoutMs;
+            if (this.#cancelled || choice === "cancelled") { this.#cancelled = true; break; }
+            if (normalizePermissionChoice(choice) === "agy-reject-once") {
+              restored = revertEditToolCall(toolCall);
+            }
+          } finally {
+            // A reject put the pre-edit text back on disk; that restoration is
+            // the answer the client already has, so re-record it rather than
+            // reporting it again as an unstructured change. Only the blocks
+            // the revert actually restored, and only through the reverse
+            // attribution: a diverged block it declined to touch, or an
+            // unrelated change next to the edit, still holds content the
+            // client has not seen.
+            if (restored.length > 0) {
+              await observeReported(revertedContents(this.config.cwd, toolCall, restored));
+            }
+          }
         }
         if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
           // Background work can finish after the TUI looks idle. Stay on this
@@ -570,6 +681,11 @@ export class AgyCliSession {
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
       }
+      if (editBaseline && !this.#cancelled) {
+        // The final idle marker has already proved that agy completed. Do not
+        // reuse its inactivity deadline for client notification/write-through.
+        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
+      }
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
     } catch (error) {
       failed = true;
@@ -581,7 +697,6 @@ export class AgyCliSession {
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#cancelled && !failed) await this.stopPty();
-      this.#cancelTurn = undefined;
     }
   }
 
@@ -604,18 +719,116 @@ export class AgyCliSession {
     }
   }
 
+  /**
+   * Record the on-disk content of the paths a reported edit covers, so
+   * end-of-turn reconciliation only emits changes the client has *not* been
+   * told about. Best effort: a snapshot we fail to refresh at worst re-reports
+   * a change the client already has, which is preferable to failing the turn.
+   * (See {@link ReportedContent} for how divergence is handled.)
+   */
+  private async observeReported(
+    baseline: WorkingTreeSnapshot | null,
+    reported: ReportedContent[]
+  ): Promise<void> {
+    if (!baseline) return;
+    try {
+      await observeEditedPaths(baseline, reported);
+    } catch (error) {
+      console.error(`[agy-acp] WARN: could not record reported edit state: ${(error as Error).message}`);
+    }
+  }
+
+  /**
+   * After a turn, diff the working tree against what the client has been told
+   * (see {@link observeReportedEdit}) and reflect any change agy made that
+   * never surfaced as a recognized structured edit (shell edits, unrecognized
+   * payloads) through ACP: emit a synthetic edit update for every client, and
+   * additionally hand the write to the client when it advertises fs
+   * capabilities. Discovery failures are best-effort (logged); notification
+   * failures propagate so the caller does not go idle after a dropped update.
+   * Changes that can't be shown as a text diff (binary/oversized/deletions,
+   * files whose pre-turn content was never captured) are reported, not
+   * dropped (#76).
+   */
+  private async reflectUnstructuredEdits(
+    baseline: WorkingTreeSnapshot,
+    fsBridge: ClientFileSystem | undefined,
+    onUpdate: (update: SessionUpdate) => Promise<void>
+  ): Promise<void> {
+    let reflected: Awaited<ReturnType<typeof reconcileWorkingTree>>["reflected"];
+    let unsupported: Awaited<ReturnType<typeof reconcileWorkingTree>>["unsupported"];
+    try {
+      ({ reflected, unsupported } = await reconcileWorkingTree(baseline));
+    } catch (error) {
+      // Filesystem scan is best-effort — a transient stat failure shouldn't
+      // fail the whole turn after agy already finished.
+      console.error(`[agy-acp] WARN: working-tree reconciliation failed: ${(error as Error).message}`);
+      return;
+    }
+    // UUID (not a session-local counter): session/load and session/resume rebuild
+    // AgyCliSession via startSession, which would reset a counter and reuse IDs.
+    const turnToken = randomUUID();
+    let index = 0;
+    for (const edit of reflected) {
+      if (this.#cancelled) return;
+      const update = buildReconcileEditUpdate(edit, index++, this.config.cwd, turnToken);
+      // Propagate onUpdate / write-through failures: the ordinary update loop
+      // does not swallow them, and going idle after a dropped edit update
+      // would leave the client inconsistent with disk.
+      const delivered = await this.raceTurnCallback(onUpdate(update));
+      if (delivered === "cancelled") return;
+      if (fsBridge) {
+        // routeEditThroughClient swallows RPC errors and returns false — treat
+        // that as a hard failure here so we do not report end_turn after a
+        // promised client handoff that never completed. Once routing starts it
+        // must finish even if cancellation arrives, because it temporarily
+        // restores pre-edit text on disk while the client snapshots it.
+        const routed = await routeEditThroughClient(update, fsBridge);
+        if (routed !== true) {
+          throw new Error(
+            `client filesystem write-through failed for reconciled edit ${toDisplayPath(edit.path, this.config.cwd)}`
+          );
+        }
+      }
+    }
+    if (unsupported.length > 0) {
+      // One removed ignore rule can expose a whole directory; name a bounded
+      // sample instead of a line with thousands of paths on it.
+      const named = unsupported
+        .slice(0, UNSUPPORTED_DETAIL_LIMIT)
+        .map((change) => `${toDisplayPath(change.path, this.config.cwd)} (${change.reason})`)
+        .join(", ");
+      const rest = unsupported.length - Math.min(unsupported.length, UNSUPPORTED_DETAIL_LIMIT);
+      console.error(
+        `[agy-acp] WARN: ${unsupported.length} filesystem change(s) not reflected through ACP: ${named}` +
+          (rest > 0 ? `, and ${rest} more` : "")
+      );
+    }
+  }
+
   private async runPromptCommand(
     command: string[],
     prompt: string,
-    onUpdate: (update: SessionUpdate) => Promise<void>
+    onUpdate: (update: SessionUpdate) => Promise<void>,
+    fsBridge?: ClientFileSystem
   ): Promise<PromptOutcome> {
     const [program, ...args] = command;
-    this.#cancelled = false;
 
     // Snapshot existing conversation ids *before* spawning, so the file agy
     // creates for a fresh prompt is guaranteed to look "new" once it appears —
     // spawning after the snapshot would risk racing agy's own DB creation.
     const snapshot = this.#conversationId === null ? conversationSnapshot(this.config.conversationsDir) : null;
+
+    // Same working-tree reconciliation as the interactive path: print-mode
+    // turns (`--dangerously-skip-permissions`, `--no-interactive-permissions`,
+    // etc.) still need shell / unrecognized edits reflected through ACP.
+    let editBaseline: WorkingTreeSnapshot | null = null;
+    try {
+      editBaseline = await snapshotWorkingTree([this.config.cwd, ...this.config.additionalDirectories]);
+    } catch {
+      editBaseline = null;
+    }
+    if (this.#cancelled) return { stopReason: "cancelled" };
 
     let child: SpawnedProcess;
     try {
@@ -624,6 +837,12 @@ export class AgyCliSession {
       throw this.errorForSpawnFailure(command, error as NodeJS.ErrnoException);
     }
     this.#process = child;
+    // Cancel may have landed in the gap between snapshot and spawn assignment.
+    if (this.#cancelled) {
+      if (process.platform === "win32") child.kill();
+      else child.kill("SIGINT");
+      return { stopReason: "cancelled" };
+    }
     const exitPromise = waitForExit(child);
     const errorPromise = once(child, "error") as Promise<[NodeJS.ErrnoException]>;
     const stderrChunks: Buffer[] = [];
@@ -651,6 +870,14 @@ export class AgyCliSession {
       const pollOnce = async () => {
         for (const update of poller.poll()) {
           await onUpdate(update);
+          // Record what disk holds for the reported paths, so end-of-turn
+          // reconciliation only reports what the client has *not* been told.
+          // Only completed edits: pending/failed lifecycle updates describe
+          // proposed content that may never land.
+          const rawUpdate = update as unknown as { status?: string };
+          if (isEditToolCall(update) && rawUpdate.status === "completed") {
+            await this.observeReported(editBaseline, reportedContents(this.config.cwd, update));
+          }
         }
       };
 
@@ -708,14 +935,18 @@ export class AgyCliSession {
             );
           }
           await sleep(POLL_INTERVAL_MS);
-          for (const update of poller.poll()) {
-            await onUpdate(update);
-          }
+          // pollOnce (not a bare poll) so edits from background tasks are also
+          // observed into the reconciliation baseline.
+          await pollOnce();
           if (poller.revision !== seenRevision) {
             seenRevision = poller.revision;
             deadline = Date.now() + timeoutMs;
           }
         }
+      }
+
+      if (editBaseline && !this.#cancelled) {
+        await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
 
       return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
@@ -798,21 +1029,24 @@ export class AgyCliSession {
   }
 
   async cancel(): Promise<void> {
+    // Always mark cancelled first: a print-mode turn may still be in its
+    // pre-spawn working-tree snapshot, or draining background task rows after
+    // the child already exited — both loops only check `#cancelled` (the
+    // process handle alone is no longer enough to interrupt them).
+    this.#cancelled = true;
     if (this.#cancelTurn) {
-      this.#cancelled = true;
       this.#cancelTurn();
-      if (this.#pty) await this.stopPty();
-      return;
+      // Interactive turns have a PTY to stop. Print turns also have a cancel
+      // waiter now, but must continue below and signal their child process.
+      if (this.#pty) {
+        await this.stopPty();
+        return;
+      }
     }
     if (this.#pty) {
-      this.#cancelled = true;
       await this.stopPty();
       return;
     }
-    // Always mark cancelled first: print-mode may still be draining background
-    // task rows after the child has already exited, and that loop only checks
-    // `#cancelled` (the process handle alone is no longer enough to interrupt).
-    this.#cancelled = true;
     const child = this.#process;
     if (!child || child.exitCode !== null) {
       return;
@@ -1018,9 +1252,6 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const argv = input.argv ?? [];
 
   let sandbox = true;
-  if (env.AGY_ACP_SANDBOX === "false" || env.AGY_ACP_NO_SANDBOX) {
-    sandbox = false;
-  }
   if (argv.includes("--no-sandbox")) {
     sandbox = false;
   }
@@ -1029,21 +1260,16 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   }
 
   let skipPermissions = false;
-  if (env.AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS || argv.includes("--dangerously-skip-permissions")) {
+  if (argv.includes("--dangerously-skip-permissions")) {
     skipPermissions = true;
   }
   // Interactive permission forwarding is the normal execution path. The
   // explicit dangerous bypass selects print mode because there is no
   // permission request to forward when agy auto-approves everything.
-  const interactiveSetting = env.AGY_ACP_INTERACTIVE_PERMISSIONS?.trim().toLowerCase();
-  const interactiveDisabled = interactiveSetting === "0" || interactiveSetting === "false" || argv.includes("--no-interactive-permissions");
+  const interactiveDisabled = argv.includes("--no-interactive-permissions");
   const interactivePermissions = !skipPermissions && !interactiveDisabled;
 
   let mode: SessionModeId = "default";
-  const modeFromEnv = optional(env.AGY_ACP_MODE);
-  if (modeFromEnv && isSessionModeId(modeFromEnv)) {
-    mode = modeFromEnv;
-  }
   const modeFlagIdx = argv.indexOf("--mode");
   if (modeFlagIdx >= 0) {
     const modeArg = argv[modeFlagIdx + 1];
@@ -1055,7 +1281,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   return {
     cwd: input.cwd,
     additionalDirectories: input.additionalDirectories ?? [],
-    agyPath: optional(env.AGY_ACP_AGY_BIN) ?? optional(env.AGY_BIN) ?? "agy",
+    agyPath: optional(env.AGY_BIN) ?? "agy",
     model: undefined,
     effort: undefined,
     mode,
@@ -1071,7 +1297,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     modelList: [],
     discoverModels: true,
     modelListTimeoutMs: DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
-    conversationsDir: optional(env.AGY_ACP_CONVERSATIONS_DIR) ?? DEFAULT_CONVERSATIONS_DIR,
+    conversationsDir: input.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR,
     env
   };
 }

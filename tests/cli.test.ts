@@ -1013,6 +1013,138 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("reports the surviving content when a rejected edit's revert cannot restore it", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-conv-"));
+    const targetFile = path.join(dir, "a.txt");
+    fs.writeFileSync(targetFile, "before", "utf8");
+    const rawInputJson = JSON.stringify({
+      TargetFile: targetFile,
+      TargetContent: "before",
+      ReplacementContent: "structured"
+    });
+    const pty = new FakePty(() => {
+      // agy applied the structured edit, then a shell command overwrote it, so
+      // the revert has nothing it can safely restore.
+      fs.writeFileSync(targetFile, "structured", "utf8");
+      fs.writeFileSync(targetFile, "shell final", "utf8");
+      const db = createConversationDb(conversations, "diverged-reject");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+          })
+        })
+      });
+      db.close();
+    });
+    const session = new AgyCliSession(
+      {
+        ...defaultConfig(),
+        cwd: dir,
+        conversationsDir: conversations,
+        interactivePermissions: true,
+        printTimeout: "3s"
+      },
+      undefined,
+      { spawn: () => { pty.start(); return pty; } } as PtyFactory
+    );
+    const updates: SessionUpdate[] = [];
+    const result = session.prompt("edit it", async (update) => { updates.push(update); }, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(conversations, "diverged-reject.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    // Rejecting could not undo the diverged file, so its surviving content is
+    // reported instead of being suppressed as already reflected.
+    const reconciled = updates.filter((update) =>
+      String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: targetFile, oldText: "before", newText: "shell final" }]
+    });
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("shell final");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(conversations, { recursive: true, force: true });
+  });
+
+  it("reports an unrelated change that survives a rejected edit's revert", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-conv-"));
+    const targetFile = path.join(dir, "a.txt");
+    fs.writeFileSync(targetFile, "alpha\nOLD\nomega\n", "utf8");
+    const rawInputJson = JSON.stringify({
+      TargetFile: targetFile,
+      TargetContent: "OLD",
+      ReplacementContent: "NEW"
+    });
+    const pty = new FakePty(() => {
+      // agy applied the snippet replacement, then a formatter rewrote another
+      // section before the tool-call was polled.
+      fs.writeFileSync(targetFile, "alpha\nNEW\nomega\n", "utf8");
+      fs.writeFileSync(targetFile, "ALPHA\nNEW\nomega\n", "utf8");
+      const db = createConversationDb(conversations, "reject-keeps-shell-change");
+      insertStep(db, {
+        idx: 1,
+        stepType: 5,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+          })
+        })
+      });
+      db.close();
+    });
+    const session = new AgyCliSession(
+      {
+        ...defaultConfig(),
+        cwd: dir,
+        conversationsDir: conversations,
+        interactivePermissions: true,
+        printTimeout: "3s"
+      },
+      undefined,
+      { spawn: () => { pty.start(); return pty; } } as PtyFactory
+    );
+    const updates: SessionUpdate[] = [];
+    const result = session.prompt("edit it", async (update) => { updates.push(update); }, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(conversations, "reject-keeps-shell-change.db"));
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 0);
+      return "reject-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    // The revert restored only the reported snippet; the formatter's change
+    // survived and must still be reported, not folded into the rejection.
+    expect(fs.readFileSync(targetFile, "utf8")).toBe("ALPHA\nOLD\nomega\n");
+    const reconciled = updates.filter((update) =>
+      String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+    );
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      kind: "edit",
+      status: "completed",
+      content: [{ type: "diff", path: targetFile, oldText: "alpha\nOLD\nomega\n", newText: "ALPHA\nOLD\nomega\n" }]
+    });
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(conversations, { recursive: true, force: true });
+  });
+
   it("leaves an already-applied edit in place when the client keeps it", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const targetFile = path.join(dir, "target.txt");
@@ -1260,25 +1392,12 @@ describe("configFromEnv", () => {
     expect(config.interactivePermissions).toBe(true);
   });
 
-  it("configures mode from argv and env", () => {
+  it("configures mode from argv", () => {
     expect(configFromEnv({ cwd: "/repo" }).mode).toBe("default");
     expect(configFromEnv({ cwd: "/repo", argv: ["--mode", "accept-edits"] }).mode).toBe("accept-edits");
-    expect(
-      configFromEnv({
-        cwd: "/repo",
-        env: { AGY_ACP_MODE: "plan" }
-      }).mode
-    ).toBe("plan");
-    expect(
-      configFromEnv({
-        cwd: "/repo",
-        env: { AGY_ACP_MODE: "plan" },
-        argv: ["--mode", "accept-edits"]
-      }).mode
-    ).toBe("accept-edits");
   });
 
-  it("configures sandbox and skipPermissions based on argv and env", () => {
+  it("configures sandbox and skipPermissions based on argv", () => {
     const config1 = configFromEnv({
       cwd: "/repo",
       argv: ["--no-sandbox", "--dangerously-skip-permissions"]
@@ -1287,31 +1406,9 @@ describe("configFromEnv", () => {
     expect(config1.skipPermissions).toBe(true);
     expect(config1.interactivePermissions).toBe(false);
 
-    const config2 = configFromEnv({
-      cwd: "/repo",
-      env: {
-        AGY_ACP_NO_SANDBOX: "1",
-        AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1"
-      }
-    });
-    expect(config2.sandbox).toBe(false);
-    expect(config2.skipPermissions).toBe(true);
-    expect(config2.interactivePermissions).toBe(false);
-
-    const config3 = configFromEnv({
-      cwd: "/repo",
-      env: {
-        AGY_ACP_SANDBOX: "false"
-      }
-    });
-    expect(config3.sandbox).toBe(false);
-
     const config4 = configFromEnv({
       cwd: "/repo",
-      argv: ["--sandbox"],
-      env: {
-        AGY_ACP_NO_SANDBOX: "1"
-      }
+      argv: ["--sandbox"]
     });
     expect(config4.sandbox).toBe(true);
   });
@@ -1319,8 +1416,6 @@ describe("configFromEnv", () => {
   it("enables interactive permissions by default and lets the dangerous bypass select print mode", () => {
     expect(configFromEnv({ cwd: "/repo" }).interactivePermissions).toBe(true);
     expect(configFromEnv({ cwd: "/repo", argv: ["--dangerously-skip-permissions"] }).interactivePermissions).toBe(false);
-    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_DANGEROUSLY_SKIP_PERMISSIONS: "1" } }).interactivePermissions).toBe(false);
-    expect(configFromEnv({ cwd: "/repo", env: { AGY_ACP_INTERACTIVE_PERMISSIONS: "0" } }).interactivePermissions).toBe(false);
     expect(configFromEnv({ cwd: "/repo", argv: ["--no-interactive-permissions"] }).interactivePermissions).toBe(false);
   });
 });
@@ -1370,6 +1465,105 @@ describe("prompt", () => {
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).toBe("hello");
     expect(fake.stdinText).toBe("");
     expect(fake.stdinEnded).toBe(true);
+  });
+
+  it("awaits print-mode reconciled filesystem write-through before ending the turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-reconcile-"));
+    try {
+      const file = path.join(dir, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+
+      let releaseWrite!: () => void;
+      const writeGate = new Promise<void>((resolve) => { releaseWrite = resolve; });
+      let markWriteStarted!: () => void;
+      const writeStarted = new Promise<void>((resolve) => { markWriteStarted = resolve; });
+      const updates: SessionUpdate[] = [];
+      const session = new AgyCliSession(
+        { ...defaultConfig(), cwd: dir, conversationsDir: path.join(dir, "conversations") },
+        (command, args, options) => {
+          fs.writeFileSync(file, "after", "utf8");
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      let settled = false;
+      const prompt = session.prompt(
+        "edit it",
+        async (update) => { updates.push(update); },
+        undefined,
+        {
+          readTextFile: async () => {},
+          writeTextFile: async (target, content) => {
+            expect(fs.readFileSync(target, "utf8")).toBe("before");
+            markWriteStarted();
+            await writeGate;
+            fs.writeFileSync(target, content, "utf8");
+          }
+        }
+      ).finally(() => { settled = true; });
+
+      await writeStarted;
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(fs.readFileSync(file, "utf8")).toBe("before");
+
+      releaseWrite();
+      await expect(prompt).resolves.toEqual({ stopReason: "end_turn" });
+      expect(fs.readFileSync(file, "utf8")).toBe("after");
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toMatchObject({ kind: "edit", status: "completed" });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not re-emit a whole-file write whose reported oldText never existed pre-turn", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-reconcile-"));
+    const conversations = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-structured-conv-"));
+    try {
+      const file = path.join(dir, "a.txt");
+      fs.writeFileSync(file, "before", "utf8");
+      const rawInputJson = JSON.stringify({ TargetFile: file, CodeContent: "final" });
+      const updates: SessionUpdate[] = [];
+      const session = new AgyCliSession(
+        { ...defaultConfig(), cwd: dir, conversationsDir: conversations },
+        (command, args, options) => {
+          // A shell command edited the file first, so the structured replace's
+          // reported oldText ("shell") never existed in the pre-turn file.
+          fs.writeFileSync(file, "shell", "utf8");
+          fs.writeFileSync(file, "final", "utf8");
+          const db = createConversationDb(conversations, "structured-reconcile");
+          insertStep(db, {
+            idx: 1,
+            stepType: 5,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              toolRun: encodeToolRun({
+                call: encodeToolCall({ callId: "edit-1", namePrimary: "replace_file_content", rawInputJson })
+              })
+            })
+          });
+          db.close();
+          return new FakeProcess([]).spawnFactory([])(command, args, options);
+        }
+      );
+
+      const outcome = await session.prompt("edit it", async (update) => { updates.push(update); });
+
+      expect(outcome).toEqual({ stopReason: "end_turn" });
+      // The structured edit alone: reconciliation must not add a second,
+      // contradictory before→final edit for the same file.
+      expect(updates).toHaveLength(1);
+      expect(updates[0]).toMatchObject({ kind: "edit", status: "completed" });
+      const reconciled = updates.filter((update) =>
+        String((update as unknown as { toolCallId?: string }).toolCallId).startsWith("agy-fs-reconcile")
+      );
+      expect(reconciled).toEqual([]);
+      expect(fs.readFileSync(file, "utf8")).toBe("final");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(conversations, { recursive: true, force: true });
+    }
   });
 
   it("can write prompt through stdin", async () => {
@@ -1465,11 +1659,16 @@ describe("prompt", () => {
 
 describe("cancel", () => {
   it("sends SIGINT (not SIGTERM) so agy can flush its conversation database", async () => {
+    const calls: SpawnCall[] = [];
     const fake = new FakeProcess([], { blockStdout: true, exitCode: null });
-    const session = new AgyCliSession(defaultConfig(), fake.spawnFactory([]));
+    const session = new AgyCliSession(defaultConfig(), fake.spawnFactory(calls));
     const pending = collectUpdates(session, "hello");
 
-    await new Promise((resolve) => setImmediate(resolve));
+    // Print-mode turns snapshot the working tree before spawn; wait until the
+    // child exists so cancel has a process to signal.
+    await vi.waitFor(() => {
+      expect(calls.length).toBeGreaterThan(0);
+    });
     await session.cancel();
 
     expect(fake.killedWith).toBe("SIGINT");

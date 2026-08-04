@@ -251,6 +251,14 @@ export function sessionUpdateToV1(
     const { _meta: _drop, ...rest } = raw;
     return rest as V1SessionUpdate;
   }
+  // plan_removed is v2-only; v1 clients don't support it.
+  // Translate to an empty plan update so v1 clients clear their plan UI.
+  if (raw.sessionUpdate === "plan_removed") {
+    return {
+      sessionUpdate: "plan",
+      entries: []
+    } as V1SessionUpdate;
+  }
   return update;
 }
 
@@ -302,10 +310,22 @@ export function sessionUpdateToV2(
     return raw as V2SessionUpdate;
   }
 
-  // Classic v1 `plan` → draft v2 `plan_update` with structured items.
+  // Classic v1 `plan` / `plan_update` → draft v2 `plan_update` with structured items or markdown.
   // Prefer markdown content when the translator stashed it in _meta.
-  if (raw.sessionUpdate === "plan") {
+  if (raw.sessionUpdate === "plan" || (raw.sessionUpdate === "plan_update" && !raw.plan)) {
     return planToV2(raw);
+  }
+
+  if (raw.sessionUpdate === "plan_removed") {
+    const meta = asRecord(raw._meta);
+    const planId =
+      (typeof raw.planId === "string" && raw.planId) ||
+      (typeof meta?.["agy-acp/planId"] === "string" && meta["agy-acp/planId"]) ||
+      "agy-plan";
+    return {
+      sessionUpdate: "plan_removed",
+      planId
+    } as V2SessionUpdate;
   }
 
   return raw as V2SessionUpdate;
@@ -321,8 +341,20 @@ function planToV2(raw: Record<string, unknown>): V2SessionUpdate {
     typeof meta?.["agy-acp/planMarkdown"] === "string" ? meta["agy-acp/planMarkdown"] : null;
   const entries = Array.isArray(raw.entries) ? raw.entries : [];
 
-  // Prefer markdown when available (full fidelity of the brain artifact);
-  // otherwise fall back to item entries from the classic plan shape.
+  // When structured entries with IDs are available, emit the schema-defined
+  // `items` variant so v2 clients receive entry IDs.
+  if (entries.length > 0) {
+    return {
+      sessionUpdate: "plan_update",
+      plan: {
+        type: "items",
+        planId,
+        entries
+      }
+    } as V2SessionUpdate;
+  }
+
+  // Fall back to markdown variant when no structured entries exist.
   if (markdown !== null && markdown.length > 0) {
     return {
       sessionUpdate: "plan_update",

@@ -58,13 +58,119 @@ export function conversationDbPath(dir: string, id: string): string {
 export interface DbStat {
   mtimeMs: number;
   size: number;
+  walMtimeMs?: number;
+  walSize?: number;
+  journalMtimeMs?: number;
+  journalSize?: number;
+  changeCounter: number;
+  /**
+   * Committed WAL state from the wal-index (`-shm`) header: the committed frame
+   * count (mxFrame) and the cumulative checksum chain through that frame. In
+   * WAL mode the main-file change counter only advances on checkpoint, and WAL
+   * file metadata/content cannot prove the committed state is unchanged: commit
+   * frames reach the file before mxFrame is published, RESTART checkpoints
+   * leave the file allocated, and rolled-back spill frames are reused without
+   * bumping header salts. The wal-index is the same publication point SQLite
+   * readers consult, so keying on it ties the fingerprint to exactly the
+   * snapshot a replay build reads. A torn shm read only causes a spurious
+   * rebuild (safe direction), never a stale hit.
+   */
+  walMxFrame?: number;
+  walFrameCksum0?: number;
+  walFrameCksum1?: number;
+}
+
+/** Known wal-index format version (WalIndexHdr.iVersion). */
+const WAL_INDEX_VERSION = 3007000;
+
+/** Read committed WAL state from the wal-index (`-shm`) header, or null when
+ *  absent/short/unparseable. Fixed 48-byte read; never reads the WAL itself. */
+function readWalIndexState(shmPath: string): {
+  mxFrame: number;
+  frameCksum0: number;
+  frameCksum1: number;
+} | null {
+  try {
+    const fd = fs.openSync(shmPath, "r");
+    try {
+      const buf = Buffer.alloc(48);
+      if (fs.readSync(fd, buf, 0, 48, 0) !== 48) return null;
+      // The wal-index uses the writer's native byte order; detect it via the
+      // known iVersion constant at offset 0.
+      const little = buf.readUInt32LE(0) === WAL_INDEX_VERSION;
+      if (!little && buf.readUInt32BE(0) !== WAL_INDEX_VERSION) return null;
+      const u32 = (off: number): number => (little ? buf.readUInt32LE(off) : buf.readUInt32BE(off));
+      return { mxFrame: u32(16), frameCksum0: u32(24), frameCksum1: u32(28) };
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
 }
 
 /** Stat a conversation DB, or null if it doesn't exist. */
 export function statConversation(dir: string, id: string): DbStat | null {
+  const dbPath = conversationDbPath(dir, id);
   try {
-    const s = fs.statSync(conversationDbPath(dir, id));
-    return { mtimeMs: s.mtimeMs, size: s.size };
+    const s = fs.statSync(dbPath);
+
+    let walMtimeMs: number | undefined;
+    let walSize: number | undefined;
+    let walMxFrame: number | undefined;
+    let walFrameCksum0: number | undefined;
+    let walFrameCksum1: number | undefined;
+    try {
+      const ws = fs.statSync(`${dbPath}-wal`);
+      walMtimeMs = ws.mtimeMs;
+      walSize = ws.size;
+      const walIndex = readWalIndexState(`${dbPath}-shm`);
+      if (walIndex) {
+        walMxFrame = walIndex.mxFrame;
+        walFrameCksum0 = walIndex.frameCksum0;
+        walFrameCksum1 = walIndex.frameCksum1;
+      }
+    } catch {
+      // no wal file
+    }
+
+    let journalMtimeMs: number | undefined;
+    let journalSize: number | undefined;
+    try {
+      const js = fs.statSync(`${dbPath}-journal`);
+      journalMtimeMs = js.mtimeMs;
+      journalSize = js.size;
+    } catch {
+      // no journal file
+    }
+
+    let changeCounter = 0;
+    try {
+      const fd = fs.openSync(dbPath, "r");
+      try {
+        const buf = Buffer.alloc(4);
+        if (fs.readSync(fd, buf, 0, 4, 24) === 4) {
+          changeCounter = buf.readUInt32BE(0);
+        }
+      } finally {
+        fs.closeSync(fd);
+      }
+    } catch {
+      // ignore read errors
+    }
+
+    return {
+      mtimeMs: s.mtimeMs,
+      size: s.size,
+      walMtimeMs,
+      walSize,
+      walMxFrame,
+      walFrameCksum0,
+      walFrameCksum1,
+      journalMtimeMs,
+      journalSize,
+      changeCounter
+    };
   } catch {
     return null;
   }

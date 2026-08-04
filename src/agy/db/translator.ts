@@ -15,6 +15,7 @@
 // inside it.
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { PlanEntry } from "../../acp/agent-plan/index.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
@@ -93,10 +94,13 @@ export class Translator {
   private readonly thoughtTextLengths = new Map<string, number>();
   // Stream + replay: final provider-error messages already emitted.
   private readonly emittedProviderErrorMessageIds = new Set<string>();
-  // Stream + replay: last emitted snapshot keyed by tool call id / plan id (tool progressive lifecycle).
+  // Stream + replay: last emitted snapshot keyed by tool call id, or by plan id
+  // + source row for plans (progressive lifecycle without cross-row replay).
   private readonly toolSnapshots = new Map<string, string>();
   // Stream + replay: last known file bodies from view_file / write_to_file (for diffs).
   private readonly fileContents: FileContentCache = new Map();
+  // Stream + replay: previous plan entries keyed by plan id (stable entry-id reconciliation).
+  private readonly planEntries: Map<string, PlanEntry[]> = new Map();
   // Candidate ACP location paths and their readability during the latest translation.
   readonly locationReadability = new Map<string, boolean>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
@@ -120,6 +124,16 @@ export class Translator {
   /** Whether any update has been produced across all batches. */
   get hadUpdates(): boolean {
     return this._hadUpdates;
+  }
+
+  /**
+   * Reset row-derived file state before replaying a complete prompt-scoped
+   * snapshot. StreamPoller rereads all rows after its fixed base idx whenever
+   * SQLite changes; rebuilding this cache makes oldText derivation independent
+   * of the previous poll's terminal state.
+   */
+  resetFileContentsForFullReplay(): void {
+    this.fileContents.clear();
   }
 
   /** Translate a batch of rows into ordered ACP updates, advancing state. */
@@ -194,6 +208,7 @@ export class Translator {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
       fileContents: this.fileContents,
+      planEntries: this.planEntries,
       locationReadability: this.locationReadability
     });
     if (Array.isArray(update)) {
@@ -225,7 +240,15 @@ export class Translator {
 
     if (kind === "plan" || kind === "plan_update" || kind === "plan_removed") {
       const snapshot = updateSnapshot(stamped);
-      const key = typeof raw.planId === "string" && raw.planId ? `plan:${raw.planId}` : `plan:${stepIdx}`;
+      const meta = raw._meta && typeof raw._meta === "object" ? (raw._meta as Record<string, unknown>) : null;
+      const planId =
+        (typeof raw.planId === "string" && raw.planId) ||
+        (typeof meta?.["agy-acp/planId"] === "string" && (meta["agy-acp/planId"] as string)) ||
+        undefined;
+      // Scope dedupe to the source row: StreamPoller rereads all rows since the
+      // turn began on every DB change, so a plan-level shared key would replay
+      // each historical state (rollback) whenever a later row changes.
+      const key = planId ? `plan:${planId}:${stepIdx}` : `plan:${stepIdx}`;
       const previous = this.toolSnapshots.get(key);
       if (previous === snapshot) return;
       this.toolSnapshots.set(key, snapshot);

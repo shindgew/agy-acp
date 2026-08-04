@@ -7,7 +7,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
 import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
-import { isPlanFile, planUpdateFromMarkdown } from "../../acp/agent-plan/index.js";
+import {
+  isPlanFile,
+  planIdForPath,
+  planRemovedFromPath,
+  planUpdateFromMarkdown,
+  type PlanEntry
+} from "../../acp/agent-plan/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -19,6 +25,8 @@ export interface UpdateContext {
   cwd?: string;
   /** Prior file contents for full-file write diffs. */
   fileContents?: FileContentCache;
+  /** Plan id -> entries of the previous plan snapshot (stable entry-id reconciliation). */
+  planEntries?: Map<string, PlanEntry[]>;
   /** Candidate location path -> readability observed while translating. */
   locationReadability?: Map<string, boolean>;
 }
@@ -448,8 +456,8 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
   const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim();
   const action = asStr(pick(rawInput, "toolAction", "ToolAction"))?.trim();
   const title =
-    summary ||
     firstLine ||
+    summary ||
     action ||
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
@@ -566,6 +574,54 @@ export function fetchUpdate(stepRow: StepRow): SessionUpdate {
   return update;
 }
 
+/**
+ * Apply replace/multi_replace chunks to a prior plan body (first-occurrence
+ * replacements, matching agy replace_file_content semantics).
+ */
+function applyReplacementChunks(prior: string, chunks: unknown[]): string | null {
+  let body = prior;
+  for (const chunk of chunks) {
+    const newText = asStr(pick(chunk, "ReplacementContent", "replacementContent"));
+    if (newText === null) return null;
+    const oldText = asStr(pick(chunk, "TargetContent", "targetContent"));
+    if (oldText === null) return null;
+    const idx = body.indexOf(oldText);
+    if (idx === -1) return null;
+    body = body.slice(0, idx) + newText + body.slice(idx + oldText.length);
+  }
+  return body;
+}
+
+/** Best-effort post-edit plan body for replace_file_content / multi_replace. */
+function planBodyAfterReplacementEdits(
+  stepRow: StepRow,
+  resolvedTarget: string,
+  fileContents: FileContentCache | undefined,
+  rawInput: unknown
+): string | null {
+  const chunksRaw = pick(rawInput, "ReplacementChunks", "replacementChunks");
+  const chunks = Array.isArray(chunksRaw) ? chunksRaw : [rawInput];
+  const cacheKey = path.resolve(resolvedTarget);
+  const prior = fileContents?.get(cacheKey);
+
+  if (prior !== undefined) {
+    const applied = applyReplacementChunks(prior, chunks);
+    if (applied !== null) return applied;
+  }
+
+  // Completed replaces: on-disk artifact is the source of truth after agy applies the edit.
+  if (toolCallStatus(stepRow) === "completed") {
+    try {
+      if (fs.existsSync(resolvedTarget) && fs.statSync(resolvedTarget).isFile()) {
+        return fs.readFileSync(resolvedTarget, "utf8");
+      }
+    } catch {
+      // ignore unreadable paths
+    }
+  }
+  return null;
+}
+
 /** Step type 5 (write_to_file|replace_file_content|multi_replace_file_content),
  *  and step 17 artifact writes (e.g. a generated `plan.md` for user review).
  *  Brain plan markdown becomes a structured ACP `plan` update (not an edit tool). */
@@ -578,11 +634,49 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile"))) ?? "";
   const resolvedTarget = resolvePath(targetFile, displayCwd) ?? targetFile;
   const fullContent = asStr(pick(rawInput, "CodeContent", "codeContent"));
+  const status = toolCallStatus(stepRow);
 
-  // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update).
+  // Brain plan artifacts → structured plan session update (v1 `plan` / v2 plan_update / plan_removed).
+  // Only write_to_file carries CodeContent; replace/multi_replace carry ReplacementChunks instead.
+  // Cache writes only after status completed so denied/failed edits cannot poison later replace
+  // derivation. Replacement-derived plan bodies also require completed. write_to_file still
+  // publishes requested CodeContent immediately (requested full body) without caching until done.
+  // Empty body + completed write/replace → plan_removed; incomplete empty edits fall through.
   if (isPlanFile(targetFile)) {
-    if (fullContent === null || fullContent.length === 0) return [];
-    return planUpdateFromMarkdown(targetFile, fullContent);
+    const isReplaceEdit = fullContent === null;
+    let planBody: string | null = null;
+    if (!isReplaceEdit) {
+      planBody = fullContent;
+    } else {
+      planBody = planBodyAfterReplacementEdits(stepRow, resolvedTarget, fileContents, rawInput);
+    }
+
+    if (planBody !== null) {
+      // Derive plan identity from the normalized absolute path so relative and
+      // absolute references to the same artifact share one plan id (and one
+      // entry-id lineage) instead of splitting into divergent plans.
+      const planId = planIdForPath(resolvedTarget);
+      if (planBody.trim().length === 0) {
+        if (status === "completed") {
+          fileContents?.set(path.resolve(resolvedTarget), planBody);
+          // Removal ends the plan's entry-id lineage; a re-created plan starts fresh.
+          ctx?.planEntries?.delete(planId);
+          return planRemovedFromPath(resolvedTarget);
+        }
+        // Incomplete/failed empty edit: preserve tool_call lifecycle, do not remove plan.
+      } else if (!isReplaceEdit || status === "completed") {
+        // Only successful writes update the content cache used by later replace derivation.
+        if (status === "completed") {
+          fileContents?.set(path.resolve(resolvedTarget), planBody);
+        }
+        // Reconcile entry ids against the previous snapshot so duplicate-row
+        // inserts/reorders do not reshuffle ids of surviving tasks.
+        const update = planUpdateFromMarkdown(resolvedTarget, planBody, ctx?.planEntries?.get(planId));
+        ctx?.planEntries?.set(planId, (update as unknown as { entries: PlanEntry[] }).entries);
+        return update;
+      }
+      // Incomplete/failed replace with a nonempty speculative body: keep tool lifecycle.
+    }
   }
 
   const shown = targetFile ? toDisplayPath(targetFile, displayCwd) : "";
@@ -602,7 +696,12 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
       const cacheKey = path.resolve(resolvedTarget);
       const prior = fileContents?.get(cacheKey) ?? null;
       content.push({ type: "diff", path: targetFile, oldText: prior, newText: fullContent });
-      fileContents?.set(cacheKey, fullContent);
+      // Pending/failed writes describe proposed content, not a new baseline.
+      // Preserve the prior body until completion so the completed lifecycle
+      // update still carries a meaningful oldText instead of newText→newText.
+      if (status === "completed") {
+        fileContents?.set(cacheKey, fullContent);
+      }
       if (isReadableLocation(resolvedTarget, ctx)) locations.push({ path: resolvedTarget });
     }
   } else {

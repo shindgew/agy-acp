@@ -14,12 +14,16 @@ import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
+import { cancelQueuedPrompts } from "./cancel.js";
+import { sessionTurnBusy } from "./prompt.js";
+import { turnsOf } from "./turn-scheduler.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
   argv: string[];
   backend: AgyCliBackend;
   getModelOptions(config: AgyCliConfig): Promise<string[]>;
+  conversationsDir?: string;
 }
 
 /** Build a fresh session bound to `cwd` + ACP `additionalDirectories`. */
@@ -29,7 +33,13 @@ export async function buildSession(
   stored: StoredSession | null,
   deps: SessionBuildDeps
 ): Promise<SessionState> {
-  const config = configFromEnv({ cwd, additionalDirectories, env: deps.env, argv: deps.argv });
+  const config = configFromEnv({
+    cwd,
+    additionalDirectories,
+    env: deps.env,
+    argv: deps.argv,
+    conversationsDir: deps.conversationsDir
+  });
   const modelOptions = await deps.getModelOptions(config);
   const catalog = buildModelCatalog(modelOptions);
   const agy = await deps.backend.startSession(config);
@@ -54,7 +64,7 @@ export async function buildSession(
     catalog,
     selectedBaseModel: selection.baseModel,
     selectedReasoningEffort: selection.reasoningEffort,
-    activePrompt: false,
+    promptQueue: [],
     v2UserMessageIdsByStep: { ...(stored?.v2UserMessageIdsByStep ?? {}) }
   };
 }
@@ -69,15 +79,20 @@ export async function registerSession(
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
     sessions.delete(sessionId);
-    replaced.promptAbort?.abort();
+    replaced.closed = true;
+    turnsOf(replaced).close();
+    cancelQueuedPrompts(replaced);
     await replaced.agy.close().catch(() => {});
   }
 
   while (sessions.size >= maxActiveSessions) {
-    const candidate = [...sessions].find(([, current]) => !current.activePrompt);
+    const candidate = [...sessions].find(([, current]) => !sessionTurnBusy(current));
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
+    evicted.closed = true;
+    turnsOf(evicted).close();
+    cancelQueuedPrompts(evicted);
     await evicted.agy.close().catch((error) => {
       console.error(
         `[agy-acp] WARN: failed to close evicted session ${evictedId}: ${(error as Error).message}`
