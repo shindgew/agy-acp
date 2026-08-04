@@ -13,6 +13,7 @@ import { handleCloseSession } from "../src/acp/session/close.js";
 import {
   handlePromptV1,
   handlePromptV2,
+  notifyIdleAndDrainQueue,
   type PromptV1Deps,
   type PromptV2Deps
 } from "../src/acp/session/prompt.js";
@@ -227,7 +228,10 @@ describe("queue and steer-by-cancel", () => {
 
     expect(session.promptQueue.map((item) => (item.params.prompt[0] as any).text))
       .toEqual(["first", "second"]);
-    await expect(Promise.all([first, second])).resolves.toEqual([{}, {}]);
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { _meta: { "agy-acp/queuedPromptId": expect.any(String) } },
+      { _meta: { "agy-acp/queuedPromptId": expect.any(String) } }
+    ]);
     // Acceptance responses precede queued user_message publication.
     expect(firstNotify).not.toHaveBeenCalled();
     expect(secondNotify).not.toHaveBeenCalled();
@@ -535,7 +539,7 @@ describe("queue and steer-by-cancel", () => {
     });
   });
 
-  it("queues v2 follow-up prompts, returning {} immediately and ordering updates", async () => {
+  it("queues v2 follow-up prompts, accepting immediately and ordering updates", async () => {
     await withConversationsDir(async (dir) => {
       const updates: Array<Record<string, unknown>> = [];
       const client = acpV2.client({ name: "test-client" }).onNotification(
@@ -578,7 +582,7 @@ describe("queue and steer-by-cancel", () => {
           prompt: [{ type: "text", text: "prompt 2" }],
           _meta: { "agy-acp/turnIntent": "queue" }
         } as any);
-        expect(r2).toEqual({});
+        expect(r2).toEqual({ _meta: { "agy-acp/queuedPromptId": expect.any(String) } });
 
         await waitFor(() => {
           const idleCount = updates.filter((u) => u.sessionUpdate === "state_update" && u.state === "idle").length;
@@ -1238,14 +1242,18 @@ describe("queue and steer-by-cancel", () => {
       sessionId: "s1",
       prompt: [{ type: "text", text: "first" }],
       _meta: { "agy-acp/turnIntent": "queue" }
-    } as any, client, deps)).resolves.toEqual({});
+    } as any, client, deps)).resolves.toEqual({
+      _meta: { "agy-acp/queuedPromptId": expect.any(String) }
+    });
     await waitFor(() => notifyCalls === 1); // item 1's user_message is wedged
 
     await expect(handlePromptV2({
       sessionId: "s1",
       prompt: [{ type: "text", text: "second" }],
       _meta: { "agy-acp/turnIntent": "queue" }
-    } as any, client, deps)).resolves.toEqual({});
+    } as any, client, deps)).resolves.toEqual({
+      _meta: { "agy-acp/queuedPromptId": expect.any(String) }
+    });
 
     // Cancel the wedged item through the real session/cancel path.
     const queuedId = session.promptQueue[0].id;
@@ -1255,6 +1263,124 @@ describe("queue and steer-by-cancel", () => {
     await waitFor(() => updates.some((u) => u.sessionUpdate === "user_message"));
 
     turns.release(activeClaim);
+  });
+
+  it("returns a cancellation id for queued v2 prompts", async () => {
+    // PR #84 review: targeted cancellation of a queued v2 prompt requires
+    // agy-acp/queuedPromptId, but it was generated internally and never
+    // returned, so clients could not cancel individual queued items.
+    const updates: any[] = [];
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" }),
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const activeClaim = turns.claimIdle("foreground"); // hold the slot so the prompt queues
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = { notify: async (_m: string, p: any) => { updates.push(p.update); } } as any;
+
+    const response = await handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "follow up" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps);
+
+    const queuedId = (response as any)._meta?.["agy-acp/queuedPromptId"];
+    expect(typeof queuedId).toBe("string");
+    expect(session.promptQueue.map((item) => item.id)).toContain(queuedId);
+
+    // The id cancels exactly that queued item through session/cancel.
+    await handleCancel("s1", new Map([["s1", session]]), { "agy-acp/queuedPromptId": queuedId });
+    expect(session.promptQueue).toHaveLength(0);
+    expect(
+      updates.some((u) => u.sessionUpdate === "state_update" && u.stopReason === "cancelled")
+    ).toBe(true);
+
+    turns.release(activeClaim);
+  });
+
+  it("unblocks later v2 queue preparation when a claimed queued turn is cancelled", async () => {
+    // PR #84 review: once a queued v2 item is claimed, session/cancel aborts
+    // its TurnClaim but not its preparation controller; a `ready` promise
+    // still wedged on user_message delivery stayed pinned in
+    // promptQueuePreparation and jammed every later queued prompt.
+    const updates: any[] = [];
+    let notifyCalls = 0;
+    const session = {
+      sessionId: "s1",
+      cwd: "/repo",
+      additionalDirectories: [],
+      promptQueue: [],
+      v2UserMessageIdsByStep: {},
+      agy: {
+        config: { mode: "default" },
+        cancel: async () => {},
+        prompt: async () => ({ stopReason: "end_turn" }),
+        lastPromptUserStepIdxs: []
+      }
+    } as unknown as SessionState;
+    const turns = turnsOf(session);
+    const deps = {
+      requireSession: () => session,
+      persistSession: async () => {},
+      applyConfigOption: async () => {},
+      notifyConfigOptionUpdateV2: async () => {}
+    } as unknown as PromptV2Deps;
+    const client = {
+      notify: async (_method: string, p: any) => {
+        notifyCalls++;
+        if (notifyCalls === 1) await new Promise<void>(() => {}); // wedge item 1's user_message
+        updates.push(p.update);
+      }
+    } as any;
+
+    const activeClaim = turns.claimIdle("foreground");
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "first" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps)).resolves.toEqual({
+      _meta: { "agy-acp/queuedPromptId": expect.any(String) }
+    });
+    await waitFor(() => notifyCalls === 1); // item 1's user_message is wedged
+
+    // The item leaves the FIFO and its turn claims the slot, still waiting on
+    // the wedged preparation.
+    const queuedItem = session.promptQueue[0];
+    turns.release(activeClaim);
+    notifyIdleAndDrainQueue(session);
+    await waitFor(() => turns.busy() && session.promptQueue.length === 0);
+
+    // A plain session/cancel aborts the claimed turn...
+    await handleCancel("s1", new Map([["s1", session]]));
+    await waitFor(() => !turns.busy());
+    // ...and must also abort the item's preparation controller.
+    expect((queuedItem as Extract<SessionState["promptQueue"][number], { version: "v2" }>).controller.signal.aborted).toBe(true);
+
+    // A later queued prompt prepares instead of chaining behind the wedge.
+    const nextActive = turns.claimIdle("foreground");
+    await expect(handlePromptV2({
+      sessionId: "s1",
+      prompt: [{ type: "text", text: "second" }],
+      _meta: { "agy-acp/turnIntent": "queue" }
+    } as any, client, deps)).resolves.toBeDefined();
+    await waitFor(() => updates.some((u) => u.sessionUpdate === "user_message"));
+
+    turns.release(nextActive);
   });
 
   it("rejects a non-intent prompt while a steer replacement is in progress", async () => {
@@ -1618,7 +1744,7 @@ describe("queue and steer-by-cancel", () => {
           prompt: [{ type: "text", text: "queued v2" }],
           _meta: { "agy-acp/turnIntent": "queue" }
         } as any);
-        expect(r2).toEqual({});
+        expect(r2).toEqual({ _meta: { "agy-acp/queuedPromptId": expect.any(String) } });
 
         // Close while p1 is active and p2 is queued — queued turn must not spawn agy.
         await connection.agent.request(acpV2.methods.agent.session.close, {

@@ -97,6 +97,18 @@ Queued v1 prompts resolve with `stopReason: "cancelled"` when cancelled or when
 their session closes/deletes. Queued v2 prompts emit `state_update` with
 `state: "idle"` and `stopReason: "cancelled"`.
 
+A queued v2 acceptance response carries a cancellation handle:
+
+```json
+{
+  "_meta": { "agy-acp/queuedPromptId": "q-..." }
+}
+```
+
+Pass the same value as `_meta` on `session/cancel` to cancel that queued item
+specifically; a plain `session/cancel` still cancels the active turn (and any
+steer reservation) without touching the queue.
+
 Wire format decoding was cross-referenced with
 [shubzkothekar/antigravity-acp](https://github.com/shubzkothekar/antigravity-acp) (MIT);
 decoding code is our own.

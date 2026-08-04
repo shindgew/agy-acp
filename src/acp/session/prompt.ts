@@ -628,8 +628,11 @@ export async function handlePromptV2(
   if (turns.busy()) {
     const intent = parseTurnIntent(params);
     if (intent === "queue") {
-      enqueueV2(params, client, session, deps);
-      return {};
+      const queuedId = enqueueV2(params, client, session, deps);
+      // Surface the cancellation handle: the user_message notification carries
+      // a different id and may arrive late (or wedge), so the acceptance
+      // response is the only reliable place to hand it over.
+      return { _meta: { "agy-acp/queuedPromptId": queuedId } };
     }
     if (intent !== "steer") {
       throw new Error(`Session already has an active prompt: ${params.sessionId}`);
@@ -720,7 +723,7 @@ function enqueueV2(
   client: V2AgentContext,
   session: SessionState,
   deps: PromptV2Deps
-): void {
+): string {
   const controller = new AbortController();
   const queuedId = `q-${randomUUID()}`;
   const queued: QueuedPromptV2 = {
@@ -783,6 +786,7 @@ function enqueueV2(
   });
 
   notifyIdleAndDrainQueue(session);
+  return queuedId;
 }
 
 async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
@@ -791,37 +795,45 @@ async function executeQueuedV2Turn(item: QueuedPromptV2): Promise<void> {
   const claim = turnsOf(session).claimIdle("queued", controller.signal);
   const emitTerminal = v2TerminalEmitter(client, params.sessionId, session, claim);
 
-  await completeTurn(
-    session,
-    claim,
-    async () => {
-      // Preparation (content conversion + user_message) ran at enqueue time.
-      await raceClaim(item.ready, claim);
-      claim.throwIfAborted();
-      const { promptText, userMessageId } = item;
-      if (promptText === undefined || userMessageId === undefined) {
-        throw new Error("Queued v2 prompt preparation completed without content");
+  // Cancelling this turn must also abort preparation: if user_message
+  // delivery is still wedged, the item's `ready` would otherwise stay pinned
+  // in `promptQueuePreparation` and jam every later queued prompt (I4).
+  const propagateCancellation = onAbort(claim.signal, () => controller.abort());
+  try {
+    await completeTurn(
+      session,
+      claim,
+      async () => {
+        // Preparation (content conversion + user_message) ran at enqueue time.
+        await raceClaim(item.ready, claim);
+        claim.throwIfAborted();
+        const { promptText, userMessageId } = item;
+        if (promptText === undefined || userMessageId === undefined) {
+          throw new Error("Queued v2 prompt preparation completed without content");
+        }
+        const adapter = v2Adapter(params, client, session, deps, {
+          announceUserMessage: false,
+          userMessageId
+        });
+        return runTurnBody(
+          params.sessionId,
+          params.prompt as v1.ContentBlock[],
+          session,
+          claim,
+          adapter,
+          deps,
+          promptText
+        );
+      },
+      {
+        terminal: emitTerminal,
+        failure: async (error) => {
+          console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
+          await emitTerminal("end_turn").catch(() => {});
+        }
       }
-      const adapter = v2Adapter(params, client, session, deps, {
-        announceUserMessage: false,
-        userMessageId
-      });
-      return runTurnBody(
-        params.sessionId,
-        params.prompt as v1.ContentBlock[],
-        session,
-        claim,
-        adapter,
-        deps,
-        promptText
-      );
-    },
-    {
-      terminal: emitTerminal,
-      failure: async (error) => {
-        console.error(`[agy-acp] queued v2 turn failed: ${(error as Error).message}`);
-        await emitTerminal("end_turn").catch(() => {});
-      }
-    }
-  );
+    );
+  } finally {
+    propagateCancellation();
+  }
 }
