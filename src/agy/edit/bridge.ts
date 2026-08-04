@@ -28,36 +28,79 @@ export interface ClientFileSystem {
  * rejected the write-through, so the caller can fall back to the local
  * permission-bridge review.
  */
-export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<boolean> {
-  const blocks = diffBlocks(toolCall);
-  if (blocks.length === 0) return false;
+interface FileToRoute {
+  path: string;
+  fullOldText: string;
+  fullNewText: string;
+}
 
-  // Same matching rules as revertEditToolCall: oldText/newText may be the
-  // whole file (create/full-file write) or a snippet embedded in surrounding
-  // context (partial replace) — either way `current` is the full post-edit
-  // file content we hand to the client once it has the pre-edit state cached.
+function preflightRouteEdit(toolCall: SessionUpdate): FileToRoute[] | null {
+  const blocks = diffBlocks(toolCall);
+  if (blocks.length === 0) return null;
+
+  const pathsInOrder: string[] = [];
+  const blocksByPath = new Map<string, import("./revert.js").DiffBlock[]>();
+
+  for (const block of blocks) {
+    let list = blocksByPath.get(block.path);
+    if (!list) {
+      list = [];
+      blocksByPath.set(block.path, list);
+      pathsInOrder.push(block.path);
+    }
+    list.push(block);
+  }
+
+  const filesToRoute: FileToRoute[] = [];
+
+  for (const path of pathsInOrder) {
+    if (!existsSync(path)) return null;
+
+    const fullNewText = readFileSync(path, "utf8");
+    let current = fullNewText;
+    const fileBlocks = blocksByPath.get(path)!;
+
+    for (const { oldText, newText } of fileBlocks) {
+      if (current === newText) {
+        current = oldText ?? "";
+      } else if (hasUniqueOccurrence(current, newText)) {
+        current = current.replace(newText, oldText ?? "");
+      } else {
+        return null; // diverged, missing, or ambiguous match
+      }
+    }
+
+    filesToRoute.push({
+      path,
+      fullOldText: current,
+      fullNewText
+    });
+  }
+
+  return filesToRoute;
+}
+
+/**
+ * Returns true if the edit was handed off to the client (disk ends up back
+ * at newText, written by the client itself). Returns false — leaving disk
+ * untouched at newText — if there was nothing to route or the client
+ * rejected the write-through, so the caller can fall back to the local
+ * permission-bridge review.
+ */
+export async function routeEditThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<boolean> {
+  const filesToRoute = preflightRouteEdit(toolCall);
+  if (!filesToRoute || filesToRoute.length === 0) return false;
+
   const reverted: { path: string; fullNewText: string }[] = [];
   try {
-    for (const { path, oldText, newText } of blocks) {
-      const current = existsSync(path) ? readFileSync(path, "utf8") : null;
-      if (current === null) continue;
-
-      let fullOldText: string;
-      if (current === newText) {
-        fullOldText = oldText ?? "";
-      } else if (hasUniqueOccurrence(current, newText)) {
-        fullOldText = current.replace(newText, oldText ?? "");
-      } else {
-        continue; // diverged since or ambiguous match — leave this file alone
-      }
-
+    for (const { path, fullOldText, fullNewText } of filesToRoute) {
       writeFileSync(path, fullOldText, "utf8");
-      reverted.push({ path, fullNewText: current });
+      reverted.push({ path, fullNewText });
 
       await bridge.readTextFile(path);
-      await bridge.writeTextFile(path, current);
+      await bridge.writeTextFile(path, fullNewText);
     }
-    return reverted.length > 0;
+    return true;
   } catch {
     // Restore whatever we reverted before the failure, so disk still matches
     // the content already reported via session/update.
@@ -94,16 +137,16 @@ export async function primeEditReadThroughClient(toolCall: SessionUpdate, bridge
  * no local revert needed, since disk was never touched by us in between.
  */
 export async function writeEditThroughClient(toolCall: SessionUpdate, bridge: ClientFileSystem): Promise<boolean> {
-  const paths = new Set(diffBlocks(toolCall).map((block) => block.path));
-  if (paths.size === 0) return false;
+  const paths = Array.from(new Set(diffBlocks(toolCall).map((block) => block.path)));
+  if (paths.length === 0) return false;
+  for (const path of paths) {
+    if (!existsSync(path)) return false;
+  }
   try {
-    let wrote = false;
     for (const path of paths) {
-      if (!existsSync(path)) continue;
       await bridge.writeTextFile(path, readFileSync(path, "utf8"));
-      wrote = true;
     }
-    return wrote;
+    return true;
   } catch {
     return false;
   }
