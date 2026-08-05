@@ -157,11 +157,15 @@ export class StreamPoller {
       // still-streaming system-message envelope cannot close the wait early.
       // Generic stepType 101 turn-end markers without a system message payload
       // must NOT clear active tasks, as agy appends 101 at the end of every turn.
+      const taskLaunchIdx = row.task?.taskId ? this._launchedTaskIdxs.get(row.task.taskId) : undefined;
+      const isTaskTerminalRow = taskLaunchIdx !== undefined && row.idx > taskLaunchIdx && isTerminalStepStatus(row.status);
       if (
-        isSystemMessage(text) &&
+        (isSystemMessage(text) || isTaskTerminalRow) &&
         isTerminalStepStatus(row.status)
       ) {
-        this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        if (isSystemMessage(text)) {
+          this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        }
         // Rows are re-read on every poll, so an id-less lifecycle row observed
         // before a later launch would otherwise close that newer task on the
         // next revision. Only tasks launched BEFORE this row can complete here.
@@ -169,6 +173,10 @@ export class StreamPoller {
           .filter(([, launchIdx]) => launchIdx < row.idx)
           .map(([taskId]) => taskId);
         let matchedTask = false;
+        if (row.task?.taskId && launchedBefore.includes(row.task.taskId)) {
+          this._completedTaskIds.add(row.task.taskId);
+          matchedTask = true;
+        }
         for (const taskId of launchedBefore) {
           if (taskId && textMentionsTaskId(text, taskId)) {
             this._completedTaskIds.add(taskId);

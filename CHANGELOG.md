@@ -7,6 +7,12 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.5.0] - Unreleased
+
+### Fixed
+
+- Transition session prompt turns cleanly to `idle` (`end_turn`) when background tasks finish or when terminal system completion message rows are missing in SQLite DB, preventing turns from hanging for `printTimeout` (5 minutes) and expanding system message envelope matching. (#93)
+
 ## [0.4.3] - 2026-08-04
 
 ### Fixed

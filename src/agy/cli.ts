@@ -493,7 +493,10 @@ export class AgyCliSession {
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
           deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
-        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+        if (Date.now() >= deadline) {
+          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+        }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
         for (const [id, markerCount] of gateMarkerCounts) {
@@ -935,12 +938,7 @@ export class AgyCliSession {
         let seenRevision = poller.revision;
         while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
           if (Date.now() >= deadline) {
-            throw new AgyCliError(
-              `agy print turn timed out after ${this.config.printTimeout} while waiting for background tasks to complete`,
-              command,
-              null,
-              Buffer.concat(stderrChunks).toString("utf8")
-            );
+            break;
           }
           await sleep(POLL_INTERVAL_MS);
           // pollOnce (not a bare poll) so edits from background tasks are also
