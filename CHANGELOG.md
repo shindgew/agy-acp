@@ -12,6 +12,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 ### Fixed
 
 - Transition session prompt turns cleanly to `idle` (`end_turn`) when background tasks finish or when terminal system completion message rows are missing in SQLite DB, preventing turns from hanging for `printTimeout` (5 minutes) and expanding system message envelope matching. (#93)
+- Enrich spawned process environment with standard user binary paths (`/opt/homebrew/bin`, `~/.cargo/bin`, `~/.local/bin`, node directory, etc.) so `agy` can locate user executables for global stdio MCP servers and skills when running inside GUI hosts. (#95)
 
 ## [0.4.3] - 2026-08-04
 
