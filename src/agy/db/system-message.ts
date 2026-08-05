@@ -8,7 +8,7 @@
  * (starts with `<SYSTEM_MESSAGE>\n[Message]`).
  */
 export function isSystemMessage(text: string): boolean {
-  return /^\s*<SYSTEM_MESSAGE>\s*\n\[Message\]\s+/i.test(text);
+  return /^\s*<SYSTEM_MESSAGE>(?:\s*\n|\s*\r\n|\s)*(?:\[Message\]|\[Notice\]|\[System\]|sender=|content=|timestamp=|priority=|task|Task|\s*$)/i.test(text);
 }
 
 /**
@@ -27,9 +27,14 @@ export function isSystemMessagePrefix(text: string): boolean {
   const afterTag = trimmed.slice(tag.length);
   const markerStart = afterTag.search(/\S/);
   if (markerStart === -1) return true;
-  if (markerStart === 0 || afterTag[markerStart - 1] !== "\n") return false;
+  if (markerStart === 0 || (afterTag[markerStart - 1] !== "\n" && afterTag[markerStart - 1] !== "\r")) return false;
 
   const markerCandidate = afterTag.slice(markerStart);
+  if (markerCandidate.startsWith("[")) {
+    const brackets = ["[message]", "[notice]", "[system]"];
+    const lower = markerCandidate.toLowerCase();
+    return brackets.some((b) => b.startsWith(lower) || lower.startsWith(b));
+  }
   return (
     markerCandidate.length <= marker.length &&
     markerCandidate.toLowerCase() === marker.slice(0, markerCandidate.length).toLowerCase()
