@@ -1012,14 +1012,12 @@ export class AgyCliSession {
 
   private spawnEnv(): NodeJS.ProcessEnv | undefined {
     const baseEnv = this.config.env;
-    if (!this.#extraPath) {
-      return baseEnv;
-    }
     const source = baseEnv ?? process.env;
     const currentPath = source.PATH ?? "";
-    const nextPath = currentPath
-      ? `${this.#extraPath}${path.delimiter}${currentPath}`
-      : this.#extraPath;
+    const nextPath = enrichUserPath(currentPath, this.#extraPath);
+    if (!baseEnv && nextPath === currentPath) {
+      return undefined;
+    }
     return { ...source, PATH: nextPath };
   }
 
@@ -1306,6 +1304,66 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     conversationsDir: input.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR,
     env
   };
+}
+
+/**
+ * Enrich PATH environment variable with standard user binary directories
+ * (/opt/homebrew/bin, ~/.cargo/bin, ~/.local/bin, node binary dir, etc.)
+ * so GUI host processes (Zed, VS Code, Cursor) can locate user executables
+ * (npx, python3, uvx, node) when spawning agy and its stdio MCP servers.
+ */
+export function enrichUserPath(existingPath: string, extraPath?: string): string {
+  const delimiter = path.delimiter;
+  const existingEntries = existingPath ? existingPath.split(delimiter) : [];
+  const existingSet = new Set(existingEntries.filter(Boolean));
+
+  const candidates: string[] = [];
+
+  if (extraPath) {
+    candidates.push(extraPath);
+  }
+
+  // Active Node.js binary directory (e.g. NVM/FNM/Homebrew node dir)
+  if (process.execPath) {
+    candidates.push(path.dirname(process.execPath));
+  }
+
+  const homedir = os.homedir();
+  const standardPaths = [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    path.join(homedir, ".cargo", "bin"),
+    path.join(homedir, ".local", "bin"),
+    path.join(homedir, ".nvm", "current", "bin"),
+    path.join(homedir, ".pyenv", "shims"),
+    path.join(homedir, ".asdf", "shims"),
+    path.join(homedir, ".fnm", "current", "bin"),
+    path.join(homedir, ".volta", "bin"),
+    path.join(homedir, ".rbenv", "shims"),
+    path.join(homedir, ".bun", "bin"),
+    path.join(homedir, ".deno", "bin"),
+    path.join(homedir, "go", "bin")
+  ];
+
+  candidates.push(...standardPaths);
+
+  const additions: string[] = [];
+  for (const c of candidates) {
+    if (c && !existingSet.has(c)) {
+      existingSet.add(c);
+      additions.push(c);
+    }
+  }
+
+  if (additions.length === 0) {
+    return existingPath;
+  }
+
+  return existingEntries.length > 0
+    ? `${additions.join(delimiter)}${delimiter}${existingPath}`
+    : additions.join(delimiter);
 }
 
 function sleep(ms: number): Promise<void> {
