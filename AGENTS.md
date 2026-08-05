@@ -6,6 +6,7 @@
 
 - **ACP Documentation**: Refer to [agentclientprotocol.com](https://agentclientprotocol.com) for official Agent Client Protocol specifications.
 - **Antigravity CLI (`agy`) Changelog**: Refer to the official [google-antigravity/antigravity-cli CHANGELOG.md](https://github.com/google-antigravity/antigravity-cli/blob/main/CHANGELOG.md) for upstream `agy` release notes and CLI updates.
+- **Antigravity CLI Documentation**: Refer to [antigravity.google/docs/cli/overview](https://antigravity.google/docs/cli/overview) for official CLI documentation.
 
 ## Debugging
 
