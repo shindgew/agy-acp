@@ -19,8 +19,8 @@
 
 <!--- Please check all tasks completed before submitting the PR -->
 
-- [ ] I have executed `npm run build` and it completed without errors
-- [ ] I have executed `npm test` and all tests pass
+- [ ] I have executed `pnpm run build` and it completed without errors
+- [ ] I have executed `pnpm test` and all tests pass
 - [ ] I verified Node entry point syntax:
   - [ ] `node --check dist/main.js`
   - [ ] `node --check dist/agent.js`
