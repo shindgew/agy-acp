@@ -35,9 +35,9 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc -p tsconfig.test.json",
-    "test": "npm run typecheck && vitest run",
+    "test": "pnpm run typecheck && vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "pnpm run build"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.3.0",
@@ -54,9 +54,5 @@
   },
   "engines": {
     "node": ">=22"
-  },
-  "allowScripts": {
-    "node-pty@1.1.0": true,
-    "better-sqlite3@13.0.1": true
   }
 }
