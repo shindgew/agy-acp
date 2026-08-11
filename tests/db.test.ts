@@ -2834,6 +2834,44 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {
+    const db = createConversationDb(dir, "conv-empty-agent-text-placeholder");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Hello assistant" })
+    });
+    // agy appends an empty stepType 15 placeholder with status 3 while initializing generation
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-empty-agent-text-placeholder",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    // Updating step 2 with actual text makes turnCompleteCandidate true
+    updateStep(db, 2, {
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Hello! How can I help you today?" })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
   it("tracks background tasks as active until completion system message, without requiring a new user prompt", () => {
     const db = createConversationDb(dir, "conv-bg-active");
     insertStep(db, {

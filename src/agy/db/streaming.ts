@@ -220,18 +220,22 @@ export class StreamPoller {
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
     const latest = rows.at(-1);
-    this._busy = latest !== undefined && !isTerminalStepStatus(latest.status);
+    const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
+    this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
     // agent message", so those turns don't hang until the deadline. Exclude
     // stepType 14 (user prompt), which is inserted with status 3 as the turn
-    // opens before agy appends any assistant response steps.
+    // opens before agy appends any assistant response steps, and exclude empty
+    // stepType 15 placeholders (text: "" and no thought), which agy inserts
+    // while preparing assistant text generation.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
       latest !== undefined &&
       latest.stepType !== 14 &&
+      !isEmptyAgentText &&
       isTerminalStepStatus(latest.status);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
@@ -275,6 +279,20 @@ export class StreamPoller {
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
 function isTerminalStepStatus(status: number): boolean {
   return status === 3 || status === 6 || status === 7;
+}
+
+/**
+ * True when stepType 15 carries no visible agent text and no thought text.
+ * agy appends an empty stepType 15 row with status 3 while initializing
+ * assistant response generation, which must NOT trigger turn completion.
+ */
+function isEmptyAgentTextStep(row: StepRow): boolean {
+  if (row.stepType !== 15) return false;
+  const text = row.stepPayload.agentText?.text ?? "";
+  const thought = row.stepPayload.agentText?.thought;
+  const hasText = text.length > 0 && !isSystemMessage(text);
+  const hasThought = Boolean(thought && thought.length > 0);
+  return !hasText && !hasThought;
 }
 
 /**
