@@ -2872,6 +2872,50 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("treats a terminal system message step as a turn completion candidate, not an empty placeholder", () => {
+    const db = createConversationDb(dir, "conv-sysmsg-terminal");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "sleep 10 &", output: "Task task-1 launched" }) }),
+      task: encodeTaskDetails({ taskId: "task-1", logUri: "", description: "Background task" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Working on it..." })
+    });
+    // System message notification arrives as the final step
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-sysmsg-terminal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // The system message step is terminal, not an empty placeholder —
+    // turnCompleteCandidate must be true so the turn resolves immediately
+    // rather than hanging until printTimeout.
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
   it("tracks background tasks as active until completion system message, without requiring a new user prompt", () => {
     const db = createConversationDb(dir, "conv-bg-active");
     insertStep(db, {

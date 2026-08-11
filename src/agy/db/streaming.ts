@@ -289,8 +289,11 @@ function isTerminalStepStatus(status: number): boolean {
 function isEmptyAgentTextStep(row: StepRow): boolean {
   if (row.stepType !== 15) return false;
   const text = row.stepPayload.agentText?.text ?? "";
+  // System message envelopes carry real (internal) content — they are not the
+  // empty placeholders agy inserts while initializing response generation.
+  if (isSystemMessage(text)) return false;
   const thought = row.stepPayload.agentText?.thought;
-  const hasText = text.length > 0 && !isSystemMessage(text);
+  const hasText = text.length > 0;
   const hasThought = Boolean(thought && thought.length > 0);
   return !hasText && !hasThought;
 }
