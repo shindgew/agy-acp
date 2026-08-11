@@ -3833,4 +3833,29 @@ describe("subagent_info metadata propagation", () => {
       type: ""
     });
   });
+
+  it("falls back to subagent_info column when subagent_details is absent", () => {
+    const db = createConversationDb(dir, "conv-subagent-info-col");
+    db.exec("ALTER TABLE steps ADD COLUMN subagent_info BLOB");
+    const subagentBytes = encodeSubagentInfo({
+      conversationId: "info-conv-777",
+      logUri: "file:///logs/info.log",
+      role: "Info Role"
+    });
+    db.prepare(
+      "INSERT INTO steps (idx, step_type, status, step_payload, subagent_info) VALUES (?, ?, ?, ?, ?)"
+    ).run(1, 127, 3, Buffer.from(encodeStepPayload({})), Buffer.from(subagentBytes));
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-info-col")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].subagent).toEqual({
+      conversationId: "info-conv-777",
+      logUri: "file:///logs/info.log",
+      role: "Info Role",
+      type: ""
+    });
+  });
 });
