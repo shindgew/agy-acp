@@ -17,6 +17,7 @@ import {
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
+  encodeSubagentInfo,
   encodeTaskDetails,
   encodeToolCall,
   encodeToolRun,
@@ -3621,6 +3622,133 @@ describe("user prompt envelope replay", () => {
 
       conn.close();
       db.close();
+    });
+  });
+});
+
+describe("subagent_info metadata propagation", () => {
+  it("decodes subagentInfo payload field and decorates tool call with conversationId, logUri, and _meta", () => {
+    const db = createConversationDb(dir, "conv-subagent-info");
+    insertStep(db, {
+      idx: 1,
+      stepType: 127,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "subagent-call-1",
+            namePrimary: "invoke_subagent",
+            rawInputJson: JSON.stringify({
+              Subagents: [{ Prompt: "Inspect tests", Role: "Test Auditor", TypeName: "research" }]
+            })
+          })
+        }),
+        subagentInfo: encodeSubagentInfo({
+          conversationId: "sub-conv-uuid-1234",
+          logUri: "file:///logs/subagent-1234.log",
+          role: "Test Auditor",
+          type: "research"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-info")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].stepPayload.subagentInfo).toEqual({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log",
+      role: "Test Auditor",
+      type: "research"
+    });
+
+    const update = sessionUpdateFromStep(rows[0]) as any;
+    expect(update.sessionUpdate).toBe("tool_call");
+    expect(update.toolCallId).toBe("subagent-call-1");
+    expect(update.rawOutput).toMatchObject({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log"
+    });
+    expect(update._meta).toMatchObject({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log",
+      "agy-acp/subagentInfo": {
+        conversationId: "sub-conv-uuid-1234",
+        logUri: "file:///logs/subagent-1234.log",
+        role: "Test Auditor",
+        type: "research"
+      }
+    });
+
+    const textBlocks = update.content.map((c: any) => c.content?.text ?? "").join("\n");
+    expect(textBlocks).toContain("Subagent Conversation: sub-conv-uuid-1234");
+    expect(textBlocks).toContain("Log: file:///logs/subagent-1234.log");
+  });
+
+  it("extracts subagent metadata fallback from tool rawInput if protobuf subagentInfo is absent", () => {
+    const db = createConversationDb(dir, "conv-subagent-fallback");
+    insertStep(db, {
+      idx: 1,
+      stepType: 127,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "subagent-call-2",
+            namePrimary: "invoke_subagent",
+            rawInputJson: JSON.stringify({
+              Subagents: [{
+                Prompt: "Run security audit",
+                Role: "Security Expert",
+                conversationId: "sub-conv-999",
+                logUri: "file:///logs/sec.log"
+              }]
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-fallback")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    const update = sessionUpdateFromStep(rows[0]) as any;
+    expect(update.rawOutput).toMatchObject({
+      conversationId: "sub-conv-999",
+      logUri: "file:///logs/sec.log"
+    });
+    expect(update._meta).toMatchObject({
+      conversationId: "sub-conv-999",
+      logUri: "file:///logs/sec.log"
+    });
+  });
+
+  it("decodes subagent metadata directly from database subagent_details column when present", () => {
+    const db = createConversationDb(dir, "conv-subagent-col");
+    db.exec("ALTER TABLE steps ADD COLUMN subagent_details BLOB");
+    const subagentBytes = encodeSubagentInfo({
+      conversationId: "col-conv-555",
+      logUri: "file:///logs/col.log",
+      role: "Column Role"
+    });
+    db.prepare(
+      "INSERT INTO steps (idx, step_type, status, step_payload, subagent_details) VALUES (?, ?, ?, ?, ?)"
+    ).run(1, 127, 3, Buffer.from(encodeStepPayload({})), Buffer.from(subagentBytes));
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-col")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].subagent).toEqual({
+      conversationId: "col-conv-555",
+      logUri: "file:///logs/col.log",
+      role: "Column Role",
+      type: ""
     });
   });
 });

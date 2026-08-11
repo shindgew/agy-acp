@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
-import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
+import type { ErrorDetails, PermissionInfo, SubagentInfo, TaskDetails } from "./columns.js";
 import {
   isPlanFile,
   planIdForPath,
@@ -150,6 +150,15 @@ function taskBlock(t: TaskDetails): Record<string, unknown> {
   return textBlock(lines.join("\n"));
 }
 
+function subagentBlock(s: SubagentInfo): Record<string, unknown> {
+  const lines = [
+    s.role ? `Role: ${s.role}` : s.type ? `Type: ${s.type}` : undefined,
+    s.conversationId && `Subagent Conversation: ${s.conversationId}`,
+    s.logUri && `Log: ${s.logUri}`
+  ].filter((line): line is string => Boolean(line));
+  return textBlock(lines.join("\n"));
+}
+
 /** Decoded agy tool identity, preferring the primary field when both exist. */
 export function decodedToolName(stepRow: StepRow): string {
   return (
@@ -178,6 +187,8 @@ export function toolCallUpdate(opts: {
 
   const blocks: Record<string, unknown>[] = [...(content ?? [])];
   if (stepRow.task) blocks.push(taskBlock(stepRow.task));
+  const subagentInfo = stepRow.subagent ?? stepRow.stepPayload.subagentInfo;
+  if (subagentInfo && !stepRow.task) blocks.push(subagentBlock(subagentInfo));
   if (stepRow.permission) blocks.push(permissionBlock(stepRow.permission));
   if (stepRow.error) blocks.push(errorBlock(stepRow.error));
 
@@ -193,7 +204,7 @@ export function toolCallUpdate(opts: {
 
   // Emit `tool_call` (v1 create shape). The v2 boundary rewrites this to
   // `tool_call_update` (first update creates the call).
-  return {
+  const update = {
     sessionUpdate: "tool_call",
     toolCallId: toolCallId(stepRow),
     ...(name ? { name } : {}),
@@ -204,7 +215,25 @@ export function toolCallUpdate(opts: {
     ...(locations && locations.length > 0 ? { locations } : {}),
     ...(rawInput != null ? { rawInput } : {}),
     ...(rawOutput != null ? { rawOutput } : {})
-  } as SessionUpdate;
+  } as SessionUpdate & { _meta?: Record<string, unknown>; rawOutput?: unknown };
+
+  if (subagentInfo) {
+    const rawOut =
+      update.rawOutput && typeof update.rawOutput === "object" && !Array.isArray(update.rawOutput)
+        ? { ...(update.rawOutput as Record<string, unknown>) }
+        : {};
+    if (subagentInfo.conversationId && !rawOut.conversationId) rawOut.conversationId = subagentInfo.conversationId;
+    if (subagentInfo.logUri && !rawOut.logUri) rawOut.logUri = subagentInfo.logUri;
+    if (Object.keys(rawOut).length > 0) update.rawOutput = rawOut;
+
+    const meta = update._meta ? { ...update._meta } : {};
+    if (subagentInfo.conversationId) meta.conversationId = subagentInfo.conversationId;
+    if (subagentInfo.logUri) meta.logUri = subagentInfo.logUri;
+    meta["agy-acp/subagentInfo"] = subagentInfo;
+    update._meta = meta;
+  }
+
+  return update;
 }
 
 /** Absolute path -> project-relative path for display; unchanged if outside cwd. */
@@ -794,6 +823,25 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
     .map((s) => asStr(pick(s, "Prompt", "prompt"))?.trim())
     .filter((prompt): prompt is string => Boolean(prompt))
     .map(codeBlock);
+
+  // Fall back to extracting conversationId / logUri from rawInput if subagentInfo object was not decoded
+  let subagentInfo = stepRow.subagent ?? stepRow.stepPayload.subagentInfo;
+  if (!subagentInfo && subagents.length > 0) {
+    const first = subagents[0] as Record<string, unknown>;
+    const conversationId = asStr(pick(first, "conversationId", "conversation_id", "ConversationId"));
+    const logUri = asStr(pick(first, "logUri", "log_uri", "LogUri"));
+    const role = asStr(pick(first, "role", "Role"));
+    const type = asStr(pick(first, "type", "Type", "typeName", "TypeName"));
+    if (conversationId || logUri) {
+      subagentInfo = {
+        conversationId: conversationId ?? "",
+        logUri: logUri ?? "",
+        ...(role ? { role } : {}),
+        ...(type ? { type } : {})
+      };
+      stepRow.subagent = subagentInfo;
+    }
+  }
 
   const name = decodedToolName(stepRow) || "invoke_subagent";
 
