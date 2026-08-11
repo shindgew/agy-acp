@@ -219,8 +219,8 @@ export class StreamPoller {
     ]));
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
-    this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
     const latest = rows.at(-1);
+    this._busy = latest !== undefined && !isTerminalStepStatus(latest.status);
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
@@ -232,7 +232,7 @@ export class StreamPoller {
       !rows.hasDecodeError &&
       latest !== undefined &&
       latest.stepType !== 14 &&
-      (latest.status === 3 || latest.status === 6 || latest.status === 7);
+      isTerminalStepStatus(latest.status);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.

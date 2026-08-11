@@ -2764,6 +2764,43 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("treats turn as completed candidate when latest step is terminal even if intermediate row status is 2", () => {
+    const db = createConversationDb(dir, "conv-intermed-status-2");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run command" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "cmd-1", namePrimary: "run_command", rawInputJson: "{}" })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Command finished." })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-intermed-status-2",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    poller.poll();
+    expect(poller.turnCompleteCandidate).toBe(true);
+    poller.close();
+    db.close();
+  });
+
   it("does not treat stepType 14 (user prompt, status 3) as a turn completion candidate", () => {
     const db = createConversationDb(dir, "conv-user-prompt-only");
     insertStep(db, {
