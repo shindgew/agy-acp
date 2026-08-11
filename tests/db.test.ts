@@ -7,6 +7,7 @@ import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
+import { isSystemMessage, isSystemMessagePrefix } from "../src/agy/db/system-message.js";
 import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
@@ -3857,5 +3858,39 @@ describe("subagent_info metadata propagation", () => {
       role: "Info Role",
       type: ""
     });
+  });
+});
+
+describe("isSystemMessage & isSystemMessagePrefix", () => {
+  it("buffers every accepted system-message prefix form", () => {
+    const prefixes = [
+      "<SYSTEM_MESSAGE>",
+      "<SYSTEM_MESSAGE>\n",
+      "<SYSTEM_MESSAGE>\n[Mes",
+      "<SYSTEM_MESSAGE>\nsend",
+      "<SYSTEM_MESSAGE>\nsender=user",
+      "<SYSTEM_MESSAGE>\ncontent=hello",
+      "<SYSTEM_MESSAGE>\ntimestamp=123",
+      "<SYSTEM_MESSAGE>\npriority=high",
+      "<SYSTEM_MESSAGE>\ntask"
+    ];
+    for (const p of prefixes) {
+      expect(isSystemMessagePrefix(p)).toBe(true);
+    }
+
+    const nonPrefixes = [
+      "Hello world",
+      "<SYSTEM_MESSAGE>\nHello world",
+      "<SYSTEM_MESSAGE>\nsome random text"
+    ];
+    for (const p of nonPrefixes) {
+      expect(isSystemMessagePrefix(p)).toBe(false);
+    }
+  });
+
+  it("identifies complete system message envelopes", () => {
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\nsender=system priority=low")).toBe(true);
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\n[Message] timestamp=123")).toBe(true);
+    expect(isSystemMessage("Regular text")).toBe(false);
   });
 });

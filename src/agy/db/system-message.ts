@@ -18,7 +18,6 @@ export function isSystemMessage(text: string): boolean {
  */
 export function isSystemMessagePrefix(text: string): boolean {
   const tag = "<SYSTEM_MESSAGE>";
-  const marker = "[Message]";
   const trimmed = text.trimStart();
   const tagCandidate = trimmed.slice(0, Math.min(trimmed.length, tag.length));
   if (tagCandidate.toLowerCase() !== tag.slice(0, tagCandidate.length).toLowerCase()) return false;
@@ -27,16 +26,18 @@ export function isSystemMessagePrefix(text: string): boolean {
   const afterTag = trimmed.slice(tag.length);
   const markerStart = afterTag.search(/\S/);
   if (markerStart === -1) return true;
-  if (markerStart === 0 || (afterTag[markerStart - 1] !== "\n" && afterTag[markerStart - 1] !== "\r")) return false;
 
   const markerCandidate = afterTag.slice(markerStart);
-  if (markerCandidate.startsWith("[")) {
-    const brackets = ["[message]", "[notice]", "[system]"];
-    const lower = markerCandidate.toLowerCase();
-    return brackets.some((b) => b.startsWith(lower) || lower.startsWith(b));
-  }
-  return (
-    markerCandidate.length <= marker.length &&
-    markerCandidate.toLowerCase() === marker.slice(0, markerCandidate.length).toLowerCase()
-  );
+  const envelopePrefixes = [
+    "[message]",
+    "[notice]",
+    "[system]",
+    "sender=",
+    "content=",
+    "timestamp=",
+    "priority=",
+    "task"
+  ];
+  const lower = markerCandidate.toLowerCase();
+  return envelopePrefixes.some((p) => p.startsWith(lower) || lower.startsWith(p));
 }
