@@ -766,12 +766,25 @@ describe("buildModelCatalog", () => {
     expect(reasoningConfig.id).toBe("reasoningEffort");
     expect(reasoningConfig.name).toBe("Reasoning Effort");
     expect(modelConfig.options).toEqual([
-      { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" }
+      { value: "Gemini 3.5 Flash", name: "Gemini 3.5 Flash" }
     ]);
     expect(reasoningConfig.options).toEqual([
-      { value: "medium", name: "Medium" },
-      { value: "high", name: "High" }
+      { value: "Medium", name: "Medium" },
+      { value: "High", name: "High" }
     ]);
+  });
+
+  it("parses two-column modern agy models output, stripping effort from model display name", () => {
+    const catalog = buildModelCatalog([
+      "gemini-3.6-flash-high       Gemini 3.6 Flash (High)",
+      "gemini-3.6-flash-medium     Gemini 3.6 Flash (Medium)",
+      "gemini-3.6-flash-low        Gemini 3.6 Flash (Low)",
+      "claude-sonnet-4-6           Claude Sonnet 4.6"
+    ]);
+
+    expect(catalog.baseModels()).toEqual(["gemini-3.6-flash", "claude-sonnet-4-6"]);
+    expect(catalog.displayName("gemini-3.6-flash")).toBe("Gemini 3.6 Flash");
+    expect(catalog.effortsFor("gemini-3.6-flash")).toEqual(["high", "medium", "low"]);
   });
 });
 
@@ -1141,7 +1154,7 @@ describe("available_commands_update and slash commands", () => {
           expect.objectContaining({
             sessionUpdate: "config_option_update",
             configOptions: expect.arrayContaining([
-              expect.objectContaining({ id: "reasoningEffort", currentValue: "high" })
+              expect.objectContaining({ id: "reasoningEffort", currentValue: "High" })
             ])
           })
         ])
@@ -1187,41 +1200,41 @@ describe("session model config", () => {
       expect(optionValues(modeConfig)).toEqual(["default", "accept-edits", "plan"]);
 
       expect(modelConfig.category).toBe("model");
-      expect(modelConfig.currentValue).toBe("gemini-3.5-flash");
+      expect(modelConfig.currentValue).toBe("Gemini 3.5 Flash");
       expect(modelConfig.options).toEqual([
-        { value: "gemini-3.5-flash", name: "Gemini 3.5 Flash" },
-        { value: "claude-opus-4-6-thinking", name: "Claude Opus 4.6 Thinking" },
-        { value: "claude-sonnet-4-6", name: "Claude Sonnet 4.6" }
+        { value: "Gemini 3.5 Flash", name: "Gemini 3.5 Flash" },
+        { value: "Claude Opus 4.6 Thinking", name: "Claude Opus 4.6 Thinking" },
+        { value: "Claude Sonnet 4.6", name: "Claude Sonnet 4.6" }
       ]);
 
       expect(reasoningConfig.category).toBe("thought_level");
-      expect(reasoningConfig.currentValue).toBe("medium");
+      expect(reasoningConfig.currentValue).toBe("Medium");
       expect(reasoningConfig.options).toEqual([
-        { value: "medium", name: "Medium" },
-        { value: "high", name: "High" }
+        { value: "Medium", name: "Medium" },
+        { value: "High", name: "High" }
       ]);
       expect(configOptions.find((option) => option.id === "effort" || option.id === "fast-mode")).toBeUndefined();
 
       const modelResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
-        value: "gemini-3.5-flash"
+        value: "Gemini 3.5 Flash"
       });
       expect(modelResponse.configOptions.map((option) => option.id)).toEqual([
         "mode",
         "model",
         "reasoningEffort"
       ]);
-      expect(modelResponse.configOptions[1].currentValue).toBe("gemini-3.5-flash");
-      expect(modelResponse.configOptions[2].currentValue).toBe("medium");
-      expect(optionValues(modelResponse.configOptions[2] as SelectConfigOption)).toEqual(["medium", "high"]);
+      expect(modelResponse.configOptions[1].currentValue).toBe("Gemini 3.5 Flash");
+      expect(modelResponse.configOptions[2].currentValue).toBe("Medium");
+      expect(optionValues(modelResponse.configOptions[2] as SelectConfigOption)).toEqual(["Medium", "High"]);
 
       const reasoningResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "reasoningEffort",
         value: "high"
       });
-      expect(reasoningResponse.configOptions[2].currentValue).toBe("high");
+      expect(reasoningResponse.configOptions[2].currentValue).toBe("High");
 
       const modeResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
@@ -1233,10 +1246,10 @@ describe("session model config", () => {
       const thinkingResponse = await connection.agent.request(methods.agent.session.setConfigOption, {
         sessionId: session.sessionId,
         configId: "model",
-        value: "claude-opus-4-6-thinking"
+        value: "Claude Opus 4.6 Thinking"
       });
-      expect(thinkingResponse.configOptions[1].currentValue).toBe("claude-opus-4-6-thinking");
-      expect(thinkingResponse.configOptions[2].currentValue).toBe("none");
+      expect(thinkingResponse.configOptions[1].currentValue).toBe("Claude Opus 4.6 Thinking");
+      expect(thinkingResponse.configOptions[2].currentValue).toBe("N/A");
       expect(optionNames(thinkingResponse.configOptions[2] as SelectConfigOption)).toEqual(["N/A"]);
 
       await connection.agent.request(methods.agent.session.prompt, {
