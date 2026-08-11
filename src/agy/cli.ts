@@ -44,6 +44,7 @@ const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
 const PERMISSION_REDRAW_TIMEOUT_MS = 500;
+const BACKGROUND_SETTLE_MS = 400;
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -479,6 +480,7 @@ export class AgyCliSession {
     let deadline = Date.now() + timeoutMs;
     let candidateRevision = -1;
     let seenRevision = -1;
+    let bgWaitStart = 0;
     // A newly spawned TUI first draws its initial idle prompt, then draws
     // another when the submitted turn finishes. A reused TUI only owes the
     // latter marker.
@@ -675,11 +677,16 @@ export class AgyCliSession {
           // Do not re-arm deadline here: only poller revision progress (above)
           // refreshes the timeout, so a missing completion cannot hang forever.
           if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
-            const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
-            if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
-            continue;
+            if (bgWaitStart === 0) bgWaitStart = Date.now();
+            if (Date.now() - bgWaitStart < BACKGROUND_SETTLE_MS) {
+              const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
+              if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
+              continue;
+            }
           }
           break;
+        } else {
+          bgWaitStart = 0;
         }
         const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
         if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
@@ -936,6 +943,7 @@ export class AgyCliSession {
         const timeoutMs = parsePrintTimeoutMs(this.config.printTimeout);
         let deadline = Date.now() + timeoutMs;
         let seenRevision = poller.revision;
+        let quietTime = 0;
         while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
           if (Date.now() >= deadline) {
             break;
@@ -947,6 +955,12 @@ export class AgyCliSession {
           if (poller.revision !== seenRevision) {
             seenRevision = poller.revision;
             deadline = Date.now() + timeoutMs;
+            quietTime = 0;
+          } else {
+            quietTime += POLL_INTERVAL_MS;
+            if (quietTime >= BACKGROUND_SETTLE_MS) {
+              break;
+            }
           }
         }
       }
