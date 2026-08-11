@@ -8,7 +8,7 @@
 import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { decodeErrorDetails, decodePermissions, decodeTaskDetails } from "./columns.js";
+import { decodeErrorDetails, decodePermissions, decodeSubagentInfo, decodeTaskDetails } from "./columns.js";
 import { decodeStepPayload } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -24,6 +24,8 @@ interface RawRow {
   error_details: unknown;
   permissions: unknown;
   task_details: unknown;
+  subagent_details?: unknown;
+  subagent_info?: unknown;
 }
 
 function toUint8(v: unknown): Uint8Array {
@@ -46,7 +48,8 @@ function rowToStep(r: RawRow): StepRow {
     stepPayload: decodeStepPayload(toUint8(r.step_payload)),
     error: decodeColumn(r.error_details, decodeErrorDetails),
     permission: decodeColumn(r.permissions, decodePermissions),
-    task: decodeColumn(r.task_details, decodeTaskDetails)
+    task: decodeColumn(r.task_details, decodeTaskDetails),
+    subagent: decodeColumn(r.subagent_details ?? r.subagent_info, decodeSubagentInfo)
   };
 }
 
