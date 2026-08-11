@@ -3563,4 +3563,64 @@ describe("user prompt envelope replay", () => {
       { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
     ]);
   });
+
+  describe("gh#98: toolAction and toolSummary exposure in updates", () => {
+    it("uses toolSummary and toolAction for view_file, grep_search, and custom tools in ACP updates", () => {
+      const db = createConversationDb(dir, "conv-gh98-titles");
+      const viewCall = encodeToolCall({
+        callId: "call-view-1",
+        namePrimary: "view_file",
+        rawInputJson: JSON.stringify({
+          AbsolutePath: "/path/to/file.ts",
+          toolSummary: "View file.ts",
+          toolAction: "Viewing TypeScript source"
+        })
+      });
+      const grepCall = encodeToolCall({
+        callId: "call-grep-1",
+        namePrimary: "grep_search",
+        rawInputJson: JSON.stringify({
+          Query: "resolveToolTitle",
+          toolAction: "Searching codebase"
+        })
+      });
+
+      insertStep(db, {
+        idx: 1,
+        stepType: 8,
+        status: 3,
+        stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call: viewCall }) })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 7,
+        status: 3,
+        stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call: grepCall }) })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false });
+      const conn = ConversationDb.open(dir, "conv-gh98-titles")!;
+
+      const updates = translator.translate(conn.readAfter(0));
+      expect(updates).toMatchObject([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-view-1",
+          name: "view_file",
+          title: "View file.ts",
+          kind: "read"
+        },
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-grep-1",
+          name: "grep_search",
+          title: "Searching codebase",
+          kind: "search"
+        }
+      ]);
+
+      conn.close();
+      db.close();
+    });
+  });
 });
