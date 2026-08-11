@@ -671,12 +671,15 @@ export class AgyCliSession {
             }
           }
         }
-        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
+        const isIdleCandidate =
+          (candidateRevision === poller.revision || (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx)) &&
+          this.#ptyIdleMarkerCount >= requiredIdleMarkerCount;
+        if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
           // Do not re-arm deadline here: only poller revision progress (above)
           // refreshes the timeout, so a missing completion cannot hang forever.
-          if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          if ((poller.hasActiveBackgroundTasks || !poller.turnCompleteCandidate) && !this.#cancelled) {
             if (bgWaitStart === 0) bgWaitStart = Date.now();
             if (Date.now() - bgWaitStart < BACKGROUND_SETTLE_MS) {
               const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
