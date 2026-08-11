@@ -3,3 +3,5 @@ dist/
 .agy-acp/
 *.log
 .DS_Store
+.pnpm-store/
+

@@ -7,6 +7,7 @@ import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
+import { isSystemMessage, isSystemMessagePrefix } from "../src/agy/db/system-message.js";
 import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
 import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
@@ -17,6 +18,7 @@ import {
   encodePermissions,
   encodeSearchHit,
   encodeStepPayload,
+  encodeSubagentInfo,
   encodeTaskDetails,
   encodeToolCall,
   encodeToolRun,
@@ -2764,6 +2766,43 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("treats turn as completed candidate when latest step is terminal even if intermediate row status is 2", () => {
+    const db = createConversationDb(dir, "conv-intermed-status-2");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run command" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 2,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "cmd-1", namePrimary: "run_command", rawInputJson: "{}" })
+        })
+      })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Command finished." })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-intermed-status-2",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    poller.poll();
+    expect(poller.turnCompleteCandidate).toBe(true);
+    poller.close();
+    db.close();
+  });
+
   it("does not treat stepType 14 (user prompt, status 3) as a turn completion candidate", () => {
     const db = createConversationDb(dir, "conv-user-prompt-only");
     insertStep(db, {
@@ -2791,6 +2830,88 @@ describe("StreamPoller", () => {
     });
     expect(poller.poll()).toHaveLength(1);
     expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {
+    const db = createConversationDb(dir, "conv-empty-agent-text-placeholder");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Hello assistant" })
+    });
+    // agy appends an empty stepType 15 placeholder with status 3 while initializing generation
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-empty-agent-text-placeholder",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    // Updating step 2 with actual text makes turnCompleteCandidate true
+    updateStep(db, 2, {
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Hello! How can I help you today?" })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("treats a terminal system message step as a turn completion candidate, not an empty placeholder", () => {
+    const db = createConversationDb(dir, "conv-sysmsg-terminal");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "sleep 10 &", output: "Task task-1 launched" }) }),
+      task: encodeTaskDetails({ taskId: "task-1", logUri: "", description: "Background task" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Working on it..." })
+    });
+    // System message notification arrives as the final step
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-sysmsg-terminal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // The system message step is terminal, not an empty placeholder —
+    // turnCompleteCandidate must be true so the turn resolves immediately
+    // rather than hanging until printTimeout.
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
 
     poller.close();
     db.close();
@@ -3098,6 +3219,33 @@ describe("StreamPoller", () => {
         agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-b content=Task id "task-b" finished'
       })
     });
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("treats first-seen terminal task rows as completions", () => {
+    const db = createConversationDb(dir, "conv-bg-first-seen-terminal");
+    // A single step carrying task details already in a terminal status (e.g. status 3).
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-terminal-first content=Task finished'
+      }),
+      task: encodeTaskDetails({ taskId: "task-terminal-first", logUri: "", description: "quick task" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-first-seen-terminal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
     poller.poll();
     expect(poller.hasActiveBackgroundTasks).toBe(false);
 
@@ -3525,5 +3673,251 @@ describe("user prompt envelope replay", () => {
     expect(updates).toEqual([
       { sessionUpdate: "user_message_chunk", messageId: "1", content: { type: "text", text: raw } }
     ]);
+  });
+
+  describe("gh#98: toolAction and toolSummary exposure in updates", () => {
+    it("uses toolSummary and toolAction for view_file, grep_search, and custom tools in ACP updates", () => {
+      const db = createConversationDb(dir, "conv-gh98-titles");
+      const viewCall = encodeToolCall({
+        callId: "call-view-1",
+        namePrimary: "view_file",
+        rawInputJson: JSON.stringify({
+          AbsolutePath: "/path/to/file.ts",
+          toolSummary: "View file.ts",
+          toolAction: "Viewing TypeScript source"
+        })
+      });
+      const grepCall = encodeToolCall({
+        callId: "call-grep-1",
+        namePrimary: "grep_search",
+        rawInputJson: JSON.stringify({
+          Query: "resolveToolTitle",
+          toolAction: "Searching codebase"
+        })
+      });
+
+      insertStep(db, {
+        idx: 1,
+        stepType: 8,
+        status: 3,
+        stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call: viewCall }) })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 7,
+        status: 3,
+        stepPayload: encodeStepPayload({ toolRun: encodeToolRun({ call: grepCall }) })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false });
+      const conn = ConversationDb.open(dir, "conv-gh98-titles")!;
+
+      const updates = translator.translate(conn.readAfter(0));
+      expect(updates).toMatchObject([
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-view-1",
+          name: "view_file",
+          title: "View file.ts",
+          kind: "read"
+        },
+        {
+          sessionUpdate: "tool_call",
+          toolCallId: "call-grep-1",
+          name: "grep_search",
+          title: "Searching codebase",
+          kind: "search"
+        }
+      ]);
+
+      conn.close();
+      db.close();
+    });
+  });
+});
+
+describe("subagent_info metadata propagation", () => {
+  it("decodes subagentInfo payload field and decorates tool call with conversationId, logUri, and _meta", () => {
+    const db = createConversationDb(dir, "conv-subagent-info");
+    insertStep(db, {
+      idx: 1,
+      stepType: 127,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "subagent-call-1",
+            namePrimary: "invoke_subagent",
+            rawInputJson: JSON.stringify({
+              Subagents: [{ Prompt: "Inspect tests", Role: "Test Auditor", TypeName: "research" }]
+            })
+          })
+        }),
+        subagentInfo: encodeSubagentInfo({
+          conversationId: "sub-conv-uuid-1234",
+          logUri: "file:///logs/subagent-1234.log",
+          role: "Test Auditor",
+          type: "research"
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-info")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].stepPayload.subagentInfo).toEqual({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log",
+      role: "Test Auditor",
+      type: "research"
+    });
+
+    const update = sessionUpdateFromStep(rows[0]) as any;
+    expect(update.sessionUpdate).toBe("tool_call");
+    expect(update.toolCallId).toBe("subagent-call-1");
+    expect(update.rawOutput).toMatchObject({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log"
+    });
+    expect(update._meta).toMatchObject({
+      conversationId: "sub-conv-uuid-1234",
+      logUri: "file:///logs/subagent-1234.log",
+      "agy-acp/subagentInfo": {
+        conversationId: "sub-conv-uuid-1234",
+        logUri: "file:///logs/subagent-1234.log",
+        role: "Test Auditor",
+        type: "research"
+      }
+    });
+
+    const textBlocks = update.content.map((c: any) => c.content?.text ?? "").join("\n");
+    expect(textBlocks).toContain("Subagent Conversation: sub-conv-uuid-1234");
+    expect(textBlocks).toContain("Log: file:///logs/subagent-1234.log");
+  });
+
+  it("extracts subagent metadata fallback from tool rawInput if protobuf subagentInfo is absent", () => {
+    const db = createConversationDb(dir, "conv-subagent-fallback");
+    insertStep(db, {
+      idx: 1,
+      stepType: 127,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({
+            callId: "subagent-call-2",
+            namePrimary: "invoke_subagent",
+            rawInputJson: JSON.stringify({
+              Subagents: [{
+                Prompt: "Run security audit",
+                Role: "Security Expert",
+                conversationId: "sub-conv-999",
+                logUri: "file:///logs/sec.log"
+              }]
+            })
+          })
+        })
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-fallback")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    const update = sessionUpdateFromStep(rows[0]) as any;
+    expect(update.rawOutput).toMatchObject({
+      conversationId: "sub-conv-999",
+      logUri: "file:///logs/sec.log"
+    });
+    expect(update._meta).toMatchObject({
+      conversationId: "sub-conv-999",
+      logUri: "file:///logs/sec.log"
+    });
+  });
+
+  it("decodes subagent metadata directly from database subagent_details column when present", () => {
+    const db = createConversationDb(dir, "conv-subagent-col");
+    db.exec("ALTER TABLE steps ADD COLUMN subagent_details BLOB");
+    const subagentBytes = encodeSubagentInfo({
+      conversationId: "col-conv-555",
+      logUri: "file:///logs/col.log",
+      role: "Column Role"
+    });
+    db.prepare(
+      "INSERT INTO steps (idx, step_type, status, step_payload, subagent_details) VALUES (?, ?, ?, ?, ?)"
+    ).run(1, 127, 3, Buffer.from(encodeStepPayload({})), Buffer.from(subagentBytes));
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-col")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].subagent).toEqual({
+      conversationId: "col-conv-555",
+      logUri: "file:///logs/col.log",
+      role: "Column Role",
+      type: ""
+    });
+  });
+
+  it("falls back to subagent_info column when subagent_details is absent", () => {
+    const db = createConversationDb(dir, "conv-subagent-info-col");
+    db.exec("ALTER TABLE steps ADD COLUMN subagent_info BLOB");
+    const subagentBytes = encodeSubagentInfo({
+      conversationId: "info-conv-777",
+      logUri: "file:///logs/info.log",
+      role: "Info Role"
+    });
+    db.prepare(
+      "INSERT INTO steps (idx, step_type, status, step_payload, subagent_info) VALUES (?, ?, ?, ?, ?)"
+    ).run(1, 127, 3, Buffer.from(encodeStepPayload({})), Buffer.from(subagentBytes));
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-subagent-info-col")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    expect(rows[0].subagent).toEqual({
+      conversationId: "info-conv-777",
+      logUri: "file:///logs/info.log",
+      role: "Info Role",
+      type: ""
+    });
+  });
+});
+
+describe("isSystemMessage & isSystemMessagePrefix", () => {
+  it("buffers every accepted system-message prefix form", () => {
+    const prefixes = [
+      "<SYSTEM_MESSAGE>",
+      "<SYSTEM_MESSAGE>\n",
+      "<SYSTEM_MESSAGE>\n[Mes",
+      "<SYSTEM_MESSAGE>\nsend",
+      "<SYSTEM_MESSAGE>\nsender=user",
+      "<SYSTEM_MESSAGE>\ncontent=hello",
+      "<SYSTEM_MESSAGE>\ntimestamp=123",
+      "<SYSTEM_MESSAGE>\npriority=high",
+      "<SYSTEM_MESSAGE>\ntask"
+    ];
+    for (const p of prefixes) {
+      expect(isSystemMessagePrefix(p)).toBe(true);
+    }
+
+    const nonPrefixes = [
+      "Hello world",
+      "<SYSTEM_MESSAGE>\nHello world",
+      "<SYSTEM_MESSAGE>\nsome random text"
+    ];
+    for (const p of nonPrefixes) {
+      expect(isSystemMessagePrefix(p)).toBe(false);
+    }
+  });
+
+  it("identifies complete system message envelopes", () => {
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\nsender=system priority=low")).toBe(true);
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\n[Message] timestamp=123")).toBe(true);
+    expect(isSystemMessage("Regular text")).toBe(false);
   });
 });

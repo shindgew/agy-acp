@@ -1,4 +1,4 @@
-import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
+import type { ErrorDetails, PermissionInfo, SubagentInfo, TaskDetails } from "./columns.js";
 import type { StepPayload } from "./step-payload.js";
 
 export type { StepPayload } from "./step-payload.js";
@@ -21,4 +21,6 @@ export type StepRow = {
   permission?: PermissionInfo | null;
   /** Decoded `task_details` column, for background-task steps. */
   task?: TaskDetails | null;
+  /** Decoded subagent metadata blob, when present on delegated steps. */
+  subagent?: SubagentInfo | null;
 };

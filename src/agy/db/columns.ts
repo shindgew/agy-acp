@@ -5,7 +5,7 @@
 // particular is nested three levels deep (entry -> target -> kind/value).
 
 import { readInt, readMessage, readSubmessage } from "./protowire.js";
-import { decodeTaskDetails, type TaskDetails } from "./step-payload.js";
+import { decodeSubagentInfo, decodeTaskDetails, type SubagentInfo, type TaskDetails } from "./step-payload.js";
 
 export interface ErrorDetails {
   /** Short, user-facing summary (e.g. "User denied permission for command(...)"). */
@@ -75,5 +75,5 @@ export function decodePermissions(bytes: Uint8Array): PermissionInfo | null {
   };
 }
 
-export { decodeTaskDetails };
-export type { TaskDetails };
+export { decodeSubagentInfo, decodeTaskDetails };
+export type { SubagentInfo, TaskDetails };

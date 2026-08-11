@@ -145,6 +145,14 @@ export interface ModelProviderError {
   userMessage: string;
 }
 
+/** The subagent metadata blob (from subagent_info / step payload field 127). */
+export interface SubagentInfo {
+  conversationId: string;
+  logUri: string;
+  role?: string;
+  type?: string;
+}
+
 /** The blob in the `task_details` column. */
 export interface TaskDetails {
   taskId: string;
@@ -153,7 +161,7 @@ export interface TaskDetails {
 }
 
 /** The blob in the `step_payload` column. Step-type meaning:
- *  5,7,8,9,17,21,33,101,138 = tool run; 15 = agent text; 23 = title update. */
+ *  5,7,8,9,17,21,33,101,127,138 = tool run; 15 = agent text; 23 = title update. */
 export interface StepPayload {
   validityCheck: number;
   toolRun: ToolRun | undefined;
@@ -168,6 +176,7 @@ export interface StepPayload {
   webSearch: WebSearchResult | undefined;
   urlContent: UrlContentResult | undefined;
   modelProviderError: ModelProviderError | undefined;
+  subagentInfo: SubagentInfo | undefined;
 }
 
 function decodeToolCall(bytes: Uint8Array): ToolCall {
@@ -446,6 +455,19 @@ export function decodeTaskDetails(bytes: Uint8Array): TaskDetails {
   });
 }
 
+export function decodeSubagentInfo(bytes: Uint8Array): SubagentInfo {
+  return readMessage<SubagentInfo>(
+    bytes,
+    { conversationId: "", logUri: "", role: "", type: "" },
+    {
+      1: (m, r) => (m.conversationId = r.string()),
+      2: (m, r) => (m.logUri = r.string()),
+      3: (m, r) => (m.role = r.string()),
+      4: (m, r) => (m.type = r.string())
+    }
+  );
+}
+
 export function decodeStepPayload(bytes: Uint8Array): StepPayload {
   return readMessage<StepPayload>(
     bytes,
@@ -462,7 +484,8 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       commandResult: undefined,
       webSearch: undefined,
       urlContent: undefined,
-      modelProviderError: undefined
+      modelProviderError: undefined,
+      subagentInfo: undefined
     },
     {
       1: (m, r) => (m.validityCheck = readInt(r)),
@@ -477,7 +500,8 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       28: (m, r) => (m.commandResult = readSubmessage(r, decodeCommandResult)),
       30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate)),
       40: (m, r) => (m.urlContent = readSubmessage(r, decodeUrlContentResult)),
-      42: (m, r) => (m.webSearch = readSubmessage(r, decodeWebSearchResult))
+      42: (m, r) => (m.webSearch = readSubmessage(r, decodeWebSearchResult)),
+      127: (m, r) => (m.subagentInfo = readSubmessage(r, decodeSubagentInfo))
     }
   );
 }

@@ -569,7 +569,7 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("times out while waiting for background completion when no DB progress arrives", async () => {
+  it("falls back cleanly to end_turn when background completion row is missing and deadline expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "bg-timeout");
@@ -591,14 +591,13 @@ describe("permission bridge", () => {
         })
       });
       db.close();
-      // Idle markers arrive, but no completion row — deadline must still expire.
+      // Idle markers arrive, but no completion row — deadline must still expire and fall back cleanly to end_turn.
       setTimeout(() => pty.emitData("? for shortcuts"), 20);
     });
 
     const session = interactiveSession(dir, pty, "250ms");
-    await expect(
-      session.prompt("run bg", async () => {}, async () => "agy-allow-once")
-    ).rejects.toThrow(/timed out after 250ms/);
+    const result = await session.prompt("run bg", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
     expect(pty.writes).toEqual([]);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -1739,7 +1738,7 @@ describe("cancel", () => {
     }
   });
 
-  it("fails the print-mode turn when background drain exceeds printTimeout", async () => {
+  it("falls back cleanly in print mode when background completion row is missing and printTimeout expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-print-bg-timeout-"));
     try {
       const session = new AgyCliSession(
@@ -1768,9 +1767,8 @@ describe("cancel", () => {
         }
       );
 
-      await expect(collectUpdates(session, "run bg")).rejects.toThrow(
-        /timed out after 200ms while waiting for background tasks/
-      );
+      const res = await collectUpdates(session, "run bg");
+      expect(res.stopReason).toBe("end_turn");
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

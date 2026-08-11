@@ -493,7 +493,10 @@ export class AgyCliSession {
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
           deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
-        if (Date.now() >= deadline) throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+        if (Date.now() >= deadline) {
+          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+        }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
         for (const [id, markerCount] of gateMarkerCounts) {
@@ -666,12 +669,15 @@ export class AgyCliSession {
             }
           }
         }
-        if (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) {
+        const isIdleCandidate =
+          (candidateRevision === poller.revision || (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx)) &&
+          this.#ptyIdleMarkerCount >= requiredIdleMarkerCount;
+        if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
           // Do not re-arm deadline here: only poller revision progress (above)
           // refreshes the timeout, so a missing completion cannot hang forever.
-          if (poller.hasActiveBackgroundTasks && !this.#cancelled) {
+          if ((poller.hasActiveBackgroundTasks || !poller.turnCompleteCandidate) && !this.#cancelled) {
             const exited = await Promise.race([activePtyExit.then(() => true), sleep(POLL_INTERVAL_MS).then(() => false)]);
             if (exited && !this.#cancelled) throw new AgyCliError(`agy interactive PTY exited unexpectedly: ${this.#ptyOutput.trim() || "<no output>"}`, [this.config.agyPath], null, this.#ptyOutput);
             continue;
@@ -935,12 +941,7 @@ export class AgyCliSession {
         let seenRevision = poller.revision;
         while (poller.hasActiveBackgroundTasks && !this.#cancelled) {
           if (Date.now() >= deadline) {
-            throw new AgyCliError(
-              `agy print turn timed out after ${this.config.printTimeout} while waiting for background tasks to complete`,
-              command,
-              null,
-              Buffer.concat(stderrChunks).toString("utf8")
-            );
+            break;
           }
           await sleep(POLL_INTERVAL_MS);
           // pollOnce (not a bare poll) so edits from background tasks are also

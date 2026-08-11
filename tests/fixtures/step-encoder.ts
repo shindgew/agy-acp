@@ -180,6 +180,20 @@ export function encodeTaskDetails(task: { taskId?: string; logUri?: string; desc
   return w.finish();
 }
 
+export function encodeSubagentInfo(subagent: {
+  conversationId?: string;
+  logUri?: string;
+  role?: string;
+  type?: string;
+}): Uint8Array {
+  const w = new BinaryWriter();
+  if (subagent.conversationId) w.tag(1, 2).string(subagent.conversationId);
+  if (subagent.logUri) w.tag(2, 2).string(subagent.logUri);
+  if (subagent.role) w.tag(3, 2).string(subagent.role);
+  if (subagent.type) w.tag(4, 2).string(subagent.type);
+  return w.finish();
+}
+
 /** permissions column: { 2: { 1: { 1: kind, 2: value }, 2: decision } }. */
 export function encodePermissions(info: { kind?: string; value?: string; decision?: number }): Uint8Array {
   const target = new BinaryWriter();
@@ -206,6 +220,7 @@ export function encodeStepPayload(opts: {
   webSearch?: Uint8Array;
   urlContent?: Uint8Array;
   modelProviderError?: Uint8Array;
+  subagentInfo?: Uint8Array;
 }): Uint8Array {
   const w = new BinaryWriter();
   if (opts.toolRun) submessage(w, 5, opts.toolRun);
@@ -221,5 +236,6 @@ export function encodeStepPayload(opts: {
   if (opts.titleUpdate !== undefined) submessage(w, 30, encodeTitleUpdate(opts.titleUpdate));
   if (opts.urlContent) submessage(w, 40, opts.urlContent);
   if (opts.webSearch) submessage(w, 42, opts.webSearch);
+  if (opts.subagentInfo) submessage(w, 127, opts.subagentInfo);
   return w.finish();
 }

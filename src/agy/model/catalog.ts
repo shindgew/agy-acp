@@ -27,6 +27,8 @@ export interface ModelCatalog {
   split(fullModel: string): { base: string; reasoningEffort?: string };
   /** Map a legacy agy display name (or base slug) to its ACP model slug, if known. */
   slugForAgyBase(agyBase: string): string | undefined;
+  /** Map a display name, slug, or legacy base string to its ACP model slug. */
+  resolveBaseModelSlug(nameOrSlug: string): string | undefined;
   /**
    * Value for `agy --model`: base slug (modern) or legacy display base name.
    * Effort is passed separately via `--effort`.
@@ -90,6 +92,30 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
       const fromEntry = splitModelEntry(agyBase);
       return agyBaseBySlug.has(fromEntry.base) ? fromEntry.base : undefined;
     },
+    resolveBaseModelSlug: (nameOrSlug: string) => {
+      if (baseOrder.includes(nameOrSlug)) {
+        return nameOrSlug;
+      }
+      const matchInParens = nameOrSlug.match(/\(([^)]+)\)$/);
+      if (matchInParens && baseOrder.includes(matchInParens[1])) {
+        return matchInParens[1];
+      }
+      for (const [slug, display] of displayNameBySlug.entries()) {
+        const optionName = display === slug ? display : `${display} (${slug})`;
+        if (display === nameOrSlug || slug === nameOrSlug || optionName === nameOrSlug) {
+          return slug;
+        }
+      }
+      const slugFromAgyBase = toModelSlug(nameOrSlug);
+      if (baseOrder.includes(slugFromAgyBase)) {
+        return slugFromAgyBase;
+      }
+      const fromEntry = splitModelEntry(nameOrSlug);
+      if (baseOrder.includes(fromEntry.base)) {
+        return fromEntry.base;
+      }
+      return undefined;
+    },
     agyBaseName: (slug: string) => {
       const agyBase = agyBaseBySlug.get(slug);
       if (!agyBase) {
@@ -108,17 +134,23 @@ export function buildModelCatalog(entries: string[]): ModelCatalog {
 }
 
 export function modelConfigOption(selectedBaseModel: string, catalog: ModelCatalog): V1SessionConfigOption {
+  const selectedSlug = catalog.resolveBaseModelSlug(selectedBaseModel) ?? selectedBaseModel;
+  const currentName = catalog.displayName(selectedSlug);
+
   return {
     id: MODEL_CONFIG_ID,
     name: "Model",
     description: "ACP model slug passed to agy --model (reasoningEffort is selected separately).",
     category: "model",
     type: "select",
-    currentValue: selectedBaseModel,
-    options: catalog.baseModels().map((slug) => ({
-      value: slug,
-      name: catalog.displayName(slug)
-    }))
+    currentValue: currentName,
+    options: catalog.baseModels().map((slug) => {
+      const name = catalog.displayName(slug);
+      return {
+        value: name,
+        name: name
+      };
+    })
   };
 }
 
@@ -127,14 +159,20 @@ export function reasoningEffortConfigOption(
   selectedReasoningEffort: string,
   catalog: ModelCatalog
 ): V1SessionConfigOption {
+  const options = reasoningEffortOptions(selectedBaseModel, catalog);
+  const currentOption = options.find(
+    (o) =>
+      o.value.toLowerCase() === selectedReasoningEffort.toLowerCase() ||
+      o.name.toLowerCase() === selectedReasoningEffort.toLowerCase()
+  );
   return {
     id: REASONING_EFFORT_CONFIG_ID,
     name: "Reasoning Effort",
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
-    currentValue: selectedReasoningEffort,
-    options: reasoningEffortOptions(selectedBaseModel, catalog)
+    currentValue: currentOption?.value ?? selectedReasoningEffort,
+    options
   };
 }
 
@@ -146,10 +184,13 @@ function reasoningEffortOptions(
   if (efforts.length === 0) {
     return [{ value: NO_REASONING_VALUE, name: "N/A" }];
   }
-  return efforts.map((effort) => ({
-    value: effort,
-    name: effort.charAt(0).toUpperCase() + effort.slice(1)
-  }));
+  return efforts.map((effort) => {
+    const name = effort.charAt(0).toUpperCase() + effort.slice(1);
+    return {
+      value: name,
+      name: name
+    };
+  });
 }
 
 export function reasoningEffortValues(selectedBaseModel: string, catalog: ModelCatalog): string[] {
@@ -165,6 +206,41 @@ function splitModelEntry(model: string): {
 } {
   const trimmed = model.trim();
 
+  // Two-column output from modern `agy models`: `gemini-3.6-flash-high   Gemini 3.6 Flash (High)`
+  const twoColMatch = trimmed.match(/^([a-z0-9_.-]+)\s+(.+)$/);
+  if (twoColMatch) {
+    const col1 = twoColMatch[1]!;
+    const col2 = twoColMatch[2]!.trim();
+    const slugEffort = col1.match(SLUG_EFFORT_PATTERN);
+    if (slugEffort && isLikelyModelSlug(col1)) {
+      const base = toModelSlug(slugEffort[1]!);
+      const displayBase = col2.replace(LEGACY_EFFORT_PATTERN, "").trim();
+      return {
+        agyBase: base,
+        base,
+        displayBase,
+        reasoningEffort: slugEffort[2]!.toLowerCase()
+      };
+    }
+    const legacyEffort = col2.match(LEGACY_EFFORT_PATTERN);
+    if (legacyEffort && legacyEffort.index !== undefined) {
+      const base = toModelSlug(col1);
+      const displayBase = col2.slice(0, legacyEffort.index).trim();
+      return {
+        agyBase: base,
+        base,
+        displayBase,
+        reasoningEffort: legacyEffort[1]!.toLowerCase()
+      };
+    }
+    const base = toModelSlug(col1);
+    return {
+      agyBase: base,
+      base,
+      displayBase: col2
+    };
+  }
+
   if (LEGACY_THINKING_PATTERN.test(trimmed)) {
     const base = toModelSlug(trimmed);
     return { agyBase: trimmed, base, displayBase: trimmed };
@@ -177,7 +253,7 @@ function splitModelEntry(model: string): {
       agyBase: displayBase,
       base: toModelSlug(displayBase),
       displayBase,
-      reasoningEffort: legacyEffort[1].toLowerCase()
+      reasoningEffort: legacyEffort[1]!.toLowerCase()
     };
   }
 
@@ -192,12 +268,12 @@ function splitModelEntry(model: string): {
 
   const slugEffort = trimmed.match(SLUG_EFFORT_PATTERN);
   if (slugEffort && isLikelyModelSlug(trimmed)) {
-    const base = toModelSlug(slugEffort[1]);
+    const base = toModelSlug(slugEffort[1]!);
     return {
       agyBase: base,
       base,
       displayBase: prettifyModelSlug(base),
-      reasoningEffort: slugEffort[2].toLowerCase()
+      reasoningEffort: slugEffort[2]!.toLowerCase()
     };
   }
 

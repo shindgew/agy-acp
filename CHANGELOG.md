@@ -7,15 +7,36 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
-## [0.4.3] - 2026-08-04
+## [0.5.0] - 2026-08-11
+
+### Added
+
+- Expose `toolAction` and `toolSummary` parameters from tool call inputs to construct human-readable tool call titles in ACP progress updates. (#102)
+- Support subagent metadata (`subagent_info` protobuf field and `subagent_details` DB column) in `invoke_subagent` tool calls, exposing `conversationId`, `logUri`, `role`, `type`, and `_meta["agy-acp/subagentInfo"]` in ACP updates. (#103)
+- Support two-column output from modern `agy models` (e.g., `gemini-3.6-flash-high   Gemini 3.6 Flash (High)`), automatically parsing model slugs, reasoning effort levels, and displaying clean model names without embedded effort suffixes. (#100)
 
 ### Fixed
 
+- Keep active background turns open while `poller.hasActiveBackgroundTasks` is true instead of prematurely closing turns after a fixed 400ms settle window. (#101)
+- Buffer every accepted system-message envelope prefix (`sender=`, `content=`, `timestamp=`, `priority=`, `task`, etc.) in `isSystemMessagePrefix()` to prevent partial system message emission during streaming. (#101)
+- Return declared option `value` rather than display label as `currentValue` in `reasoningEffortConfigOption()` for accurate ACP select control matching. (#101)
+- Specify `packageManager` in `package.json` so `pnpm/action-setup@v4` in GitHub Action workflows reads and installs pnpm without error. (#101)
+- Prevent premature turn completion when agy appends empty agentText stepType 15 placeholder rows during text generation initialization, while allowing a 400ms settle window at idle PTY prompts. (#104)
+- Prevent turn completion hanging and unexpected turn stops during background tasks by adding terminal step status checks (`isTerminalStepStatus`) on the latest DB step row. (#100)
+- Transition session prompt turns cleanly to `idle` (`end_turn`) when background tasks finish or when terminal system completion message rows are missing in SQLite DB, preventing turns from hanging for `printTimeout` (5 minutes). (#93)
+- Track background task completion directly from terminal step rows carrying SQLite protobuf `task_details` state and expand system message envelope matching for completion variations (`[Message]`, `[Notice]`, `[System]`, etc.). (#93, #94)
 - Make ACP filesystem handoff (`routeEditThroughClient` and `writeEditThroughClient`) atomic across multi-file edits, preflighting diff blocks for file existence and content divergence before modifying disk or invoking client RPCs. (#79)
 - Prevent stale or floating v2 prompt turns from resurrecting closed or deleted sessions or overwriting reloaded sessions in the persisted session store. (#77)
 - Avoid ambiguous edit rollback or ACP filesystem write-through handoff when replacement text appears multiple times in a file, failing safely instead of replacing an arbitrary occurrence. (#80)
 - Prevent generic, id-less `stepType 101` turn-end markers from clearing active background tasks before terminal system completion messages arrive, making `StreamPoller` background task tracking 100% DB-driven via SQLite protobuf `task_details` state. (#86)
 - Terminate `agy` process immediately via SIGINT->SIGKILL escalation when an ACP `session/update` callback rejects during print-mode execution, preventing orphaned backend processes. (#78)
+
+### Changed
+
+- Remove unused `zod` dependency from `package.json`.
+- Update dependencies (`better-sqlite3`, `@types/better-sqlite3`, `@types/node`) to their latest compatible versions.
+- Migrate repository package management from `npm` to `pnpm`, enabling global virtual store linking and updating CI workflows, `.gitignore`, and PR templates.
+- Update `AGENTS.md` instructions and documentation links for official Antigravity CLI repository references.
 
 ## [0.4.2] - 2026-08-04
 

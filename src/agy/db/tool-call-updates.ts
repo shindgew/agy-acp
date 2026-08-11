@@ -6,7 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { SessionUpdate, ToolKind } from "@agentclientprotocol/sdk";
-import type { ErrorDetails, PermissionInfo, TaskDetails } from "./columns.js";
+import type { ErrorDetails, PermissionInfo, SubagentInfo, TaskDetails } from "./columns.js";
 import {
   isPlanFile,
   planIdForPath,
@@ -48,6 +48,20 @@ export function parseRawInput(stepRow: StepRow): unknown {
     }
   }
   return null;
+}
+
+/** Resolves the human-readable action title for a tool call update.
+ *  Checks explicit toolSummary/toolAction from rawInput, protobuf titlePrimary/titleSecondary,
+ *  and falls back to computed fallback or tool name. */
+export function resolveToolTitle(stepRow: StepRow, computedFallback?: string): string {
+  const rawInput = parseRawInput(stepRow);
+  const toolRun = stepRow.stepPayload.toolRun;
+  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim();
+  const action = asStr(pick(rawInput, "toolAction", "ToolAction"))?.trim();
+  const primary = asStr(toolRun?.titlePrimary)?.trim();
+  const secondary = asStr(toolRun?.titleSecondary)?.trim();
+
+  return summary || action || primary || secondary || computedFallback || decodedToolName(stepRow) || "Tool";
 }
 
 /** Stable tool-call id: agy's own call id when present, else a synthetic id
@@ -136,6 +150,15 @@ function taskBlock(t: TaskDetails): Record<string, unknown> {
   return textBlock(lines.join("\n"));
 }
 
+function subagentBlock(s: SubagentInfo): Record<string, unknown> {
+  const lines = [
+    s.role ? `Role: ${s.role}` : s.type ? `Type: ${s.type}` : undefined,
+    s.conversationId && `Subagent Conversation: ${s.conversationId}`,
+    s.logUri && `Log: ${s.logUri}`
+  ].filter((line): line is string => Boolean(line));
+  return textBlock(lines.join("\n"));
+}
+
 /** Decoded agy tool identity, preferring the primary field when both exist. */
 export function decodedToolName(stepRow: StepRow): string {
   return (
@@ -164,6 +187,8 @@ export function toolCallUpdate(opts: {
 
   const blocks: Record<string, unknown>[] = [...(content ?? [])];
   if (stepRow.task) blocks.push(taskBlock(stepRow.task));
+  const subagentInfo = stepRow.subagent ?? stepRow.stepPayload.subagentInfo;
+  if (subagentInfo && !stepRow.task) blocks.push(subagentBlock(subagentInfo));
   if (stepRow.permission) blocks.push(permissionBlock(stepRow.permission));
   if (stepRow.error) blocks.push(errorBlock(stepRow.error));
 
@@ -179,7 +204,7 @@ export function toolCallUpdate(opts: {
 
   // Emit `tool_call` (v1 create shape). The v2 boundary rewrites this to
   // `tool_call_update` (first update creates the call).
-  return {
+  const update = {
     sessionUpdate: "tool_call",
     toolCallId: toolCallId(stepRow),
     ...(name ? { name } : {}),
@@ -190,7 +215,25 @@ export function toolCallUpdate(opts: {
     ...(locations && locations.length > 0 ? { locations } : {}),
     ...(rawInput != null ? { rawInput } : {}),
     ...(rawOutput != null ? { rawOutput } : {})
-  } as SessionUpdate;
+  } as SessionUpdate & { _meta?: Record<string, unknown>; rawOutput?: unknown };
+
+  if (subagentInfo) {
+    const rawOut =
+      update.rawOutput && typeof update.rawOutput === "object" && !Array.isArray(update.rawOutput)
+        ? { ...(update.rawOutput as Record<string, unknown>) }
+        : {};
+    if (subagentInfo.conversationId && !rawOut.conversationId) rawOut.conversationId = subagentInfo.conversationId;
+    if (subagentInfo.logUri && !rawOut.logUri) rawOut.logUri = subagentInfo.logUri;
+    if (Object.keys(rawOut).length > 0) update.rawOutput = rawOut;
+
+    const meta = update._meta ? { ...update._meta } : {};
+    if (subagentInfo.conversationId) meta.conversationId = subagentInfo.conversationId;
+    if (subagentInfo.logUri) meta.logUri = subagentInfo.logUri;
+    meta["agy-acp/subagentInfo"] = subagentInfo;
+    update._meta = meta;
+  }
+
+  return update;
 }
 
 /** Absolute path -> project-relative path for display; unchanged if outside cwd. */
@@ -345,7 +388,8 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     name = nameFromCall || "list_dir";
     const dir = fsPath(asStr(list?.dirUri)) ?? fsPath(asStr(pick(rawInput, "DirectoryPath", "directoryPath")));
     const shown = dir ? toDisplayPath(dir, displayCwd) : "";
-    title = shown ? `Read ${shown}` : "Read directory";
+    const computedTitle = shown ? `Read ${shown}` : "Read directory";
+    title = resolveToolTitle(stepRow, computedTitle);
 
     const entries = (list?.entries ?? []).filter((e) => e.name.trim().length > 0);
     if (entries.length > 0) {
@@ -361,8 +405,9 @@ export function readUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
     const endLine = asNum(pick(rawInput, "EndLine", "endLine")) ?? asNum(view?.endLine);
     const locationLine = startLine === 0 ? 1 : startLine;
 
-    title = shown ? `Read ${shown}` : "Read file";
-    if (shown && endLine !== null) title += `:${locationLine}-${endLine}`;
+    let computedTitle = shown ? `Read ${shown}` : "Read file";
+    if (shown && endLine !== null) computedTitle += `:${locationLine}-${endLine}`;
+    title = resolveToolTitle(stepRow, computedTitle);
     if (isReadableLocation(resolvedFile, ctx)) locations.push({ path: resolvedFile, line: locationLine });
 
     const body = asStr(view?.content);
@@ -419,7 +464,8 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const searchPath = fsPath(asStr(pick(rawInput, "SearchPath", "searchPath"))) ?? fsPath(asStr(grep?.cwdUri));
     const resolvedPath = resolvePath(searchPath, displayCwd);
     const shown = searchPath ? toDisplayPath(searchPath, displayCwd) : "";
-    title = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
+    const computedTitle = shown ? `Search '${query}' ${shown}` : `Search '${query}'`;
+    title = resolveToolTitle(stepRow, computedTitle);
     if (isReadableLocation(resolvedPath, ctx)) locations.push({ path: resolvedPath });
 
     const body = asStr(grep?.textOutput)?.trim() || renderHits(grep?.hits) || asStr(grep?.shellCommand)?.trim();
@@ -430,7 +476,8 @@ export function searchUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpda
     const web = stepPayload.webSearch;
     const query =
       asStr(web?.query)?.trim() || asStr(pick(rawInput, "query", "Query"))?.trim() || "";
-    title = query ? `Web search ${query}` : "Web search";
+    const computedTitle = query ? `Web search ${query}` : "Web search";
+    title = resolveToolTitle(stepRow, computedTitle);
 
     const lines: string[] = [];
     if (query) lines.push(`Query: ${query}`);
@@ -515,10 +562,17 @@ export function executeUpdate(stepRow: StepRow): SessionUpdate {
 }
 
 /** Prefer a real document title over agy's generic "Live Content" label. */
-function fetchTitle(docTitle: string, url: string, toolRun: StepRow["stepPayload"]["toolRun"]): string {
+function fetchTitle(docTitle: string, url: string, stepRow: StepRow): string {
+  const rawInput = parseRawInput(stepRow);
+  const summary = asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim();
+  const action = asStr(pick(rawInput, "toolAction", "ToolAction"))?.trim();
+  if (summary) return summary;
+  if (action) return action;
+
   const generic = !docTitle || /^live content$/i.test(docTitle);
   if (!generic) return `Fetch ${docTitle}`;
   if (url) return `Fetch ${url}`;
+  const toolRun = stepRow.stepPayload.toolRun;
   return (
     asStr(toolRun?.titlePrimary)?.trim() ||
     asStr(toolRun?.titleSecondary)?.trim() ||
@@ -528,14 +582,13 @@ function fetchTitle(docTitle: string, url: string, toolRun: StepRow["stepPayload
 
 /** Step type 31 (read_url_content): fetch URL + optional decoded body (field 40). */
 export function fetchUpdate(stepRow: StepRow): SessionUpdate {
-  const toolRun = stepRow.stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
   const urlContent = stepRow.stepPayload.urlContent;
   const url =
     asStr(urlContent?.url)?.trim() || asStr(pick(rawInput, "Url", "url"))?.trim() || "";
 
   const docTitle = asStr(urlContent?.title)?.trim() || "";
-  const title = fetchTitle(docTitle, url, toolRun);
+  const title = fetchTitle(docTitle, url, stepRow);
 
   const content: Record<string, unknown>[] = [];
   if (url) content.push(textBlock(url));
@@ -680,7 +733,8 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
   }
 
   const shown = targetFile ? toDisplayPath(targetFile, displayCwd) : "";
-  const title = shown ? `Edit ${shown}` : "Edit";
+  const computedTitle = shown ? `Edit ${shown}` : "Edit";
+  const title = resolveToolTitle(stepRow, computedTitle);
 
   const content: Record<string, unknown>[] = [];
   const locations: Record<string, unknown>[] = [];
@@ -731,14 +785,12 @@ export function editUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate
 
 /** Step type 138 (ask_question): the agent poses one or more multiple-choice questions. */
 export function questionUpdate(stepRow: StepRow): SessionUpdate {
-  const toolRun = stepRow.stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
   const questionsRaw = pick(rawInput, "questions", "Questions");
   const questions = Array.isArray(questionsRaw) ? questionsRaw : [];
 
   const firstQuestion = asStr(pick(questions[0], "question", "Question"))?.trim();
-  const title =
-    firstQuestion || asStr(toolRun?.titlePrimary)?.trim() || asStr(toolRun?.titleSecondary)?.trim() || "Ask question";
+  const title = resolveToolTitle(stepRow, firstQuestion || "Ask question");
 
   const content: Record<string, unknown>[] = [];
   for (const q of questions) {
@@ -757,20 +809,39 @@ export function questionUpdate(stepRow: StepRow): SessionUpdate {
 
 /** Step type 127 (invoke_subagent): delegates one or more tasks to subagents. */
 export function subagentUpdate(stepRow: StepRow): SessionUpdate {
-  const toolRun = stepRow.stepPayload.toolRun;
   const rawInput = parseRawInput(stepRow);
   const subagentsRaw = pick(rawInput, "Subagents", "subagents");
   const subagents = Array.isArray(subagentsRaw) ? subagentsRaw : [];
 
-  const title =
+  const defaultTitle =
     subagents.length > 0
       ? `Delegate to ${subagents.length} subagent${subagents.length > 1 ? "s" : ""}`
-      : asStr(toolRun?.titleSecondary)?.trim() || asStr(toolRun?.titlePrimary)?.trim() || "Invoke subagent";
+      : "Invoke subagent";
+  const title = resolveToolTitle(stepRow, defaultTitle);
 
   const content = subagents
     .map((s) => asStr(pick(s, "Prompt", "prompt"))?.trim())
     .filter((prompt): prompt is string => Boolean(prompt))
     .map(codeBlock);
+
+  // Fall back to extracting conversationId / logUri from rawInput if subagentInfo object was not decoded
+  let subagentInfo = stepRow.subagent ?? stepRow.stepPayload.subagentInfo;
+  if (!subagentInfo && subagents.length > 0) {
+    const first = subagents[0] as Record<string, unknown>;
+    const conversationId = asStr(pick(first, "conversationId", "conversation_id", "ConversationId"));
+    const logUri = asStr(pick(first, "logUri", "log_uri", "LogUri"));
+    const role = asStr(pick(first, "role", "Role"));
+    const type = asStr(pick(first, "type", "Type", "typeName", "TypeName"));
+    if (conversationId || logUri) {
+      subagentInfo = {
+        conversationId: conversationId ?? "",
+        logUri: logUri ?? "",
+        ...(role ? { role } : {}),
+        ...(type ? { type } : {})
+      };
+      stepRow.subagent = subagentInfo;
+    }
+  }
 
   const name = decodedToolName(stepRow) || "invoke_subagent";
 
@@ -783,7 +854,6 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
  * dedicated builder above.
  */
 export function otherUpdate(stepRow: StepRow): SessionUpdate {
-  const toolRun = stepRow.stepPayload.toolRun;
   const name = decodedToolName(stepRow);
   const rawInput = parseRawInput(stepRow);
 
@@ -793,7 +863,7 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
       const taskId = asStr(pick(rawInput, "TaskId", "taskId"));
       return toolCallUpdate({
         stepRow,
-        title: `Manage task ${action}`,
+        title: resolveToolTitle(stepRow, `Manage task ${action}`),
         kind: "other",
         name: "manage_task",
         content: taskId ? [textBlock(`Task: ${taskId}`)] : []
@@ -804,7 +874,7 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
       const prompt = asStr(pick(rawInput, "Prompt", "prompt"))?.trim();
       return toolCallUpdate({
         stepRow,
-        title: duration ? `Schedule timer (${duration}s)` : "Schedule timer",
+        title: resolveToolTitle(stepRow, duration ? `Schedule timer (${duration}s)` : "Schedule timer"),
         kind: "other",
         name: "schedule",
         content: prompt ? [textBlock(prompt)] : []
@@ -814,7 +884,7 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
       const message = asStr(pick(rawInput, "Message", "message"))?.trim();
       return toolCallUpdate({
         stepRow,
-        title: "Send message to subagent",
+        title: resolveToolTitle(stepRow, "Send message to subagent"),
         kind: "other",
         name: "send_message",
         content: message ? [textBlock(message)] : []
@@ -822,18 +892,17 @@ export function otherUpdate(stepRow: StepRow): SessionUpdate {
     }
     case "manage_subagents": {
       const action = asStr(pick(rawInput, "Action", "action"))?.trim() || "manage";
-      return toolCallUpdate({ stepRow, title: `Subagents: ${action}`, kind: "other", name: "manage_subagents" });
+      return toolCallUpdate({
+        stepRow,
+        title: resolveToolTitle(stepRow, `Subagents: ${action}`),
+        kind: "other",
+        name: "manage_subagents"
+      });
     }
   }
 
-  // Generic fallback: prefer the human-readable summary, then the generic tool
-  // titles, then the raw tool name (toolAction is often misleading, so last resort).
-  const title =
-    asStr(toolRun?.titlePrimary)?.trim() ||
-    asStr(pick(rawInput, "toolSummary", "ToolSummary"))?.trim() ||
-    asStr(toolRun?.titleSecondary)?.trim() ||
-    name ||
-    "Tool";
+  // Generic fallback: prefer human-readable toolSummary/toolAction via resolveToolTitle.
+  const title = resolveToolTitle(stepRow, name || "Tool");
 
   const content: Record<string, unknown>[] = [];
   if (rawInput && typeof rawInput === "object" && !Array.isArray(rawInput)) {

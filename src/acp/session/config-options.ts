@@ -72,12 +72,13 @@ export async function applyConfigOption(
     if (typeof value !== "string") {
       throw new Error("Model config value must be a string");
     }
-    if (!session.catalog.baseModels().includes(value)) {
+    const slug = session.catalog.resolveBaseModelSlug(value);
+    if (!slug) {
       throw new Error(`Unknown model: ${value}`);
     }
 
-    session.selectedBaseModel = value;
-    session.selectedReasoningEffort = defaultReasoningEffortForBase(value, session.catalog);
+    session.selectedBaseModel = slug;
+    session.selectedReasoningEffort = defaultReasoningEffortForBase(slug, session.catalog);
     applyModelSelection(
       session.agy,
       session.selectedBaseModel,
@@ -92,12 +93,26 @@ export async function applyConfigOption(
     if (typeof value !== "string") {
       throw new Error("reasoningEffort config value must be a string");
     }
-    const allowedEfforts = reasoningEffortValues(session.selectedBaseModel, session.catalog);
-    if (!allowedEfforts.includes(value)) {
+    const efforts = session.catalog.effortsFor(session.selectedBaseModel);
+    let matchedEffort: string | undefined;
+
+    if (efforts.length === 0) {
+      if (value.toLowerCase() === "n/a" || value.toLowerCase() === "none") {
+        matchedEffort = "none";
+      }
+    } else {
+      matchedEffort = efforts.find(
+        (e) =>
+          e.toLowerCase() === value.toLowerCase() ||
+          e.charAt(0).toUpperCase() + e.slice(1).toLowerCase() === value.toLowerCase()
+      );
+    }
+
+    if (!matchedEffort) {
       throw new Error(`Unknown reasoningEffort: ${value}`);
     }
 
-    session.selectedReasoningEffort = value;
+    session.selectedReasoningEffort = matchedEffort;
     applyModelSelection(
       session.agy,
       session.selectedBaseModel,

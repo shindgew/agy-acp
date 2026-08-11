@@ -157,18 +157,29 @@ export class StreamPoller {
       // still-streaming system-message envelope cannot close the wait early.
       // Generic stepType 101 turn-end markers without a system message payload
       // must NOT clear active tasks, as agy appends 101 at the end of every turn.
+      const taskLaunchIdx = row.task?.taskId ? this._launchedTaskIdxs.get(row.task.taskId) : undefined;
+      const isTaskTerminalRow =
+        taskLaunchIdx !== undefined &&
+        (row.idx > taskLaunchIdx || row.stepType !== 21) &&
+        isTerminalStepStatus(row.status);
       if (
-        isSystemMessage(text) &&
+        (isSystemMessage(text) || isTaskTerminalRow) &&
         isTerminalStepStatus(row.status)
       ) {
-        this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        if (isSystemMessage(text)) {
+          this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        }
         // Rows are re-read on every poll, so an id-less lifecycle row observed
         // before a later launch would otherwise close that newer task on the
         // next revision. Only tasks launched BEFORE this row can complete here.
         const launchedBefore = [...this._launchedTaskIdxs]
-          .filter(([, launchIdx]) => launchIdx < row.idx)
+          .filter(([, launchIdx]) => launchIdx < row.idx || (launchIdx === row.idx && row.stepType !== 21))
           .map(([taskId]) => taskId);
         let matchedTask = false;
+        if (row.task?.taskId && isTaskTerminalRow) {
+          this._completedTaskIds.add(row.task.taskId);
+          matchedTask = true;
+        }
         for (const taskId of launchedBefore) {
           if (taskId && textMentionsTaskId(text, taskId)) {
             this._completedTaskIds.add(taskId);
@@ -211,20 +222,24 @@ export class StreamPoller {
     ]));
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
-    this._busy = rows.some((row) => row.status !== 3 && row.status !== 6 && row.status !== 7);
     const latest = rows.at(-1);
+    const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
+    this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
     // agent message", so those turns don't hang until the deadline. Exclude
     // stepType 14 (user prompt), which is inserted with status 3 as the turn
-    // opens before agy appends any assistant response steps.
+    // opens before agy appends any assistant response steps, and exclude empty
+    // stepType 15 placeholders (text: "" and no thought), which agy inserts
+    // while preparing assistant text generation.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
       latest !== undefined &&
       latest.stepType !== 14 &&
-      (latest.status === 3 || latest.status === 6 || latest.status === 7);
+      !isEmptyAgentText &&
+      isTerminalStepStatus(latest.status);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
@@ -267,6 +282,23 @@ export class StreamPoller {
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
 function isTerminalStepStatus(status: number): boolean {
   return status === 3 || status === 6 || status === 7;
+}
+
+/**
+ * True when stepType 15 carries no visible agent text and no thought text.
+ * agy appends an empty stepType 15 row with status 3 while initializing
+ * assistant response generation, which must NOT trigger turn completion.
+ */
+function isEmptyAgentTextStep(row: StepRow): boolean {
+  if (row.stepType !== 15) return false;
+  const text = row.stepPayload.agentText?.text ?? "";
+  // System message envelopes carry real (internal) content — they are not the
+  // empty placeholders agy inserts while initializing response generation.
+  if (isSystemMessage(text)) return false;
+  const thought = row.stepPayload.agentText?.thought;
+  const hasText = text.length > 0;
+  const hasThought = Boolean(thought && thought.length > 0);
+  return !hasText && !hasThought;
 }
 
 /**

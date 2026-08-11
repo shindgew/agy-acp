@@ -49,11 +49,14 @@ jobs:
           fi
           echo "OK: tagged commit is on main"
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
-          cache: npm
+          cache: pnpm
           registry-url: https://registry.npmjs.org
 
       # Trusted Publishing needs a recent npm with OIDC support.
@@ -91,13 +94,13 @@ jobs:
           echo "Releasing ${version} (prerelease=${prerelease}, npm tag=${npm_tag})"
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build package
-        run: npm run build
+        run: pnpm run build
 
       - name: Run tests
-        run: npm test
+        run: pnpm test
 
       - name: Syntax-check published entrypoints
         run: |

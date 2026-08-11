@@ -42,23 +42,27 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
       - name: Set up Node
         id: setup-node
         uses: actions/setup-node@v4
         with:
           node-version: "22"
+          cache: pnpm
 
       - name: Install dependencies
         shell: bash
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Build package
         shell: bash
-        run: npm run build
+        run: pnpm run build
 
       - name: Pack published artifact
         shell: bash
-        run: npm pack --pack-destination "$RUNNER_TEMP"
+        run: pnpm pack --pack-destination "$RUNNER_TEMP"
 
       - name: Install packed artifact into a clean project
         shell: bash

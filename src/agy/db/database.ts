@@ -8,7 +8,7 @@
 import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { decodeErrorDetails, decodePermissions, decodeTaskDetails } from "./columns.js";
+import { decodeErrorDetails, decodePermissions, decodeSubagentInfo, decodeTaskDetails } from "./columns.js";
 import { decodeStepPayload } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -24,6 +24,7 @@ interface RawRow {
   error_details: unknown;
   permissions: unknown;
   task_details: unknown;
+  subagent_details: unknown;
 }
 
 function toUint8(v: unknown): Uint8Array {
@@ -46,7 +47,8 @@ function rowToStep(r: RawRow): StepRow {
     stepPayload: decodeStepPayload(toUint8(r.step_payload)),
     error: decodeColumn(r.error_details, decodeErrorDetails),
     permission: decodeColumn(r.permissions, decodePermissions),
-    task: decodeColumn(r.task_details, decodeTaskDetails)
+    task: decodeColumn(r.task_details, decodeTaskDetails),
+    subagent: decodeColumn(r.subagent_details, decodeSubagentInfo)
   };
 }
 
@@ -201,9 +203,19 @@ export class ConversationDb {
         console.error(`[agy-acp] WARN: steps table not found in ${id}.db — schema changed?`);
         return null;
       }
+      const columns = db.prepare("PRAGMA table_info(steps)").all() as Array<{ name: string }>;
+      const columnNames = new Set(columns.map((c) => c.name));
+      const subagentCol = columnNames.has("subagent_details")
+        ? "subagent_details"
+        : columnNames.has("subagent_info")
+        ? "subagent_info AS subagent_details"
+        : "NULL AS subagent_details";
+      const selectQuery =
+        `SELECT idx, step_type, status, step_payload, error_details, permissions, task_details, ${subagentCol} ` +
+        "FROM steps WHERE idx > ? ORDER BY idx";
       return new ConversationDb(
         db,
-        db.prepare(SELECT_ROWS),
+        db.prepare(selectQuery),
         db.prepare("PRAGMA data_version")
       );
     } catch {
