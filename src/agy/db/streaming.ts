@@ -158,7 +158,10 @@ export class StreamPoller {
       // Generic stepType 101 turn-end markers without a system message payload
       // must NOT clear active tasks, as agy appends 101 at the end of every turn.
       const taskLaunchIdx = row.task?.taskId ? this._launchedTaskIdxs.get(row.task.taskId) : undefined;
-      const isTaskTerminalRow = taskLaunchIdx !== undefined && row.idx > taskLaunchIdx && isTerminalStepStatus(row.status);
+      const isTaskTerminalRow =
+        taskLaunchIdx !== undefined &&
+        (row.idx > taskLaunchIdx || row.stepType !== 21) &&
+        isTerminalStepStatus(row.status);
       if (
         (isSystemMessage(text) || isTaskTerminalRow) &&
         isTerminalStepStatus(row.status)
@@ -170,10 +173,10 @@ export class StreamPoller {
         // before a later launch would otherwise close that newer task on the
         // next revision. Only tasks launched BEFORE this row can complete here.
         const launchedBefore = [...this._launchedTaskIdxs]
-          .filter(([, launchIdx]) => launchIdx < row.idx)
+          .filter(([, launchIdx]) => launchIdx < row.idx || (launchIdx === row.idx && row.stepType !== 21))
           .map(([taskId]) => taskId);
         let matchedTask = false;
-        if (row.task?.taskId && launchedBefore.includes(row.task.taskId)) {
+        if (row.task?.taskId && isTaskTerminalRow) {
           this._completedTaskIds.add(row.task.taskId);
           matchedTask = true;
         }

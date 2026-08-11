@@ -3225,6 +3225,33 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("treats first-seen terminal task rows as completions", () => {
+    const db = createConversationDb(dir, "conv-bg-first-seen-terminal");
+    // A single step carrying task details already in a terminal status (e.g. status 3).
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-terminal-first content=Task finished'
+      }),
+      task: encodeTaskDetails({ taskId: "task-terminal-first", logUri: "", description: "quick task" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-first-seen-terminal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
