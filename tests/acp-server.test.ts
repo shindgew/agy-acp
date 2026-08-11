@@ -734,6 +734,7 @@ describe("buildModelCatalog", () => {
       catalog
     ) as SelectConfigOption;
     expect(reasoningConfig.options).toEqual([{ value: "none", name: "N/A" }]);
+    expect(reasoningConfig.currentValue).toBe("none");
   });
 
   it("still splits legacy display-name model lists", () => {
@@ -1262,7 +1263,7 @@ describe("session model config", () => {
         value: "Claude Opus 4.6 Thinking"
       });
       expect(thinkingResponse.configOptions[1].currentValue).toBe("Claude Opus 4.6 Thinking");
-      expect(thinkingResponse.configOptions[2].currentValue).toBe("N/A");
+      expect(thinkingResponse.configOptions[2].currentValue).toBe("none");
       expect(optionNames(thinkingResponse.configOptions[2] as SelectConfigOption)).toEqual(["N/A"]);
 
       await connection.agent.request(methods.agent.session.prompt, {

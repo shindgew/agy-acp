@@ -171,9 +171,7 @@ export function reasoningEffortConfigOption(
     description: "Value for agy --effort (low | medium | high) for the selected model.",
     category: "thought_level",
     type: "select",
-    currentValue:
-      currentOption?.name ??
-      (selectedReasoningEffort === NO_REASONING_VALUE ? "N/A" : selectedReasoningEffort),
+    currentValue: currentOption?.value ?? selectedReasoningEffort,
     options
   };
 }
