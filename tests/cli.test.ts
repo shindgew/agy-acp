@@ -12,6 +12,7 @@ import {
   DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS,
   DEFAULT_CONVERSATIONS_DIR,
   configFromEnv,
+  enrichUserPath,
   parseAgyModels,
   type AgyCliConfig,
   type PtyFactory,
@@ -1457,6 +1458,32 @@ gemini-3.5-flash-medium
 claude-opus-4-6-thinking
 gemini-3.5-flash-medium
   `)).toEqual(["gemini-3.5-flash-medium", "claude-opus-4-6-thinking"]);
+  });
+});
+
+describe("enrichUserPath", () => {
+  it("prepends standard user binary paths and node execPath directory to existing PATH", () => {
+    const existing = "/usr/bin:/bin";
+    const extra = "/custom/bin";
+    const enriched = enrichUserPath(existing, extra);
+    const parts = enriched.split(path.delimiter);
+
+    expect(parts[0]).toBe("/custom/bin");
+    expect(parts).toContain(path.dirname(process.execPath));
+    expect(parts).toContain("/opt/homebrew/bin");
+    expect(parts).toContain(path.join(os.homedir(), ".cargo", "bin"));
+    expect(parts).toContain(path.join(os.homedir(), ".local", "bin"));
+    expect(parts.slice(-2)).toEqual(["/usr/bin", "/bin"]);
+  });
+
+  it("does not duplicate entries already present in PATH", () => {
+    const cargoBin = path.join(os.homedir(), ".cargo", "bin");
+    const existing = `${cargoBin}:/usr/bin:/bin`;
+    const enriched = enrichUserPath(existing);
+    const parts = enriched.split(path.delimiter);
+
+    const cargoOccurrences = parts.filter((p) => p === cargoBin).length;
+    expect(cargoOccurrences).toBe(1);
   });
 });
 
