@@ -210,7 +210,7 @@ function splitModelEntry(model: string): {
 
   // Two-column output from modern `agy models`: `gemini-3.6-flash-high   Gemini 3.6 Flash (High)`
   const twoColMatch = trimmed.match(/^([a-z0-9_.-]+)\s+(.+)$/);
-  if (twoColMatch && twoColMatch[1]!.includes("-")) {
+  if (twoColMatch) {
     const col1 = twoColMatch[1]!;
     const col2 = twoColMatch[2]!.trim();
     const slugEffort = col1.match(SLUG_EFFORT_PATTERN);

@@ -786,6 +786,19 @@ describe("buildModelCatalog", () => {
     expect(catalog.displayName("gemini-3.6-flash")).toBe("Gemini 3.6 Flash");
     expect(catalog.effortsFor("gemini-3.6-flash")).toEqual(["high", "medium", "low"]);
   });
+
+  it("parses two-column output with hyphenless model slugs", () => {
+    const catalog = buildModelCatalog([
+      "o1              OpenAI o1",
+      "gpt4o           GPT-4o",
+      "gemini-3.6-flash-high   Gemini 3.6 Flash (High)"
+    ]);
+
+    expect(catalog.baseModels()).toEqual(["o1", "gpt4o", "gemini-3.6-flash"]);
+    expect(catalog.displayName("o1")).toBe("OpenAI o1");
+    expect(catalog.displayName("gpt4o")).toBe("GPT-4o");
+    expect(catalog.effortsFor("o1")).toEqual([]);
+  });
 });
 
 describe("model discovery cache", () => {
