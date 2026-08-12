@@ -482,6 +482,8 @@ export class AgyCliSession {
     // A newly spawned TUI first draws its initial idle prompt, then draws
     // another when the submitted turn finishes. A reused TUI only owes the
     // latter marker.
+    const startStepIdx = this.#lastStepIdx;
+    const initialIdleMarkerCount = this.#ptyIdleMarkerCount;
     let requiredIdleMarkerCount = this.#ptyIdleMarkerCount + (freshPty ? 2 : 1);
     let failed = false;
     try {
@@ -494,7 +496,7 @@ export class AgyCliSession {
           deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
         if (Date.now() >= deadline) {
-          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount || poller.turnCompleteCandidate) break;
           throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
@@ -670,8 +672,11 @@ export class AgyCliSession {
           }
         }
         const isIdleCandidate =
-          (candidateRevision === poller.revision || (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx)) &&
-          this.#ptyIdleMarkerCount >= requiredIdleMarkerCount;
+          (poller.turnCompleteCandidate &&
+           poller.lastUserStepIdx > startStepIdx &&
+           poller.lastStepIdx > poller.lastUserStepIdx &&
+           this.#ptyIdleMarkerCount > initialIdleMarkerCount) ||
+          (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount);
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".

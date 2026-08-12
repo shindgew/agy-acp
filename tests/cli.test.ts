@@ -569,6 +569,22 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("completes turn when SQLite step is terminal even if PTY emits single post-startup marker (gh#105)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-gh105-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "gh105");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: { text: "go" } }) });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const result = await session.prompt("go", async () => {}, async () => "agy-allow-once");
+
+    expect(result.stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("falls back cleanly to end_turn when background completion row is missing and deadline expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
     const pty = new FakePty(() => {
