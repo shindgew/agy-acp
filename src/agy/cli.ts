@@ -492,10 +492,7 @@ export class AgyCliSession {
     // latter marker.
     const startStepIdx = this.#lastStepIdx;
     const initialIdleMarkerCount = this.#ptyIdleMarkerCount;
-    const minCompletionMarkerCount = freshPty
-      ? Math.max(2, initialIdleMarkerCount + 1)
-      : initialIdleMarkerCount + 1;
-    let requiredIdleMarkerCount = minCompletionMarkerCount;
+    let requiredIdleMarkerCount = this.#ptyIdleMarkerCount + (freshPty ? 2 : 1);
     let failed = false;
     try {
       while (true) {
@@ -685,7 +682,7 @@ export class AgyCliSession {
         const idleMarkerRevision = this.currentIdleMarkerRevision();
         const hasRevisionMatchedIdleMarker =
           idleMarkerRevision !== null &&
-          idleMarkerRevision.count >= minCompletionMarkerCount &&
+          idleMarkerRevision.count > initialIdleMarkerCount &&
           idleMarkerRevision.databaseRevision === poller.observedDatabaseRevision;
         const isIdleCandidate =
           (poller.turnCompleteCandidate &&
