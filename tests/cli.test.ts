@@ -573,7 +573,7 @@ describe("permission bridge", () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-gh105-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "gh105");
-      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: { text: "go" } }) });
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
       insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
       db.close();
     });
@@ -581,6 +581,41 @@ describe("permission bridge", () => {
     const result = await session.prompt("go", async () => {}, async () => "agy-allow-once");
 
     expect(result.stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not complete from the startup marker and an intermediate terminal tool step", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-terminal-tool-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "terminal-tool");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
+      db.close();
+      setTimeout(async () => {
+        const db2 = new (await import("better-sqlite3")).default(path.join(dir, "terminal-tool.db"));
+        insertStep(db2, {
+          idx: 2,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "pwd", output: "/repo" }) })
+        });
+        db2.close();
+      }, 40);
+    });
+    const session = interactiveSession(dir, pty);
+    let resolved = false;
+    const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
+      .then((value) => { resolved = true; return value; });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(resolved).toBe(false);
+
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "terminal-tool.db"));
+    insertStep(db, { idx: 3, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
+    pty.emitData("? for shortcuts");
+
+    expect((await result).stopReason).toBe("end_turn");
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
