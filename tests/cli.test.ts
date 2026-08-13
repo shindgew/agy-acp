@@ -620,6 +620,46 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not complete when fresh PTY startup marker is buffered until after an intermediate terminal tool step", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-buffered-startup-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "buffered-startup");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
+      db.close();
+      setTimeout(async () => {
+        const db2 = new (await import("better-sqlite3")).default(path.join(dir, "buffered-startup.db"));
+        insertStep(db2, {
+          idx: 2,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "pwd", output: "/repo" }) })
+        });
+        db2.close();
+      }, 40);
+    });
+    pty.emitStartupMarker = false;
+    const session = interactiveSession(dir, pty);
+    let resolved = false;
+    const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
+      .then((value) => { resolved = true; return value; });
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Emit the buffered startup marker AFTER step 2 (intermediate tool step) has committed to DB
+    pty.emitData("? for shortcuts");
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(resolved).toBe(false);
+
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "buffered-startup.db"));
+    insertStep(db, { idx: 3, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
+    pty.emitData("? for shortcuts");
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("falls back cleanly to end_turn when background completion row is missing and deadline expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
     const pty = new FakePty(() => {
@@ -1984,14 +2024,17 @@ class FakePty implements PtyProcess {
   killed = false;
   emitPermissionPanelOnStart = true;
   emitArrowRedraw = true;
+  emitStartupMarker = true;
   private dataListeners: Array<(data: string) => void> = [];
   private exitListeners: Array<(event: { exitCode: number }) => void> = [];
   constructor(private readonly onSpawn?: () => void) {}
   start() {
     this.onSpawn?.();
-    queueMicrotask(() => this.emitData(
-      this.emitPermissionPanelOnStart ? "? for shortcuts\nYes, and always allow" : "? for shortcuts"
-    ));
+    if (this.emitStartupMarker) {
+      queueMicrotask(() => this.emitData(
+        this.emitPermissionPanelOnStart ? "? for shortcuts\nYes, and always allow" : "? for shortcuts"
+      ));
+    }
   }
   write(data: string) {
     this.writes.push(data);
