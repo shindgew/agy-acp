@@ -226,6 +226,8 @@ export class AgyCliSession {
   #ptyPermissionMarkerTail = "";
   #ptyPermissionPanelVisible = false;
   #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
+  #activeStreamPoller: StreamPoller | undefined;
+  #lastPtyIdleMarkerRevision: { count: number; databaseRevision: string } | null = null;
   #ptyConfig = "";
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
@@ -415,12 +417,16 @@ export class AgyCliSession {
     if (this.#pty && this.#ptyConfig !== signature) await this.stopPty();
     if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
     const snapshot = this.#conversationId === null ? conversationSnapshot(this.config.conversationsDir) : null;
+    const factory = this.#pty ? undefined : (this.ptyFactory ?? await defaultPtyFactory());
+    if (!this.#pty && this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
+    const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
+      baseStepIdx: this.#lastStepIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
+    this.#activeStreamPoller = poller;
+    this.#lastPtyIdleMarkerRevision = null;
     let freshPty = false;
     if (!this.#pty) {
-      const factory = this.ptyFactory ?? await defaultPtyFactory();
-      if (this.#cancelled) { this.#cancelTurn = undefined; return { stopReason: "cancelled" }; }
       const [program, ...args] = this.interactiveCommandForPrompt(prompt);
-      this.#pty = factory.spawn(program, args, { ...this.spawnOptions(), cols: 120, rows: 40 });
+      this.#pty = factory!.spawn(program, args, { ...this.spawnOptions(), cols: 120, rows: 40 });
       freshPty = true;
       this.#ptyConfig = signature;
       this.#ptyOutput = "";
@@ -438,6 +444,10 @@ export class AgyCliSession {
         let offset = 0;
         while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
           this.#ptyIdleMarkerCount++;
+          const databaseRevision = this.#activeStreamPoller?.captureDatabaseRevision() ?? null;
+          this.#lastPtyIdleMarkerRevision = databaseRevision === null
+            ? null
+            : { count: this.#ptyIdleMarkerCount, databaseRevision };
           this.#ptyPermissionPanelVisible = false;
           offset += idleMarker.length;
         }
@@ -459,8 +469,6 @@ export class AgyCliSession {
     } else {
       this.#pty.write(`\x1b[200~${prompt.replaceAll("\x1b", "")}\x1b[201~\r`);
     }
-    const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
-      baseStepIdx: this.#lastStepIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
     // Tracked separately: a toolCallId can legitimately go through the live
     // gate first (status 9 -> keys sent) and later reappear as a completed
     // edit once agy applies it, at which point it's still worth routing
@@ -671,11 +679,16 @@ export class AgyCliSession {
             }
           }
         }
+        const idleMarkerRevision = this.currentIdleMarkerRevision();
+        const hasRevisionMatchedIdleMarker =
+          idleMarkerRevision !== null &&
+          idleMarkerRevision.count > initialIdleMarkerCount &&
+          idleMarkerRevision.databaseRevision === poller.observedDatabaseRevision;
         const isIdleCandidate =
           (poller.turnCompleteCandidate &&
            poller.lastUserStepIdx > startStepIdx &&
            poller.lastStepIdx > poller.lastUserStepIdx &&
-           this.#ptyIdleMarkerCount > initialIdleMarkerCount) ||
+           hasRevisionMatchedIdleMarker) ||
           (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount);
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
@@ -707,8 +720,13 @@ export class AgyCliSession {
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
+      if (this.#activeStreamPoller === poller) this.#activeStreamPoller = undefined;
       if (this.#cancelled && !failed) await this.stopPty();
     }
+  }
+
+  private currentIdleMarkerRevision(): { count: number; databaseRevision: string } | null {
+    return this.#lastPtyIdleMarkerRevision;
   }
 
   private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
