@@ -125,25 +125,37 @@ export class StreamPoller {
     return this._hasRows && !this._busy && this._latestStepTerminal;
   }
 
+  /**
+   * Snapshot the conversation revision currently visible to SQLite.
+   *
+   * Idle-marker handling uses this before the normal polling loop runs, so a
+   * marker emitted after a DB commit but before the next poll can still prove
+   * ordering without consuming or dropping that poll's session updates.
+   */
+  captureDatabaseRevision(): string | null {
+    const db = this.ensureDb();
+    if (db === null || this.boundId === null) return null;
+    return databaseRevisionToken(this.boundId, db.dataVersion());
+  }
+
+  /** Last conversation revision successfully processed by poll(). */
+  get observedDatabaseRevision(): string | null {
+    if (this.boundId === null || this.dataVersion === null) return null;
+    return databaseRevisionToken(this.boundId, this.dataVersion);
+  }
+
   /** Increments whenever the observed rows (including growing in-place rows) change. */
   get revision(): number { return this._revision; }
 
   /** Read steps appended since the turn began and translate the new ones. */
   poll(): SessionUpdate[] {
-    if (this.boundId === null && this.opts.snapshot !== null) {
-      this.boundId = newConversationId(this.opts.dir, this.opts.snapshot);
-    }
-    if (this.boundId === null) return [];
+    const db = this.ensureDb();
+    if (db === null) return [];
 
-    if (this.db === null) {
-      this.db = ConversationDb.open(this.opts.dir, this.boundId);
-      if (this.db === null) return [];
-    }
-
-    const dataVersion = this.db.dataVersion();
+    const dataVersion = db.dataVersion();
     if (this.dataVersion === dataVersion) return [];
 
-    const rows = this.db.readAfter(this.opts.baseStepIdx);
+    const rows = db.readAfter(this.opts.baseStepIdx);
     for (const row of rows) {
       if (row.stepType === 14) {
         this.observedUserStepIdxs.add(row.idx);
@@ -273,10 +285,27 @@ export class StreamPoller {
     return updates;
   }
 
+  private ensureDb(): ConversationDb | null {
+    if (this.boundId === null && this.opts.snapshot !== null) {
+      this.boundId = newConversationId(this.opts.dir, this.opts.snapshot);
+    }
+    if (this.boundId === null) return null;
+
+    if (this.db === null) {
+      this.db = ConversationDb.open(this.opts.dir, this.boundId);
+      if (this.db === null) return null;
+    }
+    return this.db;
+  }
+
   close(): void {
     this.db?.close();
     this.db = null;
   }
+}
+
+function databaseRevisionToken(conversationId: string, dataVersion: number): string {
+  return `${conversationId}\0${dataVersion}`;
 }
 
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
