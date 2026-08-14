@@ -4003,3 +4003,143 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     expect(isSystemMessage("Regular text")).toBe(false);
   });
 });
+
+describe("agent outbound image ContentBlocks", () => {
+  const PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  it("translates generate_image tool calls with input prompt and embedded image block when artifact exists", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "A futuristic login interface",
+                ImageName: "mockup.png",
+                AspectRatio: "16:9"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.name).toBe("generate_image");
+      expect(update.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: A futuristic login interface (16:9)"
+          }
+        },
+        {
+          type: "content",
+          content: {
+            type: "image",
+            data: PNG_PIXEL,
+            mimeType: "image/png"
+          }
+        }
+      ]);
+      expect(update.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
+    try {
+      const imgPath = path.join(testDir, "diagram.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-replay-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the architecture:\n![Architecture Diagram](${imgPath})\nAny questions?`
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-replay-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(3);
+      expect(updates[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the architecture:\n" }
+      });
+      expect(updates[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates[2]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAny questions?" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("streams agent responses containing markdown images as segmented ContentBlocks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-img-"));
+    try {
+      const imgPath = path.join(testDir, "sample.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Preview:\n![sample](${imgPath})\nFinished!`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-stream-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(3);
+      expect(updates[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Preview:\n" }
+      });
+      expect(updates[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates[2]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nFinished!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+});

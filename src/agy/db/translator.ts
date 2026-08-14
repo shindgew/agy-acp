@@ -14,8 +14,9 @@
 // This class owns the one row loop; the two modes are just small branches
 // inside it.
 
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk";
 import type { PlanEntry } from "../../acp/agent-plan/index.js";
+import { splitTextAndImages } from "../../acp/content/index.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
@@ -36,6 +37,14 @@ function agentChunk(text: string, messageId: string): SessionUpdate {
     sessionUpdate: "agent_message_chunk",
     messageId,
     content: { type: "text", text }
+  };
+}
+
+function agentContentBlockChunk(content: ContentBlock, messageId: string): SessionUpdate {
+  return {
+    sessionUpdate: "agent_message_chunk",
+    messageId,
+    content
   };
 }
 
@@ -356,7 +365,11 @@ export class Translator {
     if (this.opts.skipNarration && isNarration(text)) return;
     const delta = text.slice(emitted);
     if (delta.length > 0) {
-      out.push(agentChunk(emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta, messageId));
+      const formatted = emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta;
+      const blocks = splitTextAndImages(formatted, this.opts.cwd);
+      for (const block of blocks) {
+        out.push(agentContentBlockChunk(block, messageId));
+      }
     }
   }
 
@@ -373,15 +386,18 @@ export class Translator {
     this.pendingAgentStartStepIdx = null;
     this.pendingAgentEndStepIdx = null;
     if (text && text.length > 0) {
-      const chunk = agentChunk(text, messageId);
-      if (startStepIdx != null) {
-        const stamped = withStepMeta(chunk, startStepIdx);
-        if (endStepIdx != null && endStepIdx > startStepIdx) {
-          ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+      const blocks = splitTextAndImages(text, this.opts.cwd);
+      for (const block of blocks) {
+        const chunk = agentContentBlockChunk(block, messageId);
+        if (startStepIdx != null) {
+          const stamped = withStepMeta(chunk, startStepIdx);
+          if (endStepIdx != null && endStepIdx > startStepIdx) {
+            ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+          }
+          out.push(stamped);
+        } else {
+          out.push(chunk);
         }
-        out.push(stamped);
-      } else {
-        out.push(chunk);
       }
     }
   }
