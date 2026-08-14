@@ -4351,6 +4351,41 @@ describe("ConversationDb gen_metadata & token usage", () => {
     db.close();
   });
 
+  it("detectStopReason identifies refusal on safety error without agentText payload", () => {
+    const db = createConversationDb(dir, "conv-refusal-no-text");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "Blocked by safety filter",
+          userMessage: "Blocked by safety filter"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-refusal-no-text",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("refusal");
+
+    poller.close();
+    db.close();
+  });
+
   it("detectStopReason returns end_turn when intermediate generation reached output ceiling but final generation completed normally", () => {
     const db = createConversationDb(dir, "conv-multi-gen-end-turn");
     insertStep(db, {

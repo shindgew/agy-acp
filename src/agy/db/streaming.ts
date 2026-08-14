@@ -478,6 +478,7 @@ function findLastMeaningfulStep(rows: StepRow[]): StepRow | undefined {
  */
 function isEmptyAgentTextStep(row: StepRow): boolean {
   if (row.stepType !== 15) return false;
+  if (row.stepPayload.modelProviderError) return false;
   const text = row.stepPayload.agentText?.text ?? "";
   // System message envelopes carry real (internal) content — they are not the
   // empty placeholders agy inserts while initializing response generation.
