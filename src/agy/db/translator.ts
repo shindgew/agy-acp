@@ -361,9 +361,22 @@ export class Translator {
     // Chunks for the same step share one messageId (required by ACP v2).
     const emitted = this.agentTextLengths.get(row.idx) ?? 0;
     if (text.length <= emitted) return;
-    this.agentTextLengths.set(row.idx, text.length);
+
+    // When the row is actively streaming (canGrow: true), do not cut an incomplete
+    // markdown image embed in half (e.g. `![plot](path/to` without the closing `)`).
+    // Buffer from the opening `![` until the closing `)` arrives or the step finishes.
+    let limit = text.length;
+    if (canGrow) {
+      const lastOpen = text.lastIndexOf("![");
+      if (lastOpen >= emitted && !text.slice(lastOpen).includes(")")) {
+        limit = lastOpen;
+      }
+    }
+    if (limit <= emitted) return;
+
+    this.agentTextLengths.set(row.idx, limit);
     if (this.opts.skipNarration && isNarration(text)) return;
-    const delta = text.slice(emitted);
+    const delta = text.slice(emitted, limit);
     if (delta.length > 0) {
       const formatted = emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta;
       const blocks = splitTextAndImages(formatted, this.opts.cwd);
