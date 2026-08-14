@@ -211,6 +211,24 @@ describe("outbound image ContentBlocks", () => {
     }
   });
 
+  it("splits text containing bare project-relative markdown image paths", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](plot.png)\nEnd of message.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nEnd of message." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("safely handles malformed file URIs without throwing and leaves markdown as text", () => {
     const text = "Broken file URL:\n![invalid](file:///tmp/bad%ZZ.png)\nContinuing...";
     expect(() => splitTextAndImages(text)).not.toThrow();

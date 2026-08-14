@@ -216,7 +216,7 @@ export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
     return [{ type: "text", text }];
   }
 
-  const imageRegex = /!\[(.*?)\]\(((?:file:\/\/|\/|\.{1,2}\/)[^)\s]+)\)/g;
+  const imageRegex = /!\[(.*?)\]\(([^)\s]+)\)/g;
   const blocks: ContentBlock[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
