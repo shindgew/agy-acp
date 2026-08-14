@@ -211,6 +211,13 @@ describe("outbound image ContentBlocks", () => {
     }
   });
 
+  it("safely handles malformed file URIs without throwing and leaves markdown as text", () => {
+    const text = "Broken file URL:\n![invalid](file:///tmp/bad%ZZ.png)\nContinuing...";
+    expect(() => splitTextAndImages(text)).not.toThrow();
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
+  });
+
   it("preserves plain text when markdown images do not exist on disk", () => {
     const text = "Here is an external image:\n![remote](https://example.com/img.png)\nDone.";
     const blocks = splitTextAndImages(text);

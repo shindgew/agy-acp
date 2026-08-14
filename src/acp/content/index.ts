@@ -175,7 +175,11 @@ export function isImageMimeType(mimeType: string | null | undefined): boolean {
 
 export function filePathFromUri(uri: string): string {
   if (uri.startsWith("file://")) {
-    return fileURLToPath(uri);
+    try {
+      return fileURLToPath(uri);
+    } catch {
+      return uri;
+    }
   }
   return uri;
 }
