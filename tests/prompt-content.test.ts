@@ -1,8 +1,13 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { contentBlocksToPrompt, contentBlocksToText } from "../src/acp/content/index.js";
+import {
+  contentBlocksToPrompt,
+  contentBlocksToText,
+  splitTextAndImages,
+  tryReadImageContentBlock
+} from "../src/acp/content/index.js";
 
 const PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -155,5 +160,60 @@ describe("contentBlocksToText", () => {
     ]);
     expect(text).toBe("file:///x.ts\nexport {}");
     assertNoInjectedProse(text);
+  });
+});
+
+describe("outbound image ContentBlocks", () => {
+  it("reads local image file and returns base64 image block", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "test.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const block = tryReadImageContentBlock(imgPath);
+      expect(block).toEqual({
+        type: "image",
+        data: PNG_PIXEL,
+        mimeType: "image/png"
+      });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for non-existent image or non-image files", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      expect(tryReadImageContentBlock(path.join(tmpDir, "missing.png"))).toBeNull();
+      const txtPath = path.join(tmpDir, "not-image.txt");
+      await writeFile(txtPath, "hello");
+      expect(tryReadImageContentBlock(txtPath)).toBeNull();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing markdown images into text and image ContentBlocks", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "chart.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = `Here is the chart:\n![chart](${imgPath})\nLooks good!`;
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Here is the chart:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nLooks good!" });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves plain text when markdown images do not exist on disk", () => {
+    const text = "Here is an external image:\n![remote](https://example.com/img.png)\nDone.";
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
   });
 });

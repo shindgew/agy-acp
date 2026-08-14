@@ -7,6 +7,7 @@
 // follow-ups ("continue"), or framing prose around client data.
 
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -123,7 +124,7 @@ async function writeImageAttachment(
   return filePath;
 }
 
-function extensionForMimeType(mimeType: string): string {
+export function extensionForMimeType(mimeType: string): string {
   switch (mimeType.toLowerCase()) {
     case "image/png":
       return ".png";
@@ -138,18 +139,113 @@ function extensionForMimeType(mimeType: string): string {
       return ".bmp";
     case "image/avif":
       return ".avif";
+    case "image/svg+xml":
+      return ".svg";
     default:
       return ".img";
   }
 }
 
-function isImageMimeType(mimeType: string | null | undefined): boolean {
+export function mimeTypeForPath(filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".svg":
+      return "image/svg+xml";
+    case ".bmp":
+      return "image/bmp";
+    case ".avif":
+      return "image/avif";
+    default:
+      return null;
+  }
+}
+
+export function isImageMimeType(mimeType: string | null | undefined): boolean {
   return typeof mimeType === "string" && mimeType.toLowerCase().startsWith("image/");
 }
 
-function filePathFromUri(uri: string): string {
+export function filePathFromUri(uri: string): string {
   if (uri.startsWith("file://")) {
     return fileURLToPath(uri);
   }
   return uri;
+}
+
+const MAX_IMAGE_READ_BYTES = 10 * 1024 * 1024; // 10MB
+
+/**
+ * Attempt to read a local image file and return an ACP image ContentBlock.
+ * Returns null if the file does not exist, is not an image, or exceeds maxBytes.
+ */
+export function tryReadImageContentBlock(
+  filePath: string,
+  maxBytes = MAX_IMAGE_READ_BYTES
+): { type: "image"; data: string; mimeType: string } | null {
+  try {
+    const resolved = filePathFromUri(filePath);
+    const mimeType = mimeTypeForPath(resolved);
+    if (!mimeType) return null;
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const data = fs.readFileSync(resolved).toString("base64");
+    return { type: "image", data, mimeType };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Splits agent markdown text into alternating text and image ContentBlocks
+ * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
+ */
+export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
+  if (!text || !text.includes("![")) {
+    return [{ type: "text", text }];
+  }
+
+  const imageRegex = /!\[(.*?)\]\(((?:file:\/\/|\/|\.{1,2}\/)[^)\s]+)\)/g;
+  const blocks: ContentBlock[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = imageRegex.exec(text)) !== null) {
+    const rawPath = match[2]!;
+    const resolvedPath = rawPath.startsWith("file://")
+      ? filePathFromUri(rawPath)
+      : path.isAbsolute(rawPath)
+      ? rawPath
+      : cwd
+      ? path.resolve(cwd, rawPath)
+      : rawPath;
+
+    const imgBlock = tryReadImageContentBlock(resolvedPath);
+    if (imgBlock) {
+      const preceding = text.slice(lastIndex, match.index);
+      if (preceding.length > 0) {
+        blocks.push({ type: "text", text: preceding });
+      }
+      blocks.push(imgBlock);
+      lastIndex = match.index + match[0].length;
+    }
+  }
+
+  if (lastIndex === 0) {
+    return [{ type: "text", text }];
+  }
+
+  const trailing = text.slice(lastIndex);
+  if (trailing.length > 0) {
+    blocks.push({ type: "text", text: trailing });
+  }
+
+  return blocks;
 }
