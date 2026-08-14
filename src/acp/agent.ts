@@ -569,9 +569,15 @@ export class AcpAgent {
           session.selectedReasoningEffort,
           newCatalog
         );
+        const selectionChanged =
+          selection.baseModel !== session.selectedBaseModel ||
+          selection.reasoningEffort !== session.selectedReasoningEffort;
         session.selectedBaseModel = selection.baseModel;
         session.selectedReasoningEffort = selection.reasoningEffort;
         applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
+        if (selectionChanged && session.sessionId) {
+          this.persistSession(session.sessionId, session).catch(() => {});
+        }
         if (session.v1Client) {
           notifyConfigOptionUpdateV1(session.v1Client, session.sessionId, session).catch(() => {});
         } else if (session.v2Client) {
@@ -662,9 +668,15 @@ export class AcpAgent {
       session.selectedReasoningEffort,
       newCatalog
     );
+    const selectionChanged =
+      selection.baseModel !== session.selectedBaseModel ||
+      selection.reasoningEffort !== session.selectedReasoningEffort;
     session.selectedBaseModel = selection.baseModel;
     session.selectedReasoningEffort = selection.reasoningEffort;
     applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
+    if (selectionChanged && session.sessionId) {
+      this.persistSession(session.sessionId, session).catch(() => {});
+    }
   }
 
   private persistSession(sessionId: string, session: SessionState): Promise<void> {

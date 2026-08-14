@@ -1224,6 +1224,55 @@ describe("model discovery cache", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("persists updated model selection when catalog reconciliation changes session selection", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-persist-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["deprecated-model-high\tDeprecated Model (High)"],
+          updatedAt: Date.now()
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+      refreshModelOptions(config: AgyCliConfig): Promise<void>;
+      authProbeConfig(): AgyCliConfig;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+
+      // Trigger background refresh that removes the deprecated model
+      await (agent as unknown as SessionInspectorAgent).refreshModelOptions(
+        (agent as unknown as SessionInspectorAgent).authProbeConfig()
+      );
+
+      // Verify sessions.json has the updated model
+      await waitFor(() => {
+        const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "sessions.json"), "utf-8"));
+        return persisted.sessions?.[sessionId]?.model === "gemini-3.7-flash";
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("active session retention", () => {
