@@ -13,6 +13,7 @@ import {
   buildModelCatalog,
   createAcpApp,
   createAcpV2App,
+  createDualAcpApp,
   modelConfigOption,
   contentBlocksToText,
   reasoningEffortConfigOption,
@@ -1106,6 +1107,32 @@ describe("model discovery cache", () => {
         (n) => (n.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === "config_option_update"
       );
       expect(updateNotification).toBeDefined();
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("createDualAcpApp shares a single AcpAgent instance and deduplicates launch refreshes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-dual-"));
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      createDualAcpApp({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await waitFor(() => fs.existsSync(path.join(stateDir, "models.json")));
+      // Exactly 1 probe, not 2
+      expect(modelCalls).toBe(1);
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }

@@ -123,6 +123,7 @@ const packageJson = require("../../package.json") as { version?: string };
 const REPLAY_CACHE_CAPACITY = 32;
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_MAX_ACTIVE_SESSIONS = 64;
+const inFlightModelRefreshes = new Map<string, Promise<void>>();
 
 interface ModelCacheFile {
   entries: Record<string, { models: string[]; updatedAt: number }>;
@@ -593,7 +594,8 @@ export class AcpAgent {
 
   private refreshModelOptions(config: AgyCliConfig): Promise<void> {
     const key = config.agyPath;
-    const inFlight = this.#modelRefreshes.get(key);
+    const processKey = `${config.agyPath}:${this.#modelCacheFile}`;
+    const inFlight = inFlightModelRefreshes.get(processKey) ?? this.#modelRefreshes.get(key);
     if (inFlight) return inFlight;
     const refresh = (async () => {
       await this.ensureAgyReady();
@@ -602,8 +604,10 @@ export class AcpAgent {
     })()
       .catch(() => {})
       .finally(() => {
+        inFlightModelRefreshes.delete(processKey);
         this.#modelRefreshes.delete(key);
       });
+    inFlightModelRefreshes.set(processKey, refresh);
     this.#modelRefreshes.set(key, refresh);
     return refresh;
   }
@@ -640,8 +644,8 @@ export class AcpAgent {
 }
 
 /** ACP v1 agent app (stable protocol). */
-export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
-  const agent = new AcpAgent(options);
+export function createAcpApp(options: AcpAgentOptions | AcpAgent = {}): V1AgentApp {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
   return v1
     .agent({ name: "agy-acp" })
     .onRequest(v1.methods.agent.initialize, (ctx) => agent.initializeV1(ctx.params))
@@ -665,8 +669,8 @@ export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
  * Experimental draft ACP v2 agent app.
  * Prefer {@link createDualAcpApp} / {@link runAcp} so v1 clients still work.
  */
-export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
-  const agent = new AcpAgent(options);
+export function createAcpV2App(options: AcpAgentOptions | AcpAgent = {}): V2AgentApp {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
   return v2
     .agent({ name: "agy-acp" })
     .onRequest(v2.methods.agent.initialize, (ctx) => agent.initializeV2(ctx.params))
@@ -686,8 +690,9 @@ export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
  * Dual-version agent connector: negotiates ACP v1 or experimental draft v2 from
  * the client's `initialize.protocolVersion`.
  */
-export function createDualAcpApp(options: AcpAgentOptions = {}): v2.AgentProtocolRouter {
-  return v2.agentProtocolRouter().withV1(createAcpApp(options)).withV2(createAcpV2App(options));
+export function createDualAcpApp(options: AcpAgentOptions | AcpAgent = {}): v2.AgentProtocolRouter {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
+  return v2.agentProtocolRouter().withV1(createAcpApp(agent)).withV2(createAcpV2App(agent));
 }
 
 export function runAcp(options: AcpAgentOptions = {}) {
