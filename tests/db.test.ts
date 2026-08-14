@@ -4065,6 +4065,105 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("does not attach pre-existing images when generate_image step is not completed (status 1, 7, 9)", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-pending-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-pending");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 1, // running / in-progress
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-pending-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "A futuristic login interface",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-pending")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.name).toBe("generate_image");
+      // Only text prompt should be present, not the pre-existing image
+      expect(update.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: A futuristic login interface"
+          }
+        }
+      ]);
+      expect(update.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("prioritizes newly generated output ImageName over input reference ImagePaths", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-prio-"));
+    try {
+      const refImgPath = path.join(testDir, "reference.png");
+      const outImgPath = path.join(testDir, "output.png");
+      fs.writeFileSync(refImgPath, "REFERENCE_BYTES");
+      fs.writeFileSync(outImgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-prio");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-prio-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Edit this reference image",
+                ImageName: "output.png",
+                ImagePaths: ["reference.png"]
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-prio")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.locations).toEqual([{ path: outImgPath }]);
+      expect(update.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
     try {
