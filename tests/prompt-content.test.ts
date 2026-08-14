@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
@@ -239,6 +239,44 @@ describe("outbound image ContentBlocks", () => {
       expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
       expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
       expect(blocks[2]).toEqual({ type: "text", text: "\nEnd of message." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing angle-bracket markdown image destinations with spaces", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const artDir = path.join(tmpDir, "artifacts");
+      await mkdir(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "my plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](<artifacts/my plot.png>)\nDone.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nDone." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing angle-bracket markdown image destinations without spaces", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Artifact:\n![plot](<plot.png>)\nFinished.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nFinished." });
     } finally {
       await rm(tmpDir, { recursive: true, force: true });
     }

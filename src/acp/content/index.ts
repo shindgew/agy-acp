@@ -222,13 +222,13 @@ export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
     return [{ type: "text", text }];
   }
 
-  const imageRegex = /!\[(.*?)\]\(([^)\s]+)\)/g;
+  const imageRegex = /!\[(.*?)\]\((?:<([^>]+)>|([^)\s]+))\)/g;
   const blocks: ContentBlock[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = imageRegex.exec(text)) !== null) {
-    const rawPath = match[2]!;
+    const rawPath = (match[2] ?? match[3])!;
     const resolvedPath = rawPath.startsWith("file://")
       ? filePathFromUri(rawPath)
       : path.isAbsolute(rawPath)
