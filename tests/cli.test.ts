@@ -624,6 +624,43 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not complete from a delayed fresh-PTY startup marker after an intermediate terminal tool", async () => {
+    // Codex review: when the startup redraw is buffered until after a terminal
+    // tool row commits, revision equality alone must not end the turn.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-delayed-startup-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "delayed-startup");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "pwd", output: "/repo" }) })
+      });
+      db.close();
+    });
+    pty.emitIdleMarkerOnStart = false;
+    const session = interactiveSession(dir, pty);
+    let resolved = false;
+    const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
+      .then((value) => { resolved = true; return value; });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Delayed startup marker captures the intermediate tool revision.
+    pty.emitData("? for shortcuts");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(resolved).toBe(false);
+
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "delayed-startup.db"));
+    insertStep(db, { idx: 3, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
+    pty.emitData("? for shortcuts");
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("falls back cleanly to end_turn when background completion row is missing and deadline expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
     const pty = new FakePty(() => {
@@ -1986,6 +2023,7 @@ function permissionWriteChunks(keys: string): string[] {
 class FakePty implements PtyProcess {
   writes: string[] = [];
   killed = false;
+  emitIdleMarkerOnStart = true;
   emitPermissionPanelOnStart = true;
   emitArrowRedraw = true;
   private dataListeners: Array<(data: string) => void> = [];
@@ -1993,6 +2031,7 @@ class FakePty implements PtyProcess {
   constructor(private readonly onSpawn?: () => void) {}
   start() {
     this.onSpawn?.();
+    if (!this.emitIdleMarkerOnStart) return;
     queueMicrotask(() => this.emitData(
       this.emitPermissionPanelOnStart ? "? for shortcuts\nYes, and always allow" : "? for shortcuts"
     ));

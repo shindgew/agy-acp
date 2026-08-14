@@ -680,9 +680,22 @@ export class AgyCliSession {
           }
         }
         const idleMarkerRevision = this.currentIdleMarkerRevision();
+        const markersSinceTurnStart = idleMarkerRevision === null
+          ? 0
+          : idleMarkerRevision.count - initialIdleMarkerCount;
+        // A single post-start marker on a fresh PTY may be a delayed startup
+        // redraw that captured an intermediate terminal tool revision. Only
+        // accept that shortcut when the latest step is a conclusive ending
+        // (agent text or cancelled/failed), or when a later marker proves the
+        // post-turn idle redraw (markersSinceTurnStart >= 2).
+        const revisionShortcutSafe =
+          !freshPty ||
+          markersSinceTurnStart >= 2 ||
+          poller.isConclusiveTurnEnd;
         const hasRevisionMatchedIdleMarker =
           idleMarkerRevision !== null &&
-          idleMarkerRevision.count > initialIdleMarkerCount &&
+          markersSinceTurnStart >= 1 &&
+          revisionShortcutSafe &&
           idleMarkerRevision.databaseRevision === poller.observedDatabaseRevision;
         const isIdleCandidate =
           (poller.turnCompleteCandidate &&
