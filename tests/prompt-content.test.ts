@@ -101,7 +101,7 @@ describe("contentBlocksToPrompt", () => {
     try {
       const prompt = await contentBlocksToPrompt([
         { type: "text", text: "inspect" },
-        { type: "resource_link", uri: "file:///tmp/bad%ZZ.png", mimeType: "image/png" }
+        { type: "resource_link", uri: "file:///tmp/bad%ZZ.png", name: "bad.png", mimeType: "image/png" }
       ], cwd);
 
       expect(prompt).toBe("inspect\nfile:///tmp/bad%ZZ.png");
