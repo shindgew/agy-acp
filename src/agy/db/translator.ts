@@ -363,13 +363,16 @@ export class Translator {
     if (text.length <= emitted) return;
 
     // When the row is actively streaming (canGrow: true), do not cut an incomplete
-    // markdown image embed in half (e.g. `![plot](path/to` without the closing `)`).
-    // Buffer from the opening `![` until the closing `)` arrives or the step finishes.
+    // markdown image embed in half (e.g. trailing `!` or `![plot](path/to` without the closing `)`).
+    // Buffer from the opening `!` or `![` until the closing `)` arrives or the step finishes.
     let limit = text.length;
     if (canGrow) {
+      if (text.endsWith("!")) {
+        limit = text.length - 1;
+      }
       const lastOpen = text.lastIndexOf("![");
-      if (lastOpen >= emitted && !text.slice(lastOpen).includes(")")) {
-        limit = lastOpen;
+      if (lastOpen >= 0 && !text.slice(lastOpen).includes(")")) {
+        limit = Math.min(limit, lastOpen);
       }
     }
     if (limit <= emitted) return;
