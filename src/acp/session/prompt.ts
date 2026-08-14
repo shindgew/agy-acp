@@ -69,7 +69,12 @@ export interface PromptV2Deps extends PromptTurnDeps {
   clientToolCallNameV2?(client: V2AgentContext): ClientToolCallNameCapability | undefined;
 }
 
-type StopReason = "end_turn" | "cancelled";
+export type StopReason = "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
+
+export interface TurnOutcome {
+  stopReason: StopReason;
+  usage?: v1.Usage;
+}
 
 export function parseTurnIntent(params: unknown): TurnIntent | undefined {
   if (!params || typeof params !== "object") return undefined;
@@ -191,7 +196,7 @@ interface TurnAdapter {
   announceUserMessage?(promptText: string): Promise<void>;
   /** v2 only. */
   announceRunning?(): Promise<void>;
-  forwardUpdates(promptText: string, claim: TurnClaim): Promise<{ stopReason: string }>;
+  forwardUpdates(promptText: string, claim: TurnClaim): Promise<{ stopReason: StopReason; usage?: v1.Usage }>;
   applySlash(promptText: string): Promise<boolean>;
 }
 
@@ -209,7 +214,7 @@ async function runTurnBody(
   deps: PromptTurnDeps,
   /** Queued v2 converts at enqueue time; re-converting would rewrite attachments. */
   preconverted?: string
-): Promise<StopReason> {
+): Promise<TurnOutcome> {
   const guard = <T>(promise: Promise<T>) => raceClaim(promise, claim);
   const ensureLive = () => {
     claim.throwIfAborted();
@@ -235,7 +240,7 @@ async function runTurnBody(
     const handled = await guard(adapter.applySlash(promptText));
     if (handled) {
       ensureLive();
-      return "end_turn";
+      return { stopReason: "end_turn" };
     }
     ensureLive();
   }
@@ -254,9 +259,14 @@ async function runTurnBody(
     if (!session.closed) {
       await deps.persistSession(sessionId, session);
     }
-    return outcome.stopReason === "cancelled" || claim.aborted || session.closed
-      ? "cancelled"
-      : "end_turn";
+    const stopReason: StopReason =
+      outcome.stopReason === "cancelled" || claim.aborted || session.closed
+        ? "cancelled"
+        : outcome.stopReason;
+    return {
+      stopReason,
+      usage: outcome.usage
+    };
   } catch (error) {
     // Persist even on failure: agy's conversation id/step position may have
     // advanced before it errored out, and that partial progress is worth
@@ -413,12 +423,15 @@ function v2TerminalEmitter(
   sessionId: string,
   session: SessionState,
   claim: TurnClaim
-): (stopReason: StopReason) => Promise<void> {
-  return async (stopReason) => {
+): (outcome: TurnOutcome | StopReason) => Promise<void> {
+  return async (outcome) => {
+    const terminalOutcome: TurnOutcome =
+      typeof outcome === "string" ? { stopReason: outcome } : outcome;
     const update: v2.SessionUpdate = {
       sessionUpdate: "state_update",
       state: "idle",
-      stopReason
+      stopReason: terminalOutcome.stopReason,
+      usage: terminalOutcome.usage
     };
     if (session.closed || claim.aborted) {
       notifyV2BestEffort(client, sessionId, update);
@@ -453,26 +466,26 @@ function v2UserMessageId(promptBlocks: v1.ContentBlock[], promptText: string): s
 async function completeTurn(
   session: SessionState,
   claim: TurnClaim,
-  body: () => Promise<StopReason>,
+  body: () => Promise<TurnOutcome>,
   report: {
-    terminal(stopReason: StopReason): void | Promise<void>;
+    terminal(outcome: TurnOutcome): void | Promise<void>;
     failure(error: unknown): void | Promise<void>;
   }
 ): Promise<void> {
   const turns = turnsOf(session);
   try {
-    let stopReason: StopReason;
+    let outcome: TurnOutcome;
     try {
-      stopReason = await body();
+      outcome = await body();
     } catch (error) {
       if (isTurnCancelled(error) || claim.aborted || session.closed) {
-        stopReason = "cancelled";
+        outcome = { stopReason: "cancelled" };
       } else {
         await report.failure(error);
         return;
       }
     }
-    await report.terminal(stopReason);
+    await report.terminal(outcome);
   } finally {
     turns.release(claim);
     notifyIdleAndDrainQueue(session);
@@ -521,8 +534,11 @@ export async function handlePromptV1(
         );
       },
       {
-        terminal: (stopReason) => {
-          response = { stopReason };
+        terminal: (outcome) => {
+          response = {
+            stopReason: outcome.stopReason,
+            usage: outcome.usage
+          };
         },
         failure: (error) => {
           throw error;
@@ -546,8 +562,11 @@ export async function handlePromptV1(
       deps
     ),
     {
-      terminal: (stopReason) => {
-        response = { stopReason };
+      terminal: (outcome) => {
+        response = {
+          stopReason: outcome.stopReason,
+          usage: outcome.usage
+        };
       },
       failure: (error) => {
         throw error;
@@ -612,7 +631,10 @@ async function executeQueuedV1Turn(item: QueuedPromptV1): Promise<void> {
       deps
     ),
     {
-      terminal: (stopReason) => resolve({ stopReason }),
+      terminal: (outcome) => resolve({
+        stopReason: outcome.stopReason,
+        usage: outcome.usage
+      }),
       failure: (error) => reject(error as Error)
     }
   );
