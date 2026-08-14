@@ -476,7 +476,7 @@ describe("session prompt", () => {
 
         expect(response.stopReason).toBe("end_turn");
         expect(response.usage).toEqual({
-          totalTokens: 1850,
+          totalTokens: 1950,
           inputTokens: 1500,
           outputTokens: 350,
           thoughtTokens: 100,
@@ -539,7 +539,7 @@ describe("session prompt", () => {
           state: "idle",
           stopReason: "end_turn",
           usage: {
-            totalTokens: 1000,
+            totalTokens: 1050,
             inputTokens: 800,
             outputTokens: 200,
             thoughtTokens: 50,

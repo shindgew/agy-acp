@@ -25,7 +25,7 @@ describe("decodeGenMetadata", () => {
       thoughtTokens: 150,
       contentTokens: 300,
       totalInputTokens: 1200,
-      totalTokens: 1650,
+      totalTokens: 1800,
       contextWindowSize: 1048576,
       maxOutputTokens: 65536,
       modelSlug: "gemini-3.7-flash",

@@ -4044,7 +4044,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
 
     const latest = conn.readLatestGenMetadata();
     expect(latest?.idx).toBe(2);
-    expect(latest?.totalTokens).toBe(340);
+    expect(latest?.totalTokens).toBe(360);
 
     conn.close();
 
@@ -4130,9 +4130,9 @@ describe("ConversationDb gen_metadata & token usage", () => {
       used: 400,
       size: 1000000
     });
-    expect(poller1.latestGenMetadata?.totalTokens).toBe(480);
+    expect(poller1.latestGenMetadata?.totalTokens).toBe(500);
     expect(poller1.accumulatedTurnUsage()).toEqual({
-      totalTokens: 480,
+      totalTokens: 500,
       inputTokens: 400,
       outputTokens: 80,
       thoughtTokens: 20,
@@ -4170,7 +4170,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
     expect(poller2.latestGenMetadata?.idx).toBe(3);
     // Accumulated usage across the 2 generations of Turn 2:
     expect(poller2.accumulatedTurnUsage()).toEqual({
-      totalTokens: (600 + 750) + (50 + 120),
+      totalTokens: (600 + 750) + (50 + 120) + (10 + 30),
       inputTokens: 600 + 750,
       outputTokens: 50 + 120,
       thoughtTokens: 10 + 30,
@@ -4234,6 +4234,43 @@ describe("ConversationDb gen_metadata & token usage", () => {
     const poller = new StreamPoller({
       dir,
       conversationId: "conv-max-output",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies max_tokens when reasoning tokens plus candidates reach maxOutputTokens ceiling", () => {
+    const db = createConversationDb(dir, "conv-thinking-ceiling");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Deep reasoning prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Response" })
+    });
+    // Candidates are only 1000, but thoughtTokens are 3096 -> 4096 = maxOutputTokens
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 1000,
+      thoughtTokens: 3096,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-thinking-ceiling",
       baseStepIdx: -1,
       skipNarration: false,
       snapshot: null

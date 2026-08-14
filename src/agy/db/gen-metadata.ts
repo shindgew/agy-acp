@@ -146,7 +146,7 @@ export function decodeGenMetadata(idx: number, bytes: Uint8Array): GenMetadataUs
   // prompt_token_count in provider usage represents total prompt tokens,
   // with cached_content_token_count indicating the cached subset.
   const totalInputTokens = stats.promptTokens;
-  const totalTokens = totalInputTokens + stats.candidatesTokens;
+  const totalTokens = totalInputTokens + stats.candidatesTokens + stats.thoughtTokens;
 
   return {
     idx,

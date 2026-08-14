@@ -193,7 +193,7 @@ export class StreamPoller {
       cachedReadTokens += g.cachedTokens;
     }
     return {
-      totalTokens: inputTokens + outputTokens,
+      totalTokens: inputTokens + outputTokens + thoughtTokens,
       inputTokens,
       outputTokens,
       thoughtTokens: thoughtTokens > 0 ? thoughtTokens : undefined,
@@ -206,9 +206,10 @@ export class StreamPoller {
    * model errors, output ceilings, and token limits.
    */
   detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
-    // 1. Check if the terminal generation reached its configured output ceiling
+    // 1. Check if the terminal generation reached its configured output ceiling (including reasoning tokens)
     const terminalGen = this._promptGenMetadataRows.at(-1);
-    if (terminalGen?.maxOutputTokens && terminalGen.maxOutputTokens > 0 && terminalGen.candidatesTokens >= terminalGen.maxOutputTokens) {
+    const generatedTokens = (terminalGen?.candidatesTokens ?? 0) + (terminalGen?.thoughtTokens ?? 0);
+    if (terminalGen?.maxOutputTokens && terminalGen.maxOutputTokens > 0 && generatedTokens >= terminalGen.maxOutputTokens) {
       return "max_tokens";
     }
 
