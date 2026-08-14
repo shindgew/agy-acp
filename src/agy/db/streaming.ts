@@ -9,6 +9,7 @@ import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 import type { StepRow } from "./types.js";
+import { LIFECYCLE_STEP_TYPES } from "./updates.js";
 
 export interface PendingInteraction {
   update: SessionUpdate;
@@ -223,23 +224,21 @@ export class StreamPoller {
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
     const latest = rows.at(-1);
+    const latestMeaningful = findLastMeaningfulStep(rows);
     const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
     this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
-    // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
-    // agent message", so those turns don't hang until the deadline. Exclude
-    // stepType 14 (user prompt), which is inserted with status 3 as the turn
-    // opens before agy appends any assistant response steps, and exclude empty
-    // stepType 15 placeholders (text: "" and no thought), which agy inserts
-    // while preparing assistant text generation.
+    // Gate completion on "latest meaningful step is terminal" (3/6/7) while no
+    // subsequent step is currently busy, rather than naively checking rows.at(-1).
+    // This excludes early lifecycle rows (90, 98, 101), system message notices,
+    // and empty stepType 15 placeholders that agy inserts while preparing generation.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
-      latest !== undefined &&
-      latest.stepType !== 14 &&
-      !isEmptyAgentText &&
-      isTerminalStepStatus(latest.status);
+      latestMeaningful !== undefined &&
+      !this._busy &&
+      isTerminalStepStatus(latestMeaningful.status);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
@@ -282,6 +281,30 @@ export class StreamPoller {
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
 function isTerminalStepStatus(status: number): boolean {
   return status === 3 || status === 6 || status === 7;
+}
+
+/**
+ * Step types recorded by agy for its own bookkeeping, prompt framing, or notifications,
+ * which do not represent assistant tool execution or assistant response generation.
+ */
+function isIgnoredTurnStep(row: StepRow): boolean {
+  if (row.stepType === 14) return true;
+  if (row.stepType === 23) return true;
+  if (LIFECYCLE_STEP_TYPES.has(row.stepType)) return true;
+  if (row.stepType === 15) {
+    const text = row.stepPayload.agentText?.text ?? "";
+    if (isSystemMessage(text)) return true;
+    if (isEmptyAgentTextStep(row)) return true;
+  }
+  return false;
+}
+
+function findLastMeaningfulStep(rows: StepRow[]): StepRow | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (!isIgnoredTurnStep(row)) return row;
+  }
+  return undefined;
 }
 
 /**
