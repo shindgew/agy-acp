@@ -661,6 +661,31 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("stops the PTY when soft-timing out on a terminal DB row without completion markers", async () => {
+    // Codex review: turnCompleteCandidate timeout must not leave the interactive
+    // PTY alive for the next client prompt to join mid-turn.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-soft-timeout-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "soft-timeout");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "pwd", output: "/repo" }) })
+      });
+      db.close();
+    });
+    // Startup marker only — never the post-turn redraw, and latest step is an
+    // intermediate successful tool (not conclusive for the single-marker shortcut).
+    const session = interactiveSession(dir, pty, "250ms");
+    const result = await session.prompt("go", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(pty.killed).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("falls back cleanly to end_turn when background completion row is missing and deadline expires", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-timeout-"));
     const pty = new FakePty(() => {

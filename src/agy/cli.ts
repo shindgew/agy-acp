@@ -504,7 +504,15 @@ export class AgyCliSession {
           deadline = Date.now() + timeoutMs;
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
         if (Date.now() >= deadline) {
-          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount || poller.turnCompleteCandidate) break;
+          // Enough idle markers: the TUI is idle; keep the PTY for reuse.
+          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
+          // Soft timeout: DB looks terminal but the required completion marker
+          // never arrived (e.g. intermediate terminal tool + long silence).
+          // Stop the PTY so the next client prompt cannot join a live turn.
+          if (poller.turnCompleteCandidate) {
+            await this.stopPty();
+            break;
+          }
           throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
         }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
