@@ -88,6 +88,19 @@ function asToolCallUpdate(update: SessionUpdate): SessionUpdate {
   } as SessionUpdate;
 }
 
+function resolveContextWindowSize(usage: GenMetadataUsage): number | undefined {
+  if (usage.contextWindowSize && usage.contextWindowSize > 0) {
+    return usage.contextWindowSize;
+  }
+  if (usage.modelSlug) {
+    const slug = usage.modelSlug.toLowerCase();
+    if (slug.includes("gemini")) return 1048576;
+    if (slug.includes("claude")) return 200000;
+    if (slug.includes("gpt-4") || slug.includes("o1") || slug.includes("o3") || slug.includes("o4")) return 128000;
+  }
+  return undefined;
+}
+
 export class Translator {
   // Streaming: idx -> chars of agent text already emitted (for incremental diff).
   private readonly agentTextLengths = new Map<number, number>();
@@ -174,8 +187,9 @@ export class Translator {
     const out: SessionUpdate[] = [];
     for (const usage of usages) {
       if (usage.totalInputTokens <= 0 && usage.totalTokens <= 0) continue;
+      const size = resolveContextWindowSize(usage);
+      if (size === undefined) continue;
       const used = usage.totalInputTokens;
-      const size = usage.contextWindowSize ?? 256000;
       if (this.lastEmittedUsageUsed !== used) {
         this.lastEmittedUsageUsed = used;
         this._hadUpdates = true;
