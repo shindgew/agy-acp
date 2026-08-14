@@ -869,6 +869,71 @@ function getImageCandidatePaths(imageName: string): string[] {
   return candidates;
 }
 
+/**
+ * Extract target file paths mutated by a run_command execution.
+ * Distinguishes output/destination operands from read-only sources (e.g. `cp src dest`, `cat file`).
+ */
+function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
+  const displayCwd = fsPath(cwd) ?? undefined;
+  const targets: string[] = [];
+
+  // 1. Redirections: > out.png, >> out.png, 1> out.png, 2> out.png
+  const redirRegex = /(?:>>?|[12]>)\s*(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/g;
+  let redirMatch: RegExpExecArray | null;
+  while ((redirMatch = redirRegex.exec(cmd)) !== null) {
+    const raw = (redirMatch[1] ?? redirMatch[2] ?? redirMatch[3] ?? redirMatch[4])?.trim();
+    if (raw) {
+      const r = resolvePath(raw, displayCwd);
+      if (r) targets.push(r);
+    }
+  }
+
+  // 2. Output flags: -o file, -O file, --output file, --output=file, --out file
+  const outFlagRegex = /(?:-o|-O|--output|--out)(?:=|\s+)(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/g;
+  let outMatch: RegExpExecArray | null;
+  while ((outMatch = outFlagRegex.exec(cmd)) !== null) {
+    const raw = (outMatch[1] ?? outMatch[2] ?? outMatch[3] ?? outMatch[4])?.trim();
+    if (raw) {
+      const r = resolvePath(raw, displayCwd);
+      if (r) targets.push(r);
+    }
+  }
+
+  // 3. Command segments split by ;, &&, ||, |
+  const subCommands = cmd.split(/[;&|]+/);
+  for (const sub of subCommands) {
+    const tokens = sub.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+    if (tokens.length === 0) continue;
+    const cleanTokens = tokens.map((t) => t.replace(/^['"]|['"]$/g, "").trim()).filter(Boolean);
+    if (cleanTokens.length === 0) continue;
+
+    const bin = path.basename(cleanTokens[0]);
+    const positionalArgs = cleanTokens.slice(1).filter((t) => !t.startsWith("-"));
+
+    if (bin === "cp") {
+      // In `cp [opts] src... dest`, dest is the last positional argument
+      if (positionalArgs.length >= 2) {
+        const dest = positionalArgs[positionalArgs.length - 1];
+        const r = resolvePath(dest, displayCwd);
+        if (r) targets.push(r);
+      }
+    } else if (bin === "mv") {
+      // In `mv [opts] src... dest`, both src (removed) and dest (overwritten) are mutated
+      for (const arg of positionalArgs) {
+        const r = resolvePath(arg, displayCwd);
+        if (r) targets.push(r);
+      }
+    } else if (bin === "rm" || bin === "touch" || bin === "tee") {
+      for (const arg of positionalArgs) {
+        const r = resolvePath(arg, displayCwd);
+        if (r) targets.push(r);
+      }
+    }
+  }
+
+  return targets;
+}
+
 /** Extract candidate file paths modified by a completed step (status === 3). */
 export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): string[] {
   if (stepRow.status !== 3) return [];
@@ -898,19 +963,11 @@ export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): str
     }
   }
 
-  // When run_command is executed, scan command tokens for potentially modified file targets (e.g. cp/mv replacement.png mockup.png)
+  // When run_command is executed, identify output destination operands (e.g. cp src dest, redirects, -o out)
   if (stepRow.stepType === 21 || name === "run_command") {
     const cmd = asStr(pick(rawInput, "CommandLine", "commandLine", "command", "cmd"))?.trim();
     if (cmd) {
-      const tokens = cmd.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-      const resolvedPaths: string[] = [];
-      for (const token of tokens) {
-        const cleaned = token.replace(/^['"]|['"]$/g, "").trim();
-        if (!cleaned || cleaned.startsWith("-")) continue;
-        const r = resolvePath(cleaned, displayCwd);
-        if (r) resolvedPaths.push(r);
-      }
-      return resolvedPaths;
+      return extractCommandMutationTargets(cmd, displayCwd);
     }
   }
 
