@@ -14,6 +14,7 @@ import {
   planUpdateFromMarkdown,
   type PlanEntry
 } from "../../acp/agent-plan/index.js";
+import { tryReadImageContentBlock } from "../../acp/content/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -846,6 +847,57 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
   const name = decodedToolName(stepRow) || "invoke_subagent";
 
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
+}
+
+/** Tool call for generate_image (image creation / manipulation tool). */
+export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
+  const cwd = ctx?.cwd;
+  const rawInput = parseRawInput(stepRow);
+  const prompt = asStr(pick(rawInput, "Prompt", "prompt"))?.trim();
+  const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
+  const aspectRatio = asStr(pick(rawInput, "AspectRatio", "aspectRatio"))?.trim();
+  const displayCwd = fsPath(cwd) ?? undefined;
+
+  const defaultTitle = imageName ? `Generate image ${imageName}` : "Generate image";
+  const title = resolveToolTitle(stepRow, defaultTitle);
+
+  const content: Record<string, unknown>[] = [];
+  const locations: Record<string, unknown>[] = [];
+
+  if (prompt) {
+    content.push(textBlock(`Prompt: ${prompt}${aspectRatio ? ` (${aspectRatio})` : ""}`));
+  }
+
+  // Look for generated image candidate paths
+  const candidatePaths: string[] = [];
+  const imagePathsRaw = pick(rawInput, "ImagePaths", "imagePaths");
+  if (Array.isArray(imagePathsRaw)) {
+    for (const p of imagePathsRaw) {
+      if (typeof p === "string" && p) candidatePaths.push(p);
+    }
+  }
+  if (imageName) {
+    candidatePaths.push(imageName);
+    if (!imageName.includes(".")) {
+      candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
+    }
+  }
+
+  for (const candidate of candidatePaths) {
+    const resolved = resolvePath(candidate, displayCwd);
+    if (!resolved) continue;
+    const imgBlock = tryReadImageContentBlock(resolved);
+    if (imgBlock) {
+      content.push({ type: "content", content: imgBlock });
+      if (isReadableLocation(resolved, ctx)) {
+        locations.push({ path: resolved });
+      }
+      break;
+    }
+  }
+
+  const name = decodedToolName(stepRow) || "generate_image";
+  return toolCallUpdate({ stepRow, title, kind: "other", name, content, locations });
 }
 
 /**
