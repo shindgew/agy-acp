@@ -584,9 +584,9 @@ describe("permission bridge", () => {
       .then((value) => { resolved = true; return value; });
 
     setTimeout(() => pty.emitData("? for shortcuts"), 50);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    const outcome = await result;
+    expect(outcome.stopReason).toBe("end_turn");
     expect(resolved).toBe(true);
-    expect((await result).stopReason).toBe("end_turn");
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
