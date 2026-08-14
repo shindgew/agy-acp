@@ -91,6 +91,7 @@ import { handleLoginAuth } from "./auth/login.js";
 import { handleLogoutAuth } from "./auth/logout.js";
 import type { SessionState } from "./session/types.js";
 import { buildModelCatalog } from "../agy/model/catalog.js";
+import { applyModelSelection, restoredModelSelection } from "../agy/model/selection.js";
 import { applyConfigOption as applyConfigOptionHandler } from "./session/config-options.js";
 import { handleSetConfigOptionV1, handleSetConfigOptionV2 } from "./session/set-config-option.js";
 import {
@@ -552,9 +553,18 @@ export class AcpAgent {
   private cacheModelOptions(key: string, models: string[]): void {
     const normalized = [...new Set(models)];
     this.#modelOptionsCache.set(key, { models: normalized, updatedAt: Date.now() });
+    const newCatalog = buildModelCatalog(normalized);
     for (const session of this.#sessions.values()) {
       if (session.agy.config.agyPath === key) {
-        session.catalog = buildModelCatalog(normalized);
+        session.catalog = newCatalog;
+        const selection = restoredModelSelection(
+          session.selectedBaseModel,
+          session.selectedReasoningEffort,
+          newCatalog
+        );
+        session.selectedBaseModel = selection.baseModel;
+        session.selectedReasoningEffort = selection.reasoningEffort;
+        applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
       }
     }
     if (!this.#modelCacheEnabled) return;
