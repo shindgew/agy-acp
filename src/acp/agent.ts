@@ -90,6 +90,7 @@ import { handleLogout } from "./logout.js";
 import { handleLoginAuth } from "./auth/login.js";
 import { handleLogoutAuth } from "./auth/logout.js";
 import type { SessionState } from "./session/types.js";
+import { buildModelCatalog } from "../agy/model/catalog.js";
 import { applyConfigOption as applyConfigOptionHandler } from "./session/config-options.js";
 import { handleSetConfigOptionV1, handleSetConfigOptionV2 } from "./session/set-config-option.js";
 import {
@@ -175,10 +176,26 @@ export class AcpAgent {
         : DEFAULT_MAX_ACTIVE_SESSIONS;
     this.#conversationsDir = options.conversationsDir;
     this.loadModelCache();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
   }
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
     const { response, clientFs, clientElicitation, clientToolCallName } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
     this.#clientFs = clientFs;
     this.#clientElicitation = clientElicitation;
@@ -188,6 +205,14 @@ export class AcpAgent {
 
   async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
     await this.ensureAgyReady();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
     const { response, clientElicitation, clientToolCallName } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
     this.#clientElicitation = clientElicitation;
     this.#clientToolCallName = clientToolCallName;
@@ -485,12 +510,24 @@ export class AcpAgent {
       return cached.models;
     }
 
+    const inFlight = this.#modelRefreshes.get(key);
+    if (inFlight) {
+      try {
+        await inFlight;
+        const refreshed = this.#modelOptionsCache.get(key);
+        if (refreshed?.models.length) {
+          return refreshed.models;
+        }
+      } catch {}
+    }
+
     try {
-      const models = await this.#backend.listModels(config);
-      if (models.length > 0) {
-        this.cacheModelOptions(key, models);
+      await this.refreshModelOptions(config);
+      const refreshed = this.#modelOptionsCache.get(key);
+      if (refreshed?.models.length) {
+        return refreshed.models;
       }
-      return models;
+      return config.model ? [config.model] : [];
     } catch {
       return config.model ? [config.model] : [];
     }
@@ -515,6 +552,11 @@ export class AcpAgent {
   private cacheModelOptions(key: string, models: string[]): void {
     const normalized = [...new Set(models)];
     this.#modelOptionsCache.set(key, { models: normalized, updatedAt: Date.now() });
+    for (const session of this.#sessions.values()) {
+      if (session.agy.config.agyPath === key) {
+        session.catalog = buildModelCatalog(normalized);
+      }
+    }
     if (!this.#modelCacheEnabled) return;
 
     this.#modelCacheWrite = this.#modelCacheWrite
@@ -530,18 +572,21 @@ export class AcpAgent {
       });
   }
 
-  private refreshModelOptions(config: AgyCliConfig): void {
+  private refreshModelOptions(config: AgyCliConfig): Promise<void> {
     const key = config.agyPath;
-    if (this.#modelRefreshes.has(key)) return;
-    const refresh = this.#backend.listModels(config)
-      .then((models) => {
-        if (models.length > 0) this.cacheModelOptions(key, models);
-      })
+    const inFlight = this.#modelRefreshes.get(key);
+    if (inFlight) return inFlight;
+    const refresh = (async () => {
+      await this.ensureAgyReady();
+      const models = await this.#backend.listModels(config);
+      if (models.length > 0) this.cacheModelOptions(key, models);
+    })()
       .catch(() => {})
       .finally(() => {
         this.#modelRefreshes.delete(key);
       });
     this.#modelRefreshes.set(key, refresh);
+    return refresh;
   }
 
   private buildSession(
