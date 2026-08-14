@@ -46,7 +46,12 @@ export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string)
 
     if (block.type === "resource_link") {
       if (isImageMimeType(block.mimeType) && block.uri) {
-        parts.push(agyAttachmentReference(filePathFromUri(block.uri)));
+        const filePath = filePathFromUri(block.uri);
+        if (filePath) {
+          parts.push(agyAttachmentReference(filePath));
+        } else {
+          parts.push(block.uri);
+        }
       } else if (block.uri) {
         // Client-supplied URI only — no adapter prose.
         parts.push(block.uri);
@@ -173,12 +178,12 @@ export function isImageMimeType(mimeType: string | null | undefined): boolean {
   return typeof mimeType === "string" && mimeType.toLowerCase().startsWith("image/");
 }
 
-export function filePathFromUri(uri: string): string {
+export function filePathFromUri(uri: string): string | null {
   if (uri.startsWith("file://")) {
     try {
       return fileURLToPath(uri);
     } catch {
-      return uri;
+      return null;
     }
   }
   return uri;
@@ -196,6 +201,7 @@ export function tryReadImageContentBlock(
 ): { type: "image"; data: string; mimeType: string } | null {
   try {
     const resolved = filePathFromUri(filePath);
+    if (!resolved) return null;
     const mimeType = mimeTypeForPath(resolved);
     if (!mimeType) return null;
     const stat = fs.statSync(resolved);
@@ -231,6 +237,7 @@ export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
       ? path.resolve(cwd, rawPath)
       : rawPath;
 
+    if (!resolvedPath) continue;
     const imgBlock = tryReadImageContentBlock(resolvedPath);
     if (imgBlock) {
       const preceding = text.slice(lastIndex, match.index);

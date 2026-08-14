@@ -96,6 +96,21 @@ describe("contentBlocksToPrompt", () => {
     }
   });
 
+  it("does not synthesize an agy attachment path for malformed file URIs in resource_link", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
+    try {
+      const prompt = await contentBlocksToPrompt([
+        { type: "text", text: "inspect" },
+        { type: "resource_link", uri: "file:///tmp/bad%ZZ.png", mimeType: "image/png" }
+      ], cwd);
+
+      expect(prompt).toBe("inspect\nfile:///tmp/bad%ZZ.png");
+      assertNoInjectedProse(prompt);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("forwards embedded resource text body without URI labels", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
     try {
