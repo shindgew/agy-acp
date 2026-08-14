@@ -21,6 +21,12 @@ import type { StepRow } from "./types.js";
 /** Absolute path -> last known file body from prior view_file / write steps. */
 export type FileContentCache = Map<string, string>;
 
+/** Cached image artifact for a completed tool call (callKey -> image block + path or null). */
+export type ImageArtifactCache = Map<
+  string,
+  { block: { type: "image"; data: string; mimeType: string }; path: string } | null
+>;
+
 /** Options shared by tool builders that need project context. */
 export interface UpdateContext {
   cwd?: string;
@@ -30,6 +36,8 @@ export interface UpdateContext {
   planEntries?: Map<string, PlanEntry[]>;
   /** Candidate location path -> readability observed while translating. */
   locationReadability?: Map<string, boolean>;
+  /** Completed generate_image artifacts cached per tool call (freezes output across file mutations). */
+  imageArtifacts?: ImageArtifactCache;
 }
 
 /** Cap on fetched URL / large tool bodies surfaced in session updates. */
@@ -871,21 +879,39 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
   // Only attach the generated output artifact once the step has completed successfully (status === 3).
   // Avoid presenting pre-existing files while pending (9), running (1/2), cancelled (6), or failed (7).
   if (stepRow.status === 3 && imageName) {
-    const candidatePaths: string[] = [imageName];
-    if (!imageName.includes(".")) {
-      candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
-    }
+    const callKey = stepRow.stepPayload.toolRun?.call?.callId || String(stepRow.idx);
+    const cached = ctx?.imageArtifacts?.get(callKey);
 
-    for (const candidate of candidatePaths) {
-      const resolved = resolvePath(candidate, displayCwd);
-      if (!resolved) continue;
-      const imgBlock = tryReadImageContentBlock(resolved);
-      if (imgBlock) {
-        content.push({ type: "content", content: imgBlock });
-        if (isReadableLocation(resolved, ctx)) {
-          locations.push({ path: resolved });
+    if (cached !== undefined) {
+      if (cached) {
+        content.push({ type: "content", content: cached.block });
+        if (isReadableLocation(cached.path, ctx)) {
+          locations.push({ path: cached.path });
         }
-        break;
+      }
+    } else {
+      const candidatePaths: string[] = [imageName];
+      if (!imageName.includes(".")) {
+        candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
+      }
+
+      let attached = false;
+      for (const candidate of candidatePaths) {
+        const resolved = resolvePath(candidate, displayCwd);
+        if (!resolved) continue;
+        const imgBlock = tryReadImageContentBlock(resolved);
+        if (imgBlock) {
+          content.push({ type: "content", content: imgBlock });
+          if (isReadableLocation(resolved, ctx)) {
+            locations.push({ path: resolved });
+          }
+          ctx?.imageArtifacts?.set(callKey, { block: imgBlock, path: resolved });
+          attached = true;
+          break;
+        }
+      }
+      if (!attached && ctx?.imageArtifacts) {
+        ctx.imageArtifacts.set(callKey, null);
       }
     }
   }

@@ -4199,6 +4199,72 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("freezes completed image artifact and retains it when a later step overwrites the file on disk", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-freeze-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      const firstImageBytes = Buffer.from(PNG_PIXEL, "base64");
+      fs.writeFileSync(imgPath, firstImageBytes);
+
+      const db = createConversationDb(testDir, "conv-gen-img-freeze");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "First version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: captures first image
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-freeze")!.readAfter(-1));
+      expect(updates1).toHaveLength(1);
+      const update1 = updates1[0] as any;
+      expect(update1.content[1].content.data).toBe(PNG_PIXEL);
+
+      // A later step overwrites mockup.png with different bytes
+      const modifiedPng = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+        "base64"
+      );
+      fs.writeFileSync(imgPath, modifiedPng);
+
+      // A new row is appended (simulating full prompt-scoped replay in StreamPoller)
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "I updated the design."
+        })
+      });
+
+      // Poll 2: Translator reads all rows from the beginning; call 1 must keep its frozen first image
+      const allRows = ConversationDb.open(testDir, "conv-gen-img-freeze")!.readAfter(-1);
+      // Tool 1 snapshot is unchanged, so only row 2 produces a new update
+      const updates2 = translator.translate(allRows);
+      expect(updates2).toHaveLength(1);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "I updated the design." }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
     try {
