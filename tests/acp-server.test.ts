@@ -1060,13 +1060,20 @@ describe("model discovery cache", () => {
       return new FakeProcess(["ok"]);
     };
 
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const fakeClient = {
+      notify: vi.fn(async (method: string, params: unknown) => {
+        notifications.push({ method, params });
+      })
+    } as unknown as import("@agentclientprotocol/sdk").AgentContext;
+
     type SessionInspectorAgent = {
       requireSession(id: string): {
         selectedBaseModel: string;
         selectedReasoningEffort: string;
         catalog: { baseModels(): string[] };
       };
-      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+      newSessionV1(params: { cwd: string }, client?: unknown): Promise<{ sessionId: string }>;
       refreshModelOptions(config: AgyCliConfig): Promise<void>;
       authProbeConfig(): AgyCliConfig;
     };
@@ -1078,7 +1085,10 @@ describe("model discovery cache", () => {
         spawnProcess: spawnProcess as unknown as SpawnFactory
       });
 
-      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1(
+        { cwd: "/repo" },
+        fakeClient
+      );
       const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
       expect(session.selectedBaseModel).toBe("deprecated-model");
 
@@ -1090,6 +1100,12 @@ describe("model discovery cache", () => {
       // Reconciled to the new default model in new catalog
       expect(session.selectedBaseModel).toBe("gemini-3.7-flash");
       expect(session.catalog.baseModels()).toEqual(["gemini-3.7-flash"]);
+
+      // Verify client received config_option_update notification
+      const updateNotification = notifications.find(
+        (n) => (n.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === "config_option_update"
+      );
+      expect(updateNotification).toBeDefined();
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }

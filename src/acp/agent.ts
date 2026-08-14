@@ -416,6 +416,8 @@ export class AcpAgent {
     client: V1AgentContext,
     signal?: AbortSignal
   ): Promise<V1PromptResponse> {
+    const session = this.#sessions.get(params.sessionId);
+    if (session) session.v1Client = client;
     return handlePromptV1(params, client, signal, this.promptV1Deps());
   }
 
@@ -424,6 +426,8 @@ export class AcpAgent {
    * progress and stopReason arrive as `state_update` notifications.
    */
   promptV2(params: V2PromptRequest, client: V2AgentContext): Promise<V2PromptResponse> {
+    const session = this.#sessions.get(params.sessionId);
+    if (session) session.v2Client = client;
     return handlePromptV2(params, client, this.promptV2Deps());
   }
 
@@ -565,6 +569,11 @@ export class AcpAgent {
         session.selectedBaseModel = selection.baseModel;
         session.selectedReasoningEffort = selection.reasoningEffort;
         applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
+        if (session.v1Client) {
+          notifyConfigOptionUpdateV1(session.v1Client, session.sessionId, session).catch(() => {});
+        } else if (session.v2Client) {
+          notifyConfigOptionUpdateV2(session.v2Client, session.sessionId, session).catch(() => {});
+        }
       }
     }
     if (!this.#modelCacheEnabled) return;

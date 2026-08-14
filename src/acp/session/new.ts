@@ -45,6 +45,7 @@ export async function handleNewSessionV1(
   await deps.requireAuthenticated(params.cwd);
   const session = await deps.createSession(params.cwd, params.additionalDirectories);
   if (client) {
+    session.v1Client = client;
     // Clients (e.g. Zed) only learn this sessionId from the `session/new`
     // response and register it then; a notification sent earlier targets a
     // session the client doesn't recognize yet and gets silently dropped.
@@ -69,6 +70,7 @@ export async function handleNewSessionV2(
   const session = await deps.createSession(params.cwd, params.additionalDirectories);
   // Draft v2 has no native session/set_mode surface; mode is the config option only.
   if (client) {
+    session.v2Client = client;
     // See handleNewSessionV1: must not resolve before the response is sent, or
     // the client drops it as a notification for an unknown session.
     deferAfterResponse(() => deps.notifyAvailableCommandsV2(client, session.sessionId));
