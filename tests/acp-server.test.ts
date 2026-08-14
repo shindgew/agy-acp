@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import * as installer from "../src/agy/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
@@ -839,6 +839,201 @@ describe("model discovery cache", () => {
         (restored as unknown as ModelCacheAgent).modelOptionsForConfig(config)
       ).resolves.toEqual(firstModels);
       expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies cached models immediately on launch and updates from background refresh when cache is stale", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-stale-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const config = configFromEnv({ cwd: "/repo" });
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const immediateModels = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      expect(immediateModels).toEqual(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"]);
+
+      await waitFor(async () => {
+        const models = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+        return models.length === 2;
+      });
+      expect(modelCalls).toBe(1);
+
+      const updatedModels = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      expect(updatedModels).toEqual([
+        "gemini-3.5-flash-high\tGemini 3.5 Flash (High)",
+        "gemini-3.7-flash-high\tGemini 3.7 Flash (High)"
+      ]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("initializeV1 triggers background model refresh and updates active session catalog", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-init-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await agent.initializeV1({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      expect(modelCalls).toBe(1);
+      await waitFor(() => {
+        const parsed = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+        return parsed.entries?.agy?.models?.length === 2;
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("initializeV2 triggers background model refresh and updates active session catalog", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-init-v2-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await agent.initializeV2({
+        protocolVersion: 2,
+        info: { name: "test-client", version: "1.0.0" },
+        capabilities: {}
+      });
+
+      expect(modelCalls).toBe(1);
+      await waitFor(() => {
+        const parsed = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+        return parsed.entries?.agy?.models?.length === 2;
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dynamically updates in-memory catalog of active sessions when background refresh completes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-active-session-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now()
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      requireSession(id: string): { catalog: { baseModels(): string[] } };
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+      refreshModelOptions(config: AgyCliConfig): Promise<void>;
+      authProbeConfig(): AgyCliConfig;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+      const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.5-flash"]);
+
+      // Trigger background refresh while session is active
+      await (agent as unknown as SessionInspectorAgent).refreshModelOptions(
+        (agent as unknown as SessionInspectorAgent).authProbeConfig()
+      );
+
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.5-flash", "gemini-3.7-flash"]);
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
@@ -2294,9 +2489,9 @@ function printModeOptions(overrides: AcpAgentOptions = {}): AcpAgentOptions {
   };
 }
 
-export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+export async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) {
       throw new Error("waitFor timed out");
     }
