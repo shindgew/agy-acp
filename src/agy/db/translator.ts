@@ -19,7 +19,7 @@ import type { PlanEntry } from "../../acp/agent-plan/index.js";
 import { splitTextAndImages } from "../../acp/content/index.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
-import type { FileContentCache, ImageArtifactCache } from "./tool-call-updates.js";
+import { getCompletedStepTargetPaths, type FileContentCache, type ImageArtifactCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 import { sessionUpdateFromStep } from "./updates.js";
 
@@ -152,6 +152,23 @@ export class Translator {
     const out: SessionUpdate[] = [];
     let streamingAgentMessageId: string | null = null;
     let streamingHasVisibleText = false;
+
+    // Precompute paths modified by later completed steps in this batch.
+    // A historical step cannot reliably attribute the current file on disk if a
+    // later completed step in the batch overwrote that target path.
+    const supersededPaths = new Set<string>();
+    const supersededByRowIndex: Set<string>[] = new Array(rows.length);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      supersededByRowIndex[i] = new Set(supersededPaths);
+      const row = rows[i];
+      if (row.status === 3) {
+        const modified = getCompletedStepTargetPaths(row, this.opts.cwd);
+        for (const p of modified) {
+          supersededPaths.add(p);
+        }
+      }
+    }
+
     for (const [rowIndex, row] of rows.entries()) {
       let streamingNeedsSeparator = false;
       const canGrow = rowIndex === rows.length - 1 && row.status !== 3 && row.status !== 6 && row.status !== 7;
@@ -170,7 +187,14 @@ export class Translator {
           streamingHasVisibleText = false;
         }
       }
-      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
+      this.translateRow(
+        row,
+        out,
+        streamingAgentMessageId,
+        streamingNeedsSeparator,
+        canGrow,
+        supersededByRowIndex[rowIndex]
+      );
     }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
@@ -183,7 +207,8 @@ export class Translator {
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
     streamingNeedsSeparator: boolean,
-    canGrow: boolean
+    canGrow: boolean,
+    supersededPaths?: Set<string>
   ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
@@ -200,7 +225,7 @@ export class Translator {
         // The streaming client already has its own prompt; only replay re-emits it.
         if (this.opts.mode === "stream") return;
         this.flushAgentBuffer(out);
-        this.pushDispatched(row, out);
+        this.pushDispatched(row, out, supersededPaths);
         return;
 
       default: {
@@ -210,18 +235,19 @@ export class Translator {
         if (this.opts.mode === "replay") {
           this.flushAgentBuffer(out);
         }
-        this.pushDispatched(row, out);
+        this.pushDispatched(row, out, supersededPaths);
       }
     }
   }
 
-  private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
+  private pushDispatched(row: StepRow, out: SessionUpdate[], supersededPaths?: Set<string>): void {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
       fileContents: this.fileContents,
       planEntries: this.planEntries,
       locationReadability: this.locationReadability,
-      imageArtifacts: this.imageArtifacts
+      imageArtifacts: this.imageArtifacts,
+      supersededPaths
     });
     if (Array.isArray(update)) {
       for (const item of update) this.emitProgressive(row.idx, item, out);

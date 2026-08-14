@@ -38,6 +38,8 @@ export interface UpdateContext {
   locationReadability?: Map<string, boolean>;
   /** Completed generate_image artifacts cached per tool call (freezes output across file mutations). */
   imageArtifacts?: ImageArtifactCache;
+  /** Normalized absolute paths modified by later completed steps in the translated batch. */
+  supersededPaths?: Set<string>;
 }
 
 /** Cap on fetched URL / large tool bodies surfaced in session updates. */
@@ -857,6 +859,37 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
 }
 
+/** Extract candidate file paths modified by a completed step (status === 3). */
+export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): string[] {
+  if (stepRow.status !== 3) return [];
+  const rawInput = parseRawInput(stepRow);
+  const name = decodedToolName(stepRow);
+  const displayCwd = fsPath(cwd) ?? undefined;
+
+  if (name === "generate_image") {
+    const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
+    if (!imageName) return [];
+    const candidates: string[] = [imageName];
+    if (!imageName.includes(".")) {
+      candidates.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
+    }
+    const resolved: string[] = [];
+    for (const c of candidates) {
+      const r = resolvePath(c, displayCwd);
+      if (r) resolved.push(r);
+    }
+    return resolved;
+  }
+
+  const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile", "FilePath", "filePath", "path")))?.trim();
+  if (targetFile) {
+    const r = resolvePath(targetFile, displayCwd);
+    if (r) return [r];
+  }
+
+  return [];
+}
+
 /** Tool call for generate_image (image creation / manipulation tool). */
 export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
   const cwd = ctx?.cwd;
@@ -899,6 +932,9 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
       for (const candidate of candidatePaths) {
         const resolved = resolvePath(candidate, displayCwd);
         if (!resolved) continue;
+        // Do not reconstruct historical outputs from the current file if a later step overwrote it.
+        if (ctx?.supersededPaths?.has(resolved)) continue;
+
         const imgBlock = tryReadImageContentBlock(resolved);
         if (imgBlock) {
           content.push({ type: "content", content: imgBlock });

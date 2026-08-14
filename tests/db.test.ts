@@ -4265,6 +4265,95 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("does not reconstruct historical outputs from overwritten files on replay when imageName is reused", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-replay-superseded-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      const secondImageBytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+        "base64"
+      );
+      // Disk currently holds second image bytes (written by call 2)
+      fs.writeFileSync(imgPath, secondImageBytes);
+
+      const db = createConversationDb(testDir, "conv-gen-img-replay-superseded");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "First version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-2",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Second version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      // Replay from scratch: call 1 was superseded by call 2, so it must not read the overwritten file
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-replay-superseded")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+      const update2 = updates[1] as any;
+
+      // Call 1 has prompt text but no image block or location
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: First version of mockup"
+          }
+        }
+      ]);
+      expect(update1.locations).toBeUndefined();
+
+      // Call 2 is the latest step that targeted mockup.png, so it gets the image
+      expect(update2.sessionUpdate).toBe("tool_call");
+      expect(update2.toolCallId).toBe("gen-img-call-2");
+      expect(update2.content).toHaveLength(2);
+      expect(update2.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+          mimeType: "image/png"
+        }
+      });
+      expect(update2.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
     try {
