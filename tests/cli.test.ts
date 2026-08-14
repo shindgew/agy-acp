@@ -27,8 +27,8 @@ import {
   permissionOptions
 } from "../src/acp/tool-calls/permissions.js";
 import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
-import { createConversationDb, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodeCommandResult, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { createConversationDb, insertGenMetadata, insertStep, updateStep } from "./fixtures/conversation-db.js";
+import { encodeCommandResult, encodeGenMetadata, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -1493,6 +1493,25 @@ describe("prompt", () => {
     expect(calls[0].args[calls[0].args.indexOf("--print") + 1]).toBe("hello");
     expect(fake.stdinText).toBe("");
     expect(fake.stdinEnded).toBe(true);
+  });
+
+  it("seeds lastGenMetadataIdx when restoreConversation is called", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-restore-gen-"));
+    const db = createConversationDb(dir, "conv-restore-meta");
+    insertGenMetadata(db, 1, encodeGenMetadata({ promptTokens: 100, candidatesTokens: 50 }));
+    insertGenMetadata(db, 7, encodeGenMetadata({ promptTokens: 300, candidatesTokens: 100 }));
+    db.close();
+
+    const session = new AgyCliSession({ ...defaultConfig(), conversationsDir: dir });
+    expect(session.lastGenMetadataIdx).toBe(-1);
+
+    session.restoreConversation("conv-restore-meta", 10);
+    expect(session.lastGenMetadataIdx).toBe(7);
+
+    session.restoreConversation("conv-restore-meta", 10, 15);
+    expect(session.lastGenMetadataIdx).toBe(15);
+
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it("awaits print-mode reconciled filesystem write-through before ending the turn", async () => {

@@ -6,6 +6,7 @@ import { chmodSync, existsSync, statSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readLatestSessionUsage } from "./db/database.js";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
@@ -278,10 +279,23 @@ export class AgyCliSession {
     return this.#lastPromptUserStepIdxs;
   }
 
+  /** Highest gen_metadata idx seen in this session. */
+  get lastGenMetadataIdx(): number {
+    return this.#lastGenMetadataIdx;
+  }
+
   /** Seed the conversation binding from persisted state (for session/load and session/resume). */
-  restoreConversation(conversationId: string | null, lastStepIdx: number): void {
+  restoreConversation(conversationId: string | null, lastStepIdx: number, lastGenMetadataIdx?: number): void {
     this.#conversationId = conversationId;
     this.#lastStepIdx = lastStepIdx;
+    if (lastGenMetadataIdx !== undefined && lastGenMetadataIdx >= 0) {
+      this.#lastGenMetadataIdx = lastGenMetadataIdx;
+    } else if (conversationId) {
+      const latestGen = readLatestSessionUsage(this.config.conversationsDir, conversationId);
+      this.#lastGenMetadataIdx = latestGen ? latestGen.idx : -1;
+    } else {
+      this.#lastGenMetadataIdx = -1;
+    }
   }
 
   setModel(model: string | undefined): void {
