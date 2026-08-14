@@ -859,6 +859,16 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
 }
 
+function getImageCandidatePaths(imageName: string): string[] {
+  const trimmed = imageName.trim();
+  if (!trimmed) return [];
+  const candidates: string[] = [trimmed];
+  if (!path.extname(trimmed)) {
+    candidates.push(`${trimmed}.png`, `${trimmed}.jpg`, `${trimmed}.webp`);
+  }
+  return candidates;
+}
+
 /** Extract candidate file paths modified by a completed step (status === 3). */
 export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): string[] {
   if (stepRow.status !== 3) return [];
@@ -869,10 +879,7 @@ export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): str
   if (name === "generate_image") {
     const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
     if (!imageName) return [];
-    const candidates: string[] = [imageName];
-    if (!imageName.includes(".")) {
-      candidates.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
-    }
+    const candidates = getImageCandidatePaths(imageName);
     const resolved: string[] = [];
     for (const c of candidates) {
       const r = resolvePath(c, displayCwd);
@@ -925,10 +932,7 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
         locations.push({ path: cached.path });
       }
     } else {
-      const candidatePaths: string[] = [imageName];
-      if (!imageName.includes(".")) {
-        candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
-      }
+      const candidatePaths = getImageCandidatePaths(imageName);
 
       for (const candidate of candidatePaths) {
         const resolved = resolvePath(candidate, displayCwd);

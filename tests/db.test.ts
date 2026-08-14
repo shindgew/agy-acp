@@ -4497,6 +4497,56 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("resolves image fallback extensions when extensionless imageName is inside a dotted directory", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-dotdir-"));
+    try {
+      const artDir = path.join(testDir, ".artifacts");
+      fs.mkdirSync(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "output.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-dotdir");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-dotdir",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Create icon",
+                ImageName: ".artifacts/output"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-dotdir")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.content).toHaveLength(2);
+      expect(update.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+      expect(update.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
     try {
