@@ -4795,4 +4795,56 @@ describe("agent outbound image ContentBlocks", () => {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it("buffers incomplete markdown image syntax when caption contains parentheses", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-paren-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-paren");
+      // Step is active (status 1) and splits before destination closes, with caption containing ()
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![Chart (Q1)](${imgPath.slice(0, 10)}`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: '![Chart (Q1)](' must stay buffered because destination is not closed
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-paren")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: full markdown image arrives and step completes
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![Chart (Q1)](${imgPath})\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-paren")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });

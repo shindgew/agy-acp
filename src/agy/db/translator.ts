@@ -400,8 +400,13 @@ export class Translator {
         limit = text.length - 1;
       }
       const lastOpen = text.lastIndexOf("![");
-      if (lastOpen >= 0 && !text.slice(lastOpen).includes(")")) {
-        limit = Math.min(limit, lastOpen);
+      if (lastOpen >= 0) {
+        const tail = text.slice(lastOpen);
+        const destStart = tail.lastIndexOf("](");
+        const isClosed = destStart >= 0 && tail.slice(destStart + 2).includes(")");
+        if (!isClosed) {
+          limit = Math.min(limit, lastOpen);
+        }
       }
     }
     if (limit <= emitted) return;
