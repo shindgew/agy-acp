@@ -2873,6 +2873,88 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("does not treat early lifecycle steps (stepType 90, 98, 101, status 3) as turn completion candidates", () => {
+    const db = createConversationDb(dir, "conv-early-lifecycle");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Explain the problem" })
+    });
+    // agy appends an internal lifecycle step (e.g. stop_hook 101, ephemeral_message 90, or history 98)
+    insertStep(db, {
+      idx: 2,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({})
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-early-lifecycle",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    // When actual assistant response arrives, turnCompleteCandidate becomes true
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Here is the explanation." })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not treat early system message notices as turn completion candidates when no background task was active", () => {
+    const db = createConversationDb(dir, "conv-early-sysmsg-notice");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Check system status" })
+    });
+    // Server restart or background notice arrives immediately after user prompt
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "<SYSTEM_MESSAGE>\n[Notice] All your subagents and background tasks have been stopped due to server restart."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-early-sysmsg-notice",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    expect(poller.poll()).toEqual([]);
+    expect(poller.turnCompleteCandidate).toBe(false);
+
+    // Assistant response arrives subsequently
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "All background tasks were stopped after the restart." })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
   it("treats a terminal system message step as a turn completion candidate, not an empty placeholder", () => {
     const db = createConversationDb(dir, "conv-sysmsg-terminal");
     insertStep(db, {

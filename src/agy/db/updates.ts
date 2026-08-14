@@ -30,7 +30,7 @@ export type { UpdateContext } from "./tool-call-updates.js";
  *   98  conversation_history — prior-conversation summaries injected as context
  *   101 stop_hook            — termination/auto-proceed decisions
  */
-const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
+export const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
 
 function isFinalQuotaExhaustion(stepRow: StepRow): boolean {
   if (stepRow.status !== 3 && stepRow.status !== 6 && stepRow.status !== 7) return false;
