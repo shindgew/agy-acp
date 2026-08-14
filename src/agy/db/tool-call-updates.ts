@@ -888,13 +888,29 @@ export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): str
     return resolved;
   }
 
-  // Only consider tools that mutate files (step type 5 or write/replace/edit/patch tools).
+  // Mutating file edit tools (step type 5 or write/replace/edit/patch tools).
   // Read-only tools (view_file, list_dir, grep_search, etc.) must not mark paths as superseded.
   if (stepRow.stepType === 5 || (name && /write|replace|edit|patch/.test(name))) {
     const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile", "FilePath", "filePath", "path")))?.trim();
     if (targetFile) {
       const r = resolvePath(targetFile, displayCwd);
       if (r) return [r];
+    }
+  }
+
+  // When run_command is executed, scan command tokens for potentially modified file targets (e.g. cp/mv replacement.png mockup.png)
+  if (stepRow.stepType === 21 || name === "run_command") {
+    const cmd = asStr(pick(rawInput, "CommandLine", "commandLine", "command", "cmd"))?.trim();
+    if (cmd) {
+      const tokens = cmd.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+      const resolvedPaths: string[] = [];
+      for (const token of tokens) {
+        const cleaned = token.replace(/^['"]|['"]$/g, "").trim();
+        if (!cleaned || cleaned.startsWith("-")) continue;
+        const r = resolvePath(cleaned, displayCwd);
+        if (r) resolvedPaths.push(r);
+      }
+      return resolvedPaths;
     }
   }
 
