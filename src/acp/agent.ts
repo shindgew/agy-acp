@@ -124,6 +124,41 @@ const REPLAY_CACHE_CAPACITY = 32;
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_MAX_ACTIVE_SESSIONS = 64;
 const inFlightModelRefreshes = new Map<string, Promise<string[]>>();
+const modelCacheWrites = new Map<string, Promise<void>>();
+
+function persistModelCache(
+  cacheFile: string,
+  entries: Record<string, { models: string[]; updatedAt: number }>
+): Promise<void> {
+  const previousWrite = modelCacheWrites.get(cacheFile) ?? Promise.resolve();
+  const nextWrite = previousWrite
+    .then(async () => {
+      let existingEntries: Record<string, { models: string[]; updatedAt: number }> = {};
+      try {
+        const parsed = JSON.parse(await fs.promises.readFile(cacheFile, "utf-8")) as Partial<ModelCacheFile>;
+        if (parsed.entries && typeof parsed.entries === "object") {
+          existingEntries = parsed.entries;
+        }
+      } catch {
+        // Missing or malformed caches will be overwritten.
+      }
+      const mergedEntries = { ...existingEntries, ...entries };
+      await fs.promises.mkdir(path.dirname(cacheFile), { recursive: true });
+      const tmp = `${cacheFile}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+      await fs.promises.writeFile(tmp, JSON.stringify({ entries: mergedEntries }, null, 2));
+      await fs.promises.rename(tmp, cacheFile);
+    })
+    .catch((error) => {
+      console.error(`[agy-acp] WARN: failed to persist model cache: ${(error as Error).message}`);
+    })
+    .finally(() => {
+      if (modelCacheWrites.get(cacheFile) === nextWrite) {
+        modelCacheWrites.delete(cacheFile);
+      }
+    });
+  modelCacheWrites.set(cacheFile, nextWrite);
+  return nextWrite;
+}
 
 interface ModelCacheFile {
   entries: Record<string, { models: string[]; updatedAt: number }>;
@@ -591,17 +626,10 @@ export class AcpAgent {
     }
     if (!this.#modelCacheEnabled) return;
 
-    this.#modelCacheWrite = this.#modelCacheWrite
-      .then(async () => {
-        const entries = Object.fromEntries(this.#modelOptionsCache);
-        await fs.promises.mkdir(path.dirname(this.#modelCacheFile), { recursive: true });
-        const tmp = `${this.#modelCacheFile}.tmp`;
-        await fs.promises.writeFile(tmp, JSON.stringify({ entries }, null, 2));
-        await fs.promises.rename(tmp, this.#modelCacheFile);
-      })
-      .catch((error) => {
-        console.error(`[agy-acp] WARN: failed to persist model cache: ${(error as Error).message}`);
-      });
+    this.#modelCacheWrite = persistModelCache(
+      this.#modelCacheFile,
+      Object.fromEntries(this.#modelOptionsCache)
+    );
   }
 
   private refreshModelOptions(config: AgyCliConfig): Promise<void> {

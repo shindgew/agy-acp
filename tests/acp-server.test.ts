@@ -1327,6 +1327,71 @@ describe("model discovery cache", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("serializes concurrent cache writes across multiple agents sharing the same stateDir", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-writes-"));
+
+    const spawnProcess1 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const spawnProcess2 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    const config1: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-custom-1"
+    };
+    const config2: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-custom-2"
+    };
+
+    try {
+      const agent1 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess1 as unknown as SpawnFactory
+      });
+      const agent2 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess2 as unknown as SpawnFactory
+      });
+
+      await Promise.all([
+        (agent1 as unknown as ModelCacheAgent).modelOptionsForConfig(config1),
+        (agent2 as unknown as ModelCacheAgent).modelOptionsForConfig(config2)
+      ]);
+
+      await waitFor(() => {
+        if (!fs.existsSync(path.join(stateDir, "models.json"))) return false;
+        try {
+          const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+          return cache.entries?.["agy-custom-1"] !== undefined && cache.entries?.["agy-custom-2"] !== undefined;
+        } catch {
+          return false;
+        }
+      });
+
+      const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+      expect(cache.entries["agy-custom-1"].models).toEqual(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"]);
+      expect(cache.entries["agy-custom-2"].models).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("active session retention", () => {
