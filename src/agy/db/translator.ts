@@ -16,6 +16,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import type { PlanEntry } from "../../acp/agent-plan/index.js";
+import type { GenMetadataUsage } from "./gen-metadata.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import type { FileContentCache } from "./tool-call-updates.js";
@@ -113,6 +114,7 @@ export class Translator {
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
   private _hadUpdates = false;
+  private lastEmittedUsageUsed: number | null = null;
 
   constructor(private readonly opts: TranslatorOptions) {}
 
@@ -164,6 +166,26 @@ export class Translator {
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
     if (out.length > 0) this._hadUpdates = true;
+    return out;
+  }
+
+  /** Translate new generation usage metrics into an ACP usage_update notification. */
+  translateUsage(usages: GenMetadataUsage[]): SessionUpdate[] {
+    const out: SessionUpdate[] = [];
+    for (const usage of usages) {
+      if (usage.totalInputTokens <= 0 && usage.totalTokens <= 0) continue;
+      const used = usage.totalInputTokens;
+      const size = usage.contextWindowSize ?? 256000;
+      if (this.lastEmittedUsageUsed !== used) {
+        this.lastEmittedUsageUsed = used;
+        this._hadUpdates = true;
+        out.push({
+          sessionUpdate: "usage_update",
+          used,
+          size
+        });
+      }
+    }
     return out;
   }
 

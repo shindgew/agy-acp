@@ -2,17 +2,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationDb, type DbStat, statConversation } from "../src/agy/db/database.js";
+import { ConversationDb, type DbStat, readLatestSessionUsage, statConversation } from "../src/agy/db/database.js";
+import { decodeGenMetadata } from "../src/agy/db/gen-metadata.js";
 import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
 import { isSystemMessage, isSystemMessagePrefix } from "../src/agy/db/system-message.js";
 import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
-import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
+import { createConversationDb, insertGenMetadata, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodeGenMetadata,
   encodeGrepSearchResult,
   encodeModelProviderError,
   encodePermissions,
@@ -4003,3 +4005,235 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     expect(isSystemMessage("Regular text")).toBe(false);
   });
 });
+
+describe("ConversationDb gen_metadata & token usage", () => {
+
+  it("reads gen_metadata rows from ConversationDb", () => {
+    const db = createConversationDb(dir, "conv-gen-meta");
+    const meta1 = encodeGenMetadata({
+      promptTokens: 100,
+      candidatesTokens: 50,
+      cachedTokens: 20,
+      thoughtTokens: 10,
+      contentTokens: 40,
+      contextWindowSize: 256000
+    });
+    const meta2 = encodeGenMetadata({
+      promptTokens: 250,
+      candidatesTokens: 90,
+      cachedTokens: 50,
+      thoughtTokens: 20,
+      contentTokens: 70,
+      contextWindowSize: 256000
+    });
+
+    insertGenMetadata(db, 1, meta1);
+    insertGenMetadata(db, 2, meta2);
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-gen-meta")!;
+    const allGen = conn.readGenMetadataAfter(-1);
+    expect(allGen).toHaveLength(2);
+    expect(allGen[0].totalInputTokens).toBe(120);
+    expect(allGen[1].totalInputTokens).toBe(300);
+
+    const afterOne = conn.readGenMetadataAfter(1);
+    expect(afterOne).toHaveLength(1);
+    expect(afterOne[0].idx).toBe(2);
+
+    const latest = conn.readLatestGenMetadata();
+    expect(latest?.idx).toBe(2);
+    expect(latest?.totalTokens).toBe(390);
+
+    conn.close();
+
+    const oneshotLatest = readLatestSessionUsage(dir, "conv-gen-meta");
+    expect(oneshotLatest?.idx).toBe(2);
+  });
+
+  it("emits usage_update in Translator and deduplicates unchanged token usage", () => {
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const usage1 = decodeGenMetadata(1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 100,
+      cachedTokens: 200,
+      contextWindowSize: 256000
+    }))!;
+
+    const updates1 = translator.translateUsage([usage1]);
+    expect(updates1).toEqual([
+      {
+        sessionUpdate: "usage_update",
+        used: 700,
+        size: 256000
+      }
+    ]);
+
+    // Same used tokens -> should not emit duplicate update
+    const updates2 = translator.translateUsage([usage1]);
+    expect(updates2).toHaveLength(0);
+
+    // Changed used tokens -> emits new usage_update
+    const usage2 = decodeGenMetadata(2, encodeGenMetadata({
+      promptTokens: 900,
+      candidatesTokens: 150,
+      cachedTokens: 300,
+      contextWindowSize: 256000
+    }))!;
+    const updates3 = translator.translateUsage([usage2]);
+    expect(updates3).toEqual([
+      {
+        sessionUpdate: "usage_update",
+        used: 1200,
+        size: 256000
+      }
+    ]);
+  });
+
+  it("StreamPoller polls gen_metadata and surfaces latest usage and stopReason", () => {
+    const db = createConversationDb(dir, "conv-stream-usage");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "What is the weather?" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "It is sunny." })
+    });
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 400,
+      candidatesTokens: 80,
+      cachedTokens: 100,
+      thoughtTokens: 20,
+      contextWindowSize: 1000000
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-stream-usage",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    const updates = poller.poll();
+    const usageUpdate = updates.find((u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
+    expect(usageUpdate).toEqual({
+      sessionUpdate: "usage_update",
+      used: 500,
+      size: 1000000
+    });
+    expect(poller.latestGenMetadata?.totalTokens).toBe(580);
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies max_tokens on context length / quota exhaustion error", () => {
+    const db = createConversationDb(dir, "conv-max-tokens");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Resource exhausted: maximum context length exceeded",
+          userMessage: "Resource exhausted: maximum context length exceeded",
+          responseJson: JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ reason: "QUOTA_EXHAUSTED" }]
+            }
+          })
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-max-tokens",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies refusal on safety/content filter error", () => {
+    const db = createConversationDb(dir, "conv-refusal");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "blocked",
+        modelProviderError: encodeModelProviderError({
+          summary: "Request blocked by safety policy filter",
+          userMessage: "Request blocked by safety policy filter"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-refusal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("refusal");
+
+    poller.close();
+    db.close();
+  });
+
+  it("ReplayCache includes usage_update from latest gen_metadata", () => {
+    const db = createConversationDb(dir, "conv-replay-usage");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Replay prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Replay response" })
+    });
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 300,
+      candidatesTokens: 60,
+      cachedTokens: 150,
+      contextWindowSize: 500000
+    }));
+
+    const cache = new ReplayCache(8);
+    const replay = cache.get(dir, "conv-replay-usage", { skipNarration: false });
+
+    expect(replay).not.toBeNull();
+    const usageUpdate = replay?.updates.find((u: unknown) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
+    expect(usageUpdate).toEqual({
+      sessionUpdate: "usage_update",
+      used: 450,
+      size: 500000
+    });
+
+    db.close();
+  });
+});
+

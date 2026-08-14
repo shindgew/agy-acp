@@ -41,6 +41,11 @@ function buildReplay(dir: string, id: string, opts: ReplayOptions): BuiltReplay 
   try {
     const translator = new Translator({ mode: "replay", ...opts });
     const updates = translator.translate(conn.readAfter(-1));
+    const latestGen = conn.readLatestGenMetadata();
+    if (latestGen) {
+      const usageUpdates = translator.translateUsage([latestGen]);
+      updates.push(...usageUpdates);
+    }
     return {
       updates,
       maxIdx: translator.lastStepIdx,

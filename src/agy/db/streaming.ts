@@ -4,6 +4,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
+import type { GenMetadataUsage } from "./gen-metadata.js";
 import { newConversationId } from "./scan.js";
 import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
@@ -58,6 +59,9 @@ export class StreamPoller {
   /** Launched background task id -> idx of the first row that carried it. */
   private readonly _launchedTaskIdxs = new Map<string, number>();
   private readonly _completedTaskIds = new Set<string>();
+  private _latestGenMetadata: GenMetadataUsage | null = null;
+  private _lastGenMetadataIdx = -1;
+  private _lastObservedRows: StepRow[] = [];
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
@@ -70,6 +74,53 @@ export class StreamPoller {
 
   get conversationId(): string | null {
     return this.boundId;
+  }
+
+  get latestGenMetadata(): GenMetadataUsage | null {
+    return this._latestGenMetadata;
+  }
+
+  /**
+   * Evaluates the non-cancellation stop reason for the turn based on observed
+   * model errors, quota exhaustion, and provider limits.
+   */
+  detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
+    for (const row of this._lastObservedRows) {
+      const pe = row.stepPayload.modelProviderError;
+      if (pe) {
+        const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+        if (
+          text.includes("safety") ||
+          text.includes("content filter") ||
+          text.includes("policy") ||
+          text.includes("refusal") ||
+          text.includes("blocked")
+        ) {
+          return "refusal";
+        }
+        if (
+          text.includes("context length") ||
+          text.includes("max_tokens") ||
+          text.includes("maximum context") ||
+          text.includes("token limit") ||
+          text.includes("quota_exhausted") ||
+          text.includes("resource_exhausted")
+        ) {
+          return "max_tokens";
+        }
+      }
+      if (row.error) {
+        const errText = (row.error.message + " " + row.error.detail).toLowerCase();
+        if (
+          errText.includes("context length") ||
+          errText.includes("max tokens") ||
+          errText.includes("token limit")
+        ) {
+          return "max_tokens";
+        }
+      }
+    }
+    return "end_turn";
   }
 
   get lastStepIdx(): number {
@@ -239,6 +290,16 @@ export class StreamPoller {
       latestMeaningful !== undefined &&
       !this._busy &&
       isTerminalStepStatus(latestMeaningful.status);
+    this._latestStepType = latest?.stepType ?? null;
+    this._latestStepStatus = latest?.status ?? null;
+    this._lastObservedRows = rows;
+
+    const genRows = db.readGenMetadataAfter(this._lastGenMetadataIdx);
+    if (genRows.length > 0) {
+      this._lastGenMetadataIdx = Math.max(this._lastGenMetadataIdx, ...genRows.map((g) => g.idx));
+      this._latestGenMetadata = genRows.at(-1) ?? this._latestGenMetadata;
+    }
+    const usageUpdates = this.translator.translateUsage(genRows);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
@@ -269,7 +330,7 @@ export class StreamPoller {
         this._pending.push(interaction);
       }
     }
-    return updates;
+    return [...usageUpdates, ...updates];
   }
 
   close(): void {
