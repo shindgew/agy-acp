@@ -90,6 +90,8 @@ import { handleLogout } from "./logout.js";
 import { handleLoginAuth } from "./auth/login.js";
 import { handleLogoutAuth } from "./auth/logout.js";
 import type { SessionState } from "./session/types.js";
+import { buildModelCatalog } from "../agy/model/catalog.js";
+import { applyModelSelection, restoredModelSelection } from "../agy/model/selection.js";
 import { applyConfigOption as applyConfigOptionHandler } from "./session/config-options.js";
 import { handleSetConfigOptionV1, handleSetConfigOptionV2 } from "./session/set-config-option.js";
 import {
@@ -101,7 +103,7 @@ import {
   persistSession,
   type SessionBuildDeps
 } from "./session/setup.js";
-import { handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
+import { deferAfterResponse, handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
 import { handleLoadSession } from "./session/load.js";
 import { handleResumeSessionV1, handleResumeSessionV2 } from "./session/resume.js";
 import { handleSetSessionMode } from "./session/set-mode.js";
@@ -121,6 +123,52 @@ const packageJson = require("../../package.json") as { version?: string };
 const REPLAY_CACHE_CAPACITY = 32;
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_MAX_ACTIVE_SESSIONS = 64;
+const inFlightModelRefreshes = new Map<string, Promise<string[]>>();
+const modelCacheWrites = new Map<string, Promise<void>>();
+
+function persistModelCache(
+  cacheFile: string,
+  entries: Record<string, { models: string[]; updatedAt: number }>
+): Promise<void> {
+  const previousWrite = modelCacheWrites.get(cacheFile) ?? Promise.resolve();
+  const nextWrite = previousWrite
+    .then(async () => {
+      let existingEntries: Record<string, { models: string[]; updatedAt: number }> = {};
+      try {
+        const parsed = JSON.parse(await fs.promises.readFile(cacheFile, "utf-8")) as Partial<ModelCacheFile>;
+        if (parsed.entries && typeof parsed.entries === "object") {
+          existingEntries = parsed.entries;
+        }
+      } catch {
+        // Missing or malformed caches will be overwritten.
+      }
+      const mergedEntries: Record<string, { models: string[]; updatedAt: number }> = { ...existingEntries };
+      for (const [key, entry] of Object.entries(entries)) {
+        const existing = mergedEntries[key];
+        if (
+          !existing ||
+          !Number.isFinite(existing.updatedAt) ||
+          (Number.isFinite(entry.updatedAt) && entry.updatedAt >= existing.updatedAt)
+        ) {
+          mergedEntries[key] = entry;
+        }
+      }
+      await fs.promises.mkdir(path.dirname(cacheFile), { recursive: true });
+      const tmp = `${cacheFile}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+      await fs.promises.writeFile(tmp, JSON.stringify({ entries: mergedEntries }, null, 2));
+      await fs.promises.rename(tmp, cacheFile);
+    })
+    .catch((error) => {
+      console.error(`[agy-acp] WARN: failed to persist model cache: ${(error as Error).message}`);
+    })
+    .finally(() => {
+      if (modelCacheWrites.get(cacheFile) === nextWrite) {
+        modelCacheWrites.delete(cacheFile);
+      }
+    });
+  modelCacheWrites.set(cacheFile, nextWrite);
+  return nextWrite;
+}
 
 interface ModelCacheFile {
   entries: Record<string, { models: string[]; updatedAt: number }>;
@@ -175,10 +223,26 @@ export class AcpAgent {
         : DEFAULT_MAX_ACTIVE_SESSIONS;
     this.#conversationsDir = options.conversationsDir;
     this.loadModelCache();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
   }
 
   async initializeV1(params: V1InitializeRequest): Promise<V1InitializeResponse> {
     await this.ensureAgyReady();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
     const { response, clientFs, clientElicitation, clientToolCallName } = handleInitializeV1(params, packageJson.version ?? "0.0.0");
     this.#clientFs = clientFs;
     this.#clientElicitation = clientElicitation;
@@ -188,6 +252,14 @@ export class AcpAgent {
 
   async initializeV2(params: V2InitializeRequest): Promise<V2InitializeResponse> {
     await this.ensureAgyReady();
+    if (this.#modelCacheEnabled) {
+      const config = this.authProbeConfig();
+      const key = config.agyPath;
+      const cached = this.#modelOptionsCache.get(key);
+      if (!cached || Date.now() - cached.updatedAt >= MODEL_CACHE_TTL_MS) {
+        this.refreshModelOptions(config);
+      }
+    }
     const { response, clientElicitation, clientToolCallName } = handleInitializeV2(params, packageJson.version ?? "0.0.0");
     this.#clientElicitation = clientElicitation;
     this.#clientToolCallName = clientToolCallName;
@@ -390,6 +462,8 @@ export class AcpAgent {
     client: V1AgentContext,
     signal?: AbortSignal
   ): Promise<V1PromptResponse> {
+    const session = this.#sessions.get(params.sessionId);
+    if (session) session.v1Client = client;
     return handlePromptV1(params, client, signal, this.promptV1Deps());
   }
 
@@ -398,6 +472,8 @@ export class AcpAgent {
    * progress and stopReason arrive as `state_update` notifications.
    */
   promptV2(params: V2PromptRequest, client: V2AgentContext): Promise<V2PromptResponse> {
+    const session = this.#sessions.get(params.sessionId);
+    if (session) session.v2Client = client;
     return handlePromptV2(params, client, this.promptV2Deps());
   }
 
@@ -413,16 +489,18 @@ export class AcpAgent {
     return handleDeleteSession(params, this.#sessions, this.#store);
   }
 
-  private createSession(
+  private async createSession(
     requestedCwd: string | undefined,
     requestedDirs: string[] | undefined
   ): Promise<SessionState> {
-    return createSession(requestedCwd, requestedDirs, {
+    const session = await createSession(requestedCwd, requestedDirs, {
       ...this.sessionBuildDeps(),
       sessions: this.#sessions,
       maxActiveSessions: this.#maxActiveSessions,
       persistSession: (sessionId, session) => this.persistSession(sessionId, session)
     });
+    this.reconcileSessionCatalog(session);
+    return session;
   }
 
   private applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
@@ -485,12 +563,24 @@ export class AcpAgent {
       return cached.models;
     }
 
+    const inFlight = this.#modelRefreshes.get(key);
+    if (inFlight) {
+      try {
+        await inFlight;
+        const refreshed = this.#modelOptionsCache.get(key);
+        if (refreshed?.models.length) {
+          return refreshed.models;
+        }
+      } catch {}
+    }
+
     try {
-      const models = await this.#backend.listModels(config);
-      if (models.length > 0) {
-        this.cacheModelOptions(key, models);
+      await this.refreshModelOptions(config);
+      const refreshed = this.#modelOptionsCache.get(key);
+      if (refreshed?.models.length) {
+        return refreshed.models;
       }
-      return models;
+      return config.model ? [config.model] : [];
     } catch {
       return config.model ? [config.model] : [];
     }
@@ -515,33 +605,91 @@ export class AcpAgent {
   private cacheModelOptions(key: string, models: string[]): void {
     const normalized = [...new Set(models)];
     this.#modelOptionsCache.set(key, { models: normalized, updatedAt: Date.now() });
+    const newCatalog = buildModelCatalog(normalized);
+    for (const session of this.#sessions.values()) {
+      if (session.agy.config.agyPath === key) {
+        session.catalog = newCatalog;
+        const selection = restoredModelSelection(
+          session.selectedBaseModel,
+          session.selectedReasoningEffort,
+          newCatalog
+        );
+        const selectionChanged =
+          selection.baseModel !== session.selectedBaseModel ||
+          selection.reasoningEffort !== session.selectedReasoningEffort;
+        session.selectedBaseModel = selection.baseModel;
+        session.selectedReasoningEffort = selection.reasoningEffort;
+        applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
+        if (selectionChanged && session.sessionId) {
+          this.persistSession(session.sessionId, session).catch(() => {});
+        }
+        if (session.v1Client) {
+          const client = session.v1Client;
+          const sessionId = session.sessionId;
+          deferAfterResponse(() => notifyConfigOptionUpdateV1(client, sessionId, session));
+        } else if (session.v2Client) {
+          const client = session.v2Client;
+          const sessionId = session.sessionId;
+          deferAfterResponse(() => notifyConfigOptionUpdateV2(client, sessionId, session));
+        }
+      }
+    }
     if (!this.#modelCacheEnabled) return;
 
-    this.#modelCacheWrite = this.#modelCacheWrite
-      .then(async () => {
-        const entries = Object.fromEntries(this.#modelOptionsCache);
-        await fs.promises.mkdir(path.dirname(this.#modelCacheFile), { recursive: true });
-        const tmp = `${this.#modelCacheFile}.tmp`;
-        await fs.promises.writeFile(tmp, JSON.stringify({ entries }, null, 2));
-        await fs.promises.rename(tmp, this.#modelCacheFile);
-      })
-      .catch((error) => {
-        console.error(`[agy-acp] WARN: failed to persist model cache: ${(error as Error).message}`);
-      });
+    this.#modelCacheWrite = persistModelCache(
+      this.#modelCacheFile,
+      Object.fromEntries(this.#modelOptionsCache)
+    );
   }
 
-  private refreshModelOptions(config: AgyCliConfig): void {
+  private refreshModelOptions(config: AgyCliConfig): Promise<void> {
     const key = config.agyPath;
-    if (this.#modelRefreshes.has(key)) return;
-    const refresh = this.#backend.listModels(config)
+    const localInFlight = this.#modelRefreshes.get(key);
+    if (localInFlight) return localInFlight;
+
+    if (!this.#modelCacheEnabled) {
+      const localRefresh = (async () => {
+        await this.ensureAgyReady();
+        return this.#backend.listModels(config);
+      })()
+        .then((models) => {
+          if (models.length > 0) {
+            this.cacheModelOptions(key, models);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          this.#modelRefreshes.delete(key);
+        });
+      this.#modelRefreshes.set(key, localRefresh);
+      return localRefresh;
+    }
+
+    const processKey = `${config.agyPath}:${this.#modelCacheFile}`;
+    let sharedInFlight = inFlightModelRefreshes.get(processKey);
+    if (!sharedInFlight) {
+      sharedInFlight = (async () => {
+        await this.ensureAgyReady();
+        return this.#backend.listModels(config);
+      })()
+        .catch(() => [] as string[])
+        .finally(() => {
+          inFlightModelRefreshes.delete(processKey);
+        });
+      inFlightModelRefreshes.set(processKey, sharedInFlight);
+    }
+
+    const localRefresh = sharedInFlight
       .then((models) => {
-        if (models.length > 0) this.cacheModelOptions(key, models);
+        if (models.length > 0) {
+          this.cacheModelOptions(key, models);
+        }
       })
-      .catch(() => {})
       .finally(() => {
         this.#modelRefreshes.delete(key);
       });
-    this.#modelRefreshes.set(key, refresh);
+    this.#modelRefreshes.set(key, localRefresh);
+    return localRefresh;
   }
 
   private buildSession(
@@ -554,17 +702,41 @@ export class AcpAgent {
 
   /** Shared reconstruction for `session/load` and `session/resume`: restore a
    *  persisted session binding and re-register it in memory. */
-  private reloadSession(
+  private async reloadSession(
     sessionId: string,
     requestedCwd: string | undefined,
     requestedDirs: string[] | undefined
   ): Promise<{ session: SessionState; cwd: string; stored: StoredSession }> {
-    return reloadSession(sessionId, requestedCwd, requestedDirs, {
+    const result = await reloadSession(sessionId, requestedCwd, requestedDirs, {
       ...this.sessionBuildDeps(),
       store: this.#store,
       sessions: this.#sessions,
       maxActiveSessions: this.#maxActiveSessions
     });
+    this.reconcileSessionCatalog(result.session);
+    return result;
+  }
+
+  private reconcileSessionCatalog(session: SessionState): void {
+    const key = session.agy.config.agyPath;
+    const cached = this.#modelOptionsCache.get(key);
+    if (!cached || cached.models.length === 0) return;
+    const newCatalog = buildModelCatalog(cached.models);
+    session.catalog = newCatalog;
+    const selection = restoredModelSelection(
+      session.selectedBaseModel,
+      session.selectedReasoningEffort,
+      newCatalog
+    );
+    const selectionChanged =
+      selection.baseModel !== session.selectedBaseModel ||
+      selection.reasoningEffort !== session.selectedReasoningEffort;
+    session.selectedBaseModel = selection.baseModel;
+    session.selectedReasoningEffort = selection.reasoningEffort;
+    applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
+    if (selectionChanged && session.sessionId) {
+      this.persistSession(session.sessionId, session).catch(() => {});
+    }
   }
 
   private persistSession(sessionId: string, session: SessionState): Promise<void> {
@@ -576,8 +748,8 @@ export class AcpAgent {
 }
 
 /** ACP v1 agent app (stable protocol). */
-export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
-  const agent = new AcpAgent(options);
+export function createAcpApp(options: AcpAgentOptions | AcpAgent = {}): V1AgentApp {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
   return v1
     .agent({ name: "agy-acp" })
     .onRequest(v1.methods.agent.initialize, (ctx) => agent.initializeV1(ctx.params))
@@ -601,8 +773,8 @@ export function createAcpApp(options: AcpAgentOptions = {}): V1AgentApp {
  * Experimental draft ACP v2 agent app.
  * Prefer {@link createDualAcpApp} / {@link runAcp} so v1 clients still work.
  */
-export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
-  const agent = new AcpAgent(options);
+export function createAcpV2App(options: AcpAgentOptions | AcpAgent = {}): V2AgentApp {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
   return v2
     .agent({ name: "agy-acp" })
     .onRequest(v2.methods.agent.initialize, (ctx) => agent.initializeV2(ctx.params))
@@ -622,8 +794,9 @@ export function createAcpV2App(options: AcpAgentOptions = {}): V2AgentApp {
  * Dual-version agent connector: negotiates ACP v1 or experimental draft v2 from
  * the client's `initialize.protocolVersion`.
  */
-export function createDualAcpApp(options: AcpAgentOptions = {}): v2.AgentProtocolRouter {
-  return v2.agentProtocolRouter().withV1(createAcpApp(options)).withV2(createAcpV2App(options));
+export function createDualAcpApp(options: AcpAgentOptions | AcpAgent = {}): v2.AgentProtocolRouter {
+  const agent = options instanceof AcpAgent ? options : new AcpAgent(options);
+  return v2.agentProtocolRouter().withV1(createAcpApp(agent)).withV2(createAcpV2App(agent));
 }
 
 export function runAcp(options: AcpAgentOptions = {}) {

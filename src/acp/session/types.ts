@@ -45,6 +45,8 @@ export interface SessionState {
   catalog: ModelCatalog;
   selectedBaseModel: string;
   selectedReasoningEffort: string;
+  v1Client?: import("@agentclientprotocol/sdk").AgentContext;
+  v2Client?: import("@agentclientprotocol/sdk/experimental/v2").AgentContext;
   /**
    * Owns the session's single turn slot: who is running, who has reserved the
    * next turn, and the abort controller for each. Created lazily via
