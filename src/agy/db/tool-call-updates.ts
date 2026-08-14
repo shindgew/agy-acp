@@ -881,10 +881,14 @@ export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): str
     return resolved;
   }
 
-  const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile", "FilePath", "filePath", "path")))?.trim();
-  if (targetFile) {
-    const r = resolvePath(targetFile, displayCwd);
-    if (r) return [r];
+  // Only consider tools that mutate files (step type 5 or write/replace/edit/patch tools).
+  // Read-only tools (view_file, list_dir, grep_search, etc.) must not mark paths as superseded.
+  if (stepRow.stepType === 5 || (name && /write|replace|edit|patch/.test(name))) {
+    const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile", "FilePath", "filePath", "path")))?.trim();
+    if (targetFile) {
+      const r = resolvePath(targetFile, displayCwd);
+      if (r) return [r];
+    }
   }
 
   return [];

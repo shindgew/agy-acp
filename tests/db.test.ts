@@ -4354,6 +4354,74 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("does not classify read-only steps as superseding prior image generation outputs on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-readonly-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-readonly");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 is a completed view_file on the same path
+      insertStep(db, {
+        idx: 2,
+        stepType: 8,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "view-file-call-2",
+              namePrimary: "view_file",
+              rawInputJson: JSON.stringify({
+                FilePath: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-readonly")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be marked superseded by the read-only view_file step
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(2);
+      expect(update1.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+      expect(update1.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("retries image reads on subsequent streaming polls after a transient miss", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
     try {
