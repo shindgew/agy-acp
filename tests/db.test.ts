@@ -4210,6 +4210,42 @@ describe("ConversationDb gen_metadata & token usage", () => {
     db.close();
   });
 
+  it("detectStopReason identifies max_tokens when generation reaches maxOutputTokens ceiling", () => {
+    const db = createConversationDb(dir, "conv-max-output");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Generate long code" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Truncated output..." })
+    });
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 4096,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-max-output",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+
   it("detectStopReason does not classify provider quota exhaustion as max_tokens", () => {
     const db = createConversationDb(dir, "conv-quota-error");
     insertStep(db, {

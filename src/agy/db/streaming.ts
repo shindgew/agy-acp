@@ -121,9 +121,14 @@ export class StreamPoller {
 
   /**
    * Evaluates the non-cancellation stop reason for the turn based on observed
-   * model errors and token limits.
+   * model errors, output ceilings, and token limits.
    */
   detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
+    for (const g of this._promptGenMetadataRows) {
+      if (g.maxOutputTokens && g.maxOutputTokens > 0 && g.candidatesTokens >= g.maxOutputTokens) {
+        return "max_tokens";
+      }
+    }
     for (const row of this._lastObservedRows) {
       const pe = row.stepPayload.modelProviderError;
       if (pe) {
@@ -142,7 +147,8 @@ export class StreamPoller {
           text.includes("max_tokens") ||
           text.includes("maximum context") ||
           text.includes("token limit") ||
-          text.includes("max output tokens")
+          text.includes("max output tokens") ||
+          text.includes("output token limit")
         ) {
           return "max_tokens";
         }
@@ -153,7 +159,8 @@ export class StreamPoller {
           errText.includes("context length") ||
           errText.includes("max tokens") ||
           errText.includes("token limit") ||
-          errText.includes("max output tokens")
+          errText.includes("max output tokens") ||
+          errText.includes("output token limit")
         ) {
           return "max_tokens";
         }
