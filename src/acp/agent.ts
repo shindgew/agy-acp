@@ -142,7 +142,17 @@ function persistModelCache(
       } catch {
         // Missing or malformed caches will be overwritten.
       }
-      const mergedEntries = { ...existingEntries, ...entries };
+      const mergedEntries: Record<string, { models: string[]; updatedAt: number }> = { ...existingEntries };
+      for (const [key, entry] of Object.entries(entries)) {
+        const existing = mergedEntries[key];
+        if (
+          !existing ||
+          !Number.isFinite(existing.updatedAt) ||
+          (Number.isFinite(entry.updatedAt) && entry.updatedAt >= existing.updatedAt)
+        ) {
+          mergedEntries[key] = entry;
+        }
+      }
       await fs.promises.mkdir(path.dirname(cacheFile), { recursive: true });
       const tmp = `${cacheFile}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
       await fs.promises.writeFile(tmp, JSON.stringify({ entries: mergedEntries }, null, 2));

@@ -1392,6 +1392,69 @@ describe("model discovery cache", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("preserves newest cache entry timestamps when merging disk cache writes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-merge-ts-"));
+    const newerTime = Date.now() + 60_000;
+    const initialDiskCache = {
+      entries: {
+        "agy-a": {
+          models: ["newer-model-a\tNewer Model A"],
+          updatedAt: newerTime
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(initialDiskCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["refreshed-model-b\tRefreshed Model B\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+      cacheModelOptions(key: string, models: string[]): void;
+    };
+
+    const configB: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-b"
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      // Manually simulate a stale in-memory snapshot for agy-a on this agent instance
+      (agent as unknown as ModelCacheAgent).cacheModelOptions("agy-a", ["stale-model-a\tStale Model A"]);
+
+      // Trigger refresh for agy-b
+      await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(configB);
+
+      await waitFor(() => {
+        if (!fs.existsSync(path.join(stateDir, "models.json"))) return false;
+        try {
+          const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+          return cache.entries?.["agy-b"] !== undefined;
+        } catch {
+          return false;
+        }
+      });
+
+      const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+      // agy-a should still have newer-model-a from disk because its timestamp was newer than the stale in-memory snapshot
+      expect(cache.entries["agy-a"].models).toEqual(["newer-model-a\tNewer Model A"]);
+      expect(cache.entries["agy-a"].updatedAt).toBe(newerTime);
+      expect(cache.entries["agy-b"].models).toEqual(["refreshed-model-b\tRefreshed Model B"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("active session retention", () => {
