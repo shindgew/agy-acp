@@ -1137,6 +1137,48 @@ describe("model discovery cache", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("populates each agent instance cache when model refresh is shared concurrently", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-concurrent-"));
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    const config = configFromEnv({ cwd: "/repo" });
+
+    try {
+      const agent1 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+      const agent2 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const [models1, models2] = await Promise.all([
+        (agent1 as unknown as ModelCacheAgent).modelOptionsForConfig(config),
+        (agent2 as unknown as ModelCacheAgent).modelOptionsForConfig(config)
+      ]);
+
+      expect(models1).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+      expect(models2).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+      expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("active session retention", () => {

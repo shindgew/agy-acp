@@ -123,7 +123,7 @@ const packageJson = require("../../package.json") as { version?: string };
 const REPLAY_CACHE_CAPACITY = 32;
 const MODEL_CACHE_TTL_MS = 5 * 60_000;
 const DEFAULT_MAX_ACTIVE_SESSIONS = 64;
-const inFlightModelRefreshes = new Map<string, Promise<void>>();
+const inFlightModelRefreshes = new Map<string, Promise<string[]>>();
 
 interface ModelCacheFile {
   entries: Record<string, { models: string[]; updatedAt: number }>;
@@ -594,22 +594,34 @@ export class AcpAgent {
 
   private refreshModelOptions(config: AgyCliConfig): Promise<void> {
     const key = config.agyPath;
+    const localInFlight = this.#modelRefreshes.get(key);
+    if (localInFlight) return localInFlight;
+
     const processKey = `${config.agyPath}:${this.#modelCacheFile}`;
-    const inFlight = inFlightModelRefreshes.get(processKey) ?? this.#modelRefreshes.get(key);
-    if (inFlight) return inFlight;
-    const refresh = (async () => {
-      await this.ensureAgyReady();
-      const models = await this.#backend.listModels(config);
-      if (models.length > 0) this.cacheModelOptions(key, models);
-    })()
-      .catch(() => {})
+    let sharedInFlight = inFlightModelRefreshes.get(processKey);
+    if (!sharedInFlight) {
+      sharedInFlight = (async () => {
+        await this.ensureAgyReady();
+        return this.#backend.listModels(config);
+      })()
+        .catch(() => [] as string[])
+        .finally(() => {
+          inFlightModelRefreshes.delete(processKey);
+        });
+      inFlightModelRefreshes.set(processKey, sharedInFlight);
+    }
+
+    const localRefresh = sharedInFlight
+      .then((models) => {
+        if (models.length > 0) {
+          this.cacheModelOptions(key, models);
+        }
+      })
       .finally(() => {
-        inFlightModelRefreshes.delete(processKey);
         this.#modelRefreshes.delete(key);
       });
-    inFlightModelRefreshes.set(processKey, refresh);
-    this.#modelRefreshes.set(key, refresh);
-    return refresh;
+    this.#modelRefreshes.set(key, localRefresh);
+    return localRefresh;
   }
 
   private buildSession(
