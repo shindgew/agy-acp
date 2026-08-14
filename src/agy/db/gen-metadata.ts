@@ -143,7 +143,9 @@ export function decodeGenMetadata(idx: number, bytes: Uint8Array): GenMetadataUs
   if (!body || !body.stats) return null;
 
   const stats = body.stats;
-  const totalInputTokens = stats.promptTokens + stats.cachedTokens;
+  // prompt_token_count in provider usage represents total prompt tokens,
+  // with cached_content_token_count indicating the cached subset.
+  const totalInputTokens = stats.promptTokens;
   const totalTokens = totalInputTokens + stats.candidatesTokens;
 
   return {
