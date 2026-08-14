@@ -4034,8 +4034,8 @@ describe("ConversationDb gen_metadata & token usage", () => {
     const conn = ConversationDb.open(dir, "conv-gen-meta")!;
     const allGen = conn.readGenMetadataAfter(-1);
     expect(allGen).toHaveLength(2);
-    expect(allGen[0].totalInputTokens).toBe(120);
-    expect(allGen[1].totalInputTokens).toBe(300);
+    expect(allGen[0].totalInputTokens).toBe(100);
+    expect(allGen[1].totalInputTokens).toBe(250);
 
     const afterOne = conn.readGenMetadataAfter(1);
     expect(afterOne).toHaveLength(1);
@@ -4043,7 +4043,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
 
     const latest = conn.readLatestGenMetadata();
     expect(latest?.idx).toBe(2);
-    expect(latest?.totalTokens).toBe(390);
+    expect(latest?.totalTokens).toBe(340);
 
     conn.close();
 
@@ -4064,7 +4064,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
     expect(updates1).toEqual([
       {
         sessionUpdate: "usage_update",
-        used: 700,
+        used: 500,
         size: 256000
       }
     ]);
@@ -4084,13 +4084,13 @@ describe("ConversationDb gen_metadata & token usage", () => {
     expect(updates3).toEqual([
       {
         sessionUpdate: "usage_update",
-        used: 1200,
+        used: 900,
         size: 256000
       }
     ]);
   });
 
-  it("StreamPoller polls gen_metadata and surfaces latest usage and stopReason", () => {
+  it("StreamPoller polls gen_metadata, scopes to baseGenMetadataIdx, and accumulates turn usage", () => {
     const db = createConversationDb(dir, "conv-stream-usage");
     insertStep(db, {
       idx: 1,
@@ -4104,6 +4104,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
       status: 3,
       stepPayload: encodeStepPayload({ agentText: "It is sunny." })
     });
+    // Turn 1 metadata
     insertGenMetadata(db, 1, encodeGenMetadata({
       promptTokens: 400,
       candidatesTokens: 80,
@@ -4112,29 +4113,74 @@ describe("ConversationDb gen_metadata & token usage", () => {
       contextWindowSize: 1000000
     }));
 
-    const poller = new StreamPoller({
+    const poller1 = new StreamPoller({
       dir,
       conversationId: "conv-stream-usage",
       baseStepIdx: -1,
+      baseGenMetadataIdx: -1,
       skipNarration: false,
       snapshot: null
     });
 
-    const updates = poller.poll();
-    const usageUpdate = updates.find((u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
-    expect(usageUpdate).toEqual({
+    const updates1 = poller1.poll();
+    const usageUpdate1 = updates1.find((u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
+    expect(usageUpdate1).toEqual({
       sessionUpdate: "usage_update",
-      used: 500,
+      used: 400,
       size: 1000000
     });
-    expect(poller.latestGenMetadata?.totalTokens).toBe(580);
-    expect(poller.detectStopReason()).toBe("end_turn");
+    expect(poller1.latestGenMetadata?.totalTokens).toBe(480);
+    expect(poller1.accumulatedTurnUsage()).toEqual({
+      totalTokens: 480,
+      inputTokens: 400,
+      outputTokens: 80,
+      thoughtTokens: 20,
+      cachedReadTokens: 100
+    });
+    expect(poller1.detectStopReason()).toBe("end_turn");
+    poller1.close();
 
-    poller.close();
+    // Turn 2: prompt performs 2 generations (tool call + final answer)
+    insertGenMetadata(db, 2, encodeGenMetadata({
+      promptTokens: 600,
+      candidatesTokens: 50,
+      cachedTokens: 200,
+      thoughtTokens: 10,
+      contextWindowSize: 1000000
+    }));
+    insertGenMetadata(db, 3, encodeGenMetadata({
+      promptTokens: 750,
+      candidatesTokens: 120,
+      cachedTokens: 300,
+      thoughtTokens: 30,
+      contextWindowSize: 1000000
+    }));
+
+    const poller2 = new StreamPoller({
+      dir,
+      conversationId: "conv-stream-usage",
+      baseStepIdx: 2,
+      baseGenMetadataIdx: 1, // Scoped to ignore turn 1
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller2.poll();
+    expect(poller2.latestGenMetadata?.idx).toBe(3);
+    // Accumulated usage across the 2 generations of Turn 2:
+    expect(poller2.accumulatedTurnUsage()).toEqual({
+      totalTokens: (600 + 750) + (50 + 120),
+      inputTokens: 600 + 750,
+      outputTokens: 50 + 120,
+      thoughtTokens: 10 + 30,
+      cachedReadTokens: 200 + 300
+    });
+
+    poller2.close();
     db.close();
   });
 
-  it("detectStopReason identifies max_tokens on context length / quota exhaustion error", () => {
+  it("detectStopReason identifies max_tokens on context length / token limit error", () => {
     const db = createConversationDb(dir, "conv-max-tokens");
     insertStep(db, {
       idx: 1,
@@ -4143,15 +4189,8 @@ describe("ConversationDb gen_metadata & token usage", () => {
       stepPayload: encodeStepPayload({
         agentText: "error",
         modelProviderError: encodeModelProviderError({
-          summary: "Resource exhausted: maximum context length exceeded",
-          userMessage: "Resource exhausted: maximum context length exceeded",
-          responseJson: JSON.stringify({
-            error: {
-              code: 429,
-              status: "RESOURCE_EXHAUSTED",
-              details: [{ reason: "QUOTA_EXHAUSTED" }]
-            }
-          })
+          summary: "Maximum context length exceeded for model",
+          userMessage: "Maximum context length exceeded for model"
         })
       })
     });
@@ -4166,6 +4205,43 @@ describe("ConversationDb gen_metadata & token usage", () => {
 
     poller.poll();
     expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason does not classify provider quota exhaustion as max_tokens", () => {
+    const db = createConversationDb(dir, "conv-quota-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "quota error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Resource exhausted: quota exceeded",
+          userMessage: "Resource exhausted: quota exceeded",
+          responseJson: JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ reason: "QUOTA_EXHAUSTED" }]
+            }
+          })
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-quota-error",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
 
     poller.close();
     db.close();
@@ -4229,7 +4305,7 @@ describe("ConversationDb gen_metadata & token usage", () => {
     const usageUpdate = replay?.updates.find((u: unknown) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
     expect(usageUpdate).toEqual({
       sessionUpdate: "usage_update",
-      used: 450,
+      used: 300,
       size: 500000
     });
 

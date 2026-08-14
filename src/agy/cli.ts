@@ -243,6 +243,7 @@ export class AgyCliSession {
   #extraPath: string | undefined;
   #conversationId: string | null = null;
   #lastStepIdx = -1;
+  #lastGenMetadataIdx = -1;
   #lastPromptUserStepIdxs: number[] = [];
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
@@ -470,7 +471,7 @@ export class AgyCliSession {
       this.#pty.write(`\x1b[200~${prompt.replaceAll("\x1b", "")}\x1b[201~\r`);
     }
     const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
-      baseStepIdx: this.#lastStepIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
+      baseStepIdx: this.#lastStepIdx, baseGenMetadataIdx: this.#lastGenMetadataIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
     // Tracked separately: a toolCallId can legitimately go through the live
     // gate first (status 9 -> keys sent) and later reappear as a completed
     // edit once agy applies it, at which point it's still worth routing
@@ -704,16 +705,7 @@ export class AgyCliSession {
       }
       const detectedStopReason = poller.detectStopReason();
       const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
-      const latestGen = poller.latestGenMetadata;
-      const usage: PromptUsage | undefined = latestGen
-        ? {
-            totalTokens: latestGen.totalTokens,
-            inputTokens: latestGen.totalInputTokens,
-            outputTokens: latestGen.candidatesTokens,
-            thoughtTokens: latestGen.thoughtTokens > 0 ? latestGen.thoughtTokens : undefined,
-            cachedReadTokens: latestGen.cachedTokens > 0 ? latestGen.cachedTokens : undefined
-          }
-        : undefined;
+      const usage = poller.accumulatedTurnUsage();
       return { stopReason, usage };
     } catch (error) {
       failed = true;
@@ -722,6 +714,7 @@ export class AgyCliSession {
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastGenMetadataIdx = Math.max(this.#lastGenMetadataIdx, poller.lastGenMetadataIdx);
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#cancelled && !failed) await this.stopPty();
@@ -887,6 +880,7 @@ export class AgyCliSession {
       dir: this.config.conversationsDir,
       conversationId: this.#conversationId,
       baseStepIdx: this.#lastStepIdx,
+      baseGenMetadataIdx: this.#lastGenMetadataIdx,
       skipNarration: false,
       cwd: this.config.cwd,
       snapshot
@@ -982,20 +976,12 @@ export class AgyCliSession {
 
       const detectedStopReason = poller.detectStopReason();
       const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
-      const latestGen = poller.latestGenMetadata;
-      const usage: PromptUsage | undefined = latestGen
-        ? {
-            totalTokens: latestGen.totalTokens,
-            inputTokens: latestGen.totalInputTokens,
-            outputTokens: latestGen.candidatesTokens,
-            thoughtTokens: latestGen.thoughtTokens > 0 ? latestGen.thoughtTokens : undefined,
-            cachedReadTokens: latestGen.cachedTokens > 0 ? latestGen.cachedTokens : undefined
-          }
-        : undefined;
+      const usage = poller.accumulatedTurnUsage();
       return { stopReason, usage };
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastGenMetadataIdx = Math.max(this.#lastGenMetadataIdx, poller.lastGenMetadataIdx);
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#process === child) {

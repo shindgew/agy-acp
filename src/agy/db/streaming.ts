@@ -32,6 +32,8 @@ export interface StreamOptions {
   conversationId: string | null;
   /** Highest idx already delivered to the client before this turn. */
   baseStepIdx: number;
+  /** Highest gen_metadata idx seen before this turn. */
+  baseGenMetadataIdx?: number;
   skipNarration: boolean;
   cwd?: string;
   /** Snapshot of conversation ids before the prompt, for binding a new DB. */
@@ -61,10 +63,12 @@ export class StreamPoller {
   private readonly _completedTaskIds = new Set<string>();
   private _latestGenMetadata: GenMetadataUsage | null = null;
   private _lastGenMetadataIdx = -1;
+  private readonly _promptGenMetadataRows: GenMetadataUsage[] = [];
   private _lastObservedRows: StepRow[] = [];
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
+    this._lastGenMetadataIdx = opts.baseGenMetadataIdx ?? -1;
     this.translator = new Translator({
       mode: "stream",
       skipNarration: opts.skipNarration,
@@ -80,9 +84,44 @@ export class StreamPoller {
     return this._latestGenMetadata;
   }
 
+  get lastGenMetadataIdx(): number {
+    return Math.max(this._lastGenMetadataIdx, this.opts.baseGenMetadataIdx ?? -1);
+  }
+
+  /**
+   * Accumulate all generation metadata rows produced during this prompt turn
+   * for terminal token usage reporting.
+   */
+  accumulatedTurnUsage(): {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    thoughtTokens?: number | null;
+    cachedReadTokens?: number | null;
+  } | undefined {
+    if (this._promptGenMetadataRows.length === 0) return undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let thoughtTokens = 0;
+    let cachedReadTokens = 0;
+    for (const g of this._promptGenMetadataRows) {
+      inputTokens += g.totalInputTokens;
+      outputTokens += g.candidatesTokens;
+      thoughtTokens += g.thoughtTokens;
+      cachedReadTokens += g.cachedTokens;
+    }
+    return {
+      totalTokens: inputTokens + outputTokens,
+      inputTokens,
+      outputTokens,
+      thoughtTokens: thoughtTokens > 0 ? thoughtTokens : undefined,
+      cachedReadTokens: cachedReadTokens > 0 ? cachedReadTokens : undefined
+    };
+  }
+
   /**
    * Evaluates the non-cancellation stop reason for the turn based on observed
-   * model errors, quota exhaustion, and provider limits.
+   * model errors and token limits.
    */
   detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
     for (const row of this._lastObservedRows) {
@@ -103,8 +142,7 @@ export class StreamPoller {
           text.includes("max_tokens") ||
           text.includes("maximum context") ||
           text.includes("token limit") ||
-          text.includes("quota_exhausted") ||
-          text.includes("resource_exhausted")
+          text.includes("max output tokens")
         ) {
           return "max_tokens";
         }
@@ -114,7 +152,8 @@ export class StreamPoller {
         if (
           errText.includes("context length") ||
           errText.includes("max tokens") ||
-          errText.includes("token limit")
+          errText.includes("token limit") ||
+          errText.includes("max output tokens")
         ) {
           return "max_tokens";
         }
@@ -290,14 +329,13 @@ export class StreamPoller {
       latestMeaningful !== undefined &&
       !this._busy &&
       isTerminalStepStatus(latestMeaningful.status);
-    this._latestStepType = latest?.stepType ?? null;
-    this._latestStepStatus = latest?.status ?? null;
     this._lastObservedRows = rows;
 
-    const genRows = db.readGenMetadataAfter(this._lastGenMetadataIdx);
+    const genRows = this.db.readGenMetadataAfter(this._lastGenMetadataIdx);
     if (genRows.length > 0) {
       this._lastGenMetadataIdx = Math.max(this._lastGenMetadataIdx, ...genRows.map((g) => g.idx));
       this._latestGenMetadata = genRows.at(-1) ?? this._latestGenMetadata;
+      this._promptGenMetadataRows.push(...genRows);
     }
     const usageUpdates = this.translator.translateUsage(genRows);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
