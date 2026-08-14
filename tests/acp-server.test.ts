@@ -1179,6 +1179,51 @@ describe("model discovery cache", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("rechecks and reconciles session catalog with latest cache upon session registration", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-recheck-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["deprecated-model-high\tDeprecated Model (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      requireSession(id: string): {
+        selectedBaseModel: string;
+        catalog: { baseModels(): string[] };
+      };
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+      const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
+
+      // Successfully reconciled to the latest refreshed catalog
+      expect(session.selectedBaseModel).toBe("gemini-3.7-flash");
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.7-flash"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("active session retention", () => {

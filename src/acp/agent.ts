@@ -444,16 +444,18 @@ export class AcpAgent {
     return handleDeleteSession(params, this.#sessions, this.#store);
   }
 
-  private createSession(
+  private async createSession(
     requestedCwd: string | undefined,
     requestedDirs: string[] | undefined
   ): Promise<SessionState> {
-    return createSession(requestedCwd, requestedDirs, {
+    const session = await createSession(requestedCwd, requestedDirs, {
       ...this.sessionBuildDeps(),
       sessions: this.#sessions,
       maxActiveSessions: this.#maxActiveSessions,
       persistSession: (sessionId, session) => this.persistSession(sessionId, session)
     });
+    this.reconcileSessionCatalog(session);
+    return session;
   }
 
   private applyConfigOption(sessionId: string, configId: string, value: unknown): Promise<void> {
@@ -634,17 +636,35 @@ export class AcpAgent {
 
   /** Shared reconstruction for `session/load` and `session/resume`: restore a
    *  persisted session binding and re-register it in memory. */
-  private reloadSession(
+  private async reloadSession(
     sessionId: string,
     requestedCwd: string | undefined,
     requestedDirs: string[] | undefined
   ): Promise<{ session: SessionState; cwd: string; stored: StoredSession }> {
-    return reloadSession(sessionId, requestedCwd, requestedDirs, {
+    const result = await reloadSession(sessionId, requestedCwd, requestedDirs, {
       ...this.sessionBuildDeps(),
       store: this.#store,
       sessions: this.#sessions,
       maxActiveSessions: this.#maxActiveSessions
     });
+    this.reconcileSessionCatalog(result.session);
+    return result;
+  }
+
+  private reconcileSessionCatalog(session: SessionState): void {
+    const key = session.agy.config.agyPath;
+    const cached = this.#modelOptionsCache.get(key);
+    if (!cached || cached.models.length === 0) return;
+    const newCatalog = buildModelCatalog(cached.models);
+    session.catalog = newCatalog;
+    const selection = restoredModelSelection(
+      session.selectedBaseModel,
+      session.selectedReasoningEffort,
+      newCatalog
+    );
+    session.selectedBaseModel = selection.baseModel;
+    session.selectedReasoningEffort = selection.reasoningEffort;
+    applyModelSelection(session.agy, selection.baseModel, selection.reasoningEffort, newCatalog);
   }
 
   private persistSession(sessionId: string, session: SessionState): Promise<void> {
