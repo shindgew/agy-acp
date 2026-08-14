@@ -44,6 +44,8 @@ export class StreamPoller {
   private _hasRows = false;
   private _busy = false;
   private _latestStepTerminal = false;
+  private _latestStepType: number | null = null;
+  private _latestStepStatus: number | null = null;
   private _revision = 0;
   private dataVersion: number | null = null;
   private failedDataVersion: number | null = null;
@@ -123,6 +125,25 @@ export class StreamPoller {
 
   get turnCompleteCandidate(): boolean {
     return this._hasRows && !this._busy && this._latestStepTerminal;
+  }
+
+  /**
+   * True when the latest terminal step is a safe single-idle-marker completion.
+   *
+   * Intermediate successful tool rows are turn-complete candidates (so denied
+   * commands and legacy multi-marker paths still work) but must not unlock the
+   * fresh-PTY single-marker shortcut: a delayed startup redraw can capture the
+   * same data_version as that intermediate tool and look like turn end.
+   */
+  get isConclusiveTurnEnd(): boolean {
+    if (!this._latestStepTerminal || this._latestStepType === null || this._latestStepStatus === null) {
+      return false;
+    }
+    // Cancelled/failed terminal rows (notably denied commands) end the turn
+    // with no trailing agent text.
+    if (this._latestStepStatus === 6 || this._latestStepStatus === 7) return true;
+    // Non-empty agent text is the normal turn ending.
+    return this._latestStepType === 15;
   }
 
   /**
@@ -252,6 +273,8 @@ export class StreamPoller {
       latest.stepType !== 14 &&
       !isEmptyAgentText &&
       isTerminalStepStatus(latest.status);
+    this._latestStepType = latest?.stepType ?? null;
+    this._latestStepStatus = latest?.status ?? null;
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
