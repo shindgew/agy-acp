@@ -14,6 +14,7 @@ import { createConversationDb, insertGenMetadata, insertStep, updateStep, update
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodeErrorDetails,
   encodeGenMetadata,
   encodeGrepSearchResult,
   encodeModelProviderError,
@@ -4308,6 +4309,124 @@ describe("ConversationDb gen_metadata & token usage", () => {
 
     poller.poll();
     expect(poller.detectStopReason()).toBe("refusal");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason returns end_turn when intermediate generation reached output ceiling but final generation completed normally", () => {
+    const db = createConversationDb(dir, "conv-multi-gen-end-turn");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Perform task" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "echo tool", output: "ok" }) })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Final response after tool." })
+    });
+    // Generation 1 hit 4096 ceiling
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 4096,
+      maxOutputTokens: 4096
+    }));
+    // Generation 2 completed with only 80 tokens
+    insertGenMetadata(db, 2, encodeGenMetadata({
+      promptTokens: 800,
+      candidatesTokens: 80,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-multi-gen-end-turn",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason returns end_turn when a tool step has token limit error details", () => {
+    const db = createConversationDb(dir, "conv-tool-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run command" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "curl api", output: "error: token limit reached in external service" })
+      }),
+      errorDetails: encodeErrorDetails({ message: "token limit reached in external service", detail: "" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Handled error gracefully." })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-error",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason does not classify organization policy or network blocked errors as refusal", () => {
+    const db = createConversationDb(dir, "conv-org-policy");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "org policy error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Disabled by organization policy",
+          userMessage: "Disabled by organization policy",
+          diagnostic: "Request was blocked by enterprise proxy policy"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-org-policy",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
 
     poller.close();
     db.close();

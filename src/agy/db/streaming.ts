@@ -40,6 +40,88 @@ export interface StreamOptions {
   snapshot: Set<string> | null;
 }
 
+function isContentSafetyRefusal(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (
+          c?.finishReason === "SAFETY" ||
+          c?.finishReason === "BLOCKLIST" ||
+          c?.finishReason === "PROHIBITED_CONTENT" ||
+          c?.finishReason === "RECITATION"
+        ) {
+          return true;
+        }
+      }
+      const promptFeedback = parsed?.promptFeedback;
+      if (
+        promptFeedback?.blockReason === "SAFETY" ||
+        promptFeedback?.blockReason === "BLOCKLIST" ||
+        promptFeedback?.blockReason === "PROHIBITED_CONTENT"
+      ) {
+        return true;
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("safety policy") ||
+    text.includes("content filter") ||
+    text.includes("content safety") ||
+    text.includes("harm category") ||
+    text.includes("safety filter") ||
+    text.includes("safety setting") ||
+    text.includes("blocked by safety") ||
+    text.includes("model refusal") ||
+    text.includes("refusal:") ||
+    text.includes("prohibited content") ||
+    text.includes("harassment") ||
+    text.includes("hate speech") ||
+    text.includes("sexually explicit") ||
+    text.includes("dangerous content")
+  );
+}
+
+function isTokenLimitExhaustion(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (c?.finishReason === "MAX_TOKENS" || c?.finishReason === "LENGTH") {
+          return true;
+        }
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("context length") ||
+    text.includes("maximum context") ||
+    text.includes("max_tokens") ||
+    text.includes("max output tokens") ||
+    text.includes("output token limit") ||
+    text.includes("token limit exceeded") ||
+    text.includes("maximum token limit")
+  );
+}
+
 export class StreamPoller {
   private readonly translator: Translator;
   private db: ConversationDb | null = null;
@@ -124,46 +206,21 @@ export class StreamPoller {
    * model errors, output ceilings, and token limits.
    */
   detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
-    for (const g of this._promptGenMetadataRows) {
-      if (g.maxOutputTokens && g.maxOutputTokens > 0 && g.candidatesTokens >= g.maxOutputTokens) {
-        return "max_tokens";
-      }
+    // 1. Check if the terminal generation reached its configured output ceiling
+    const terminalGen = this._promptGenMetadataRows.at(-1);
+    if (terminalGen?.maxOutputTokens && terminalGen.maxOutputTokens > 0 && terminalGen.candidatesTokens >= terminalGen.maxOutputTokens) {
+      return "max_tokens";
     }
-    for (const row of this._lastObservedRows) {
-      const pe = row.stepPayload.modelProviderError;
-      if (pe) {
-        const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
-        if (
-          text.includes("safety") ||
-          text.includes("content filter") ||
-          text.includes("policy") ||
-          text.includes("refusal") ||
-          text.includes("blocked")
-        ) {
-          return "refusal";
-        }
-        if (
-          text.includes("context length") ||
-          text.includes("max_tokens") ||
-          text.includes("maximum context") ||
-          text.includes("token limit") ||
-          text.includes("max output tokens") ||
-          text.includes("output token limit")
-        ) {
-          return "max_tokens";
-        }
+
+    // 2. Check if the terminal model generation encountered a provider limit / content filter error
+    const terminalStep = findLastMeaningfulStep(this._lastObservedRows) ?? this._lastObservedRows.at(-1);
+    const pe = terminalStep?.stepPayload.modelProviderError;
+    if (pe) {
+      if (isContentSafetyRefusal(pe)) {
+        return "refusal";
       }
-      if (row.error) {
-        const errText = (row.error.message + " " + row.error.detail).toLowerCase();
-        if (
-          errText.includes("context length") ||
-          errText.includes("max tokens") ||
-          errText.includes("token limit") ||
-          errText.includes("max output tokens") ||
-          errText.includes("output token limit")
-        ) {
-          return "max_tokens";
-        }
+      if (isTokenLimitExhaustion(pe)) {
+        return "max_tokens";
       }
     }
     return "end_turn";

@@ -124,6 +124,13 @@ export function encodeModelProviderError(error: {
   return wrapper.finish();
 }
 
+export function encodeErrorDetails(error: { message?: string; detail?: string }): Uint8Array {
+  const w = new BinaryWriter();
+  if (error.message) w.tag(1, 2).string(error.message);
+  if (error.detail) w.tag(2, 2).string(error.detail);
+  return w.finish();
+}
+
 export function encodeViewFileResult(result: {
   fileUri?: string;
   startLine?: number;
