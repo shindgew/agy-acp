@@ -609,6 +609,24 @@ export class AcpAgent {
     const localInFlight = this.#modelRefreshes.get(key);
     if (localInFlight) return localInFlight;
 
+    if (!this.#modelCacheEnabled) {
+      const localRefresh = (async () => {
+        await this.ensureAgyReady();
+        return this.#backend.listModels(config);
+      })()
+        .then((models) => {
+          if (models.length > 0) {
+            this.cacheModelOptions(key, models);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          this.#modelRefreshes.delete(key);
+        });
+      this.#modelRefreshes.set(key, localRefresh);
+      return localRefresh;
+    }
+
     const processKey = `${config.agyPath}:${this.#modelCacheFile}`;
     let sharedInFlight = inFlightModelRefreshes.get(processKey);
     if (!sharedInFlight) {
