@@ -34,7 +34,7 @@ import { encodeCommandResult, encodePermissions, encodeStepPayload, encodeTaskDe
 async function collectUpdates(
   session: AgyCliSession,
   prompt: string
-): Promise<{ updates: SessionUpdate[]; stopReason: "end_turn" | "cancelled" }> {
+): Promise<{ updates: SessionUpdate[]; stopReason: string }> {
   const updates: SessionUpdate[] = [];
   const outcome = await session.prompt(prompt, async (update) => {
     updates.push(update);

@@ -182,8 +182,18 @@ export interface AgyCliConfig {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface PromptUsage {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+}
+
 export interface PromptOutcome {
-  stopReason: "end_turn" | "cancelled";
+  stopReason: "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
+  usage?: PromptUsage;
 }
 
 export interface AgyCliConfigInput {
@@ -692,7 +702,19 @@ export class AgyCliSession {
         // reuse its inactivity deadline for client notification/write-through.
         await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
-      return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
+      const detectedStopReason = poller.detectStopReason();
+      const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
+      const latestGen = poller.latestGenMetadata;
+      const usage: PromptUsage | undefined = latestGen
+        ? {
+            totalTokens: latestGen.totalTokens,
+            inputTokens: latestGen.totalInputTokens,
+            outputTokens: latestGen.candidatesTokens,
+            thoughtTokens: latestGen.thoughtTokens > 0 ? latestGen.thoughtTokens : undefined,
+            cachedReadTokens: latestGen.cachedTokens > 0 ? latestGen.cachedTokens : undefined
+          }
+        : undefined;
+      return { stopReason, usage };
     } catch (error) {
       failed = true;
       await this.stopPty();
@@ -958,7 +980,19 @@ export class AgyCliSession {
         await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
 
-      return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
+      const detectedStopReason = poller.detectStopReason();
+      const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
+      const latestGen = poller.latestGenMetadata;
+      const usage: PromptUsage | undefined = latestGen
+        ? {
+            totalTokens: latestGen.totalTokens,
+            inputTokens: latestGen.totalInputTokens,
+            outputTokens: latestGen.candidatesTokens,
+            thoughtTokens: latestGen.thoughtTokens > 0 ? latestGen.thoughtTokens : undefined,
+            cachedReadTokens: latestGen.cachedTokens > 0 ? latestGen.cachedTokens : undefined
+          }
+        : undefined;
+      return { stopReason, usage };
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
