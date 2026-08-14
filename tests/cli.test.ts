@@ -582,7 +582,8 @@ describe("permission bridge", () => {
     const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
       .then((value) => { resolved = true; return value; });
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    setTimeout(() => pty.emitData("? for shortcuts"), 50);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(resolved).toBe(true);
     expect((await result).stopReason).toBe("end_turn");
     await session.close();
@@ -653,6 +654,44 @@ describe("permission bridge", () => {
 
     const db = new (await import("better-sqlite3")).default(path.join(dir, "delayed-startup.db"));
     insertStep(db, { idx: 3, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
+    pty.emitData("? for shortcuts");
+
+    expect((await result).stopReason).toBe("end_turn");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not complete from a delayed fresh-PTY startup marker after an intermediate assistant narration step", async () => {
+    // Codex review: intermediate assistant narration (stepType 15) must not be
+    // treated as conclusive turn completion on a single fresh-PTY marker.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-delayed-narration-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "delayed-narration");
+      insertStep(db, { idx: 1, stepType: 14, status: 3, stepPayload: encodeStepPayload({ userPrompt: "go" }) });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "I will check the repo" }) });
+      db.close();
+    });
+    pty.emitIdleMarkerOnStart = false;
+    const session = interactiveSession(dir, pty);
+    let resolved = false;
+    const result = session.prompt("go", async () => {}, async () => "agy-allow-once")
+      .then((value) => { resolved = true; return value; });
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Delayed startup marker captures the intermediate narration revision.
+    pty.emitData("? for shortcuts");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(resolved).toBe(false);
+
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "delayed-narration.db"));
+    insertStep(db, {
+      idx: 3,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "pwd", output: "/repo" }) })
+    });
+    insertStep(db, { idx: 4, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
     db.close();
     pty.emitData("? for shortcuts");
 

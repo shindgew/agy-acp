@@ -136,14 +136,12 @@ export class StreamPoller {
    * same data_version as that intermediate tool and look like turn end.
    */
   get isConclusiveTurnEnd(): boolean {
-    if (!this._latestStepTerminal || this._latestStepType === null || this._latestStepStatus === null) {
+    if (!this._latestStepTerminal || this._latestStepStatus === null) {
       return false;
     }
     // Cancelled/failed terminal rows (notably denied commands) end the turn
-    // with no trailing agent text.
-    if (this._latestStepStatus === 6 || this._latestStepStatus === 7) return true;
-    // Non-empty agent text is the normal turn ending.
-    return this._latestStepType === 15;
+    // with no trailing agent text and no further tool runs.
+    return this._latestStepStatus === 6 || this._latestStepStatus === 7;
   }
 
   /**
