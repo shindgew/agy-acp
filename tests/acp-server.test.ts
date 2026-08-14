@@ -1103,10 +1103,11 @@ describe("model discovery cache", () => {
       expect(session.catalog.baseModels()).toEqual(["gemini-3.7-flash"]);
 
       // Verify client received config_option_update notification
-      const updateNotification = notifications.find(
-        (n) => (n.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === "config_option_update"
-      );
-      expect(updateNotification).toBeDefined();
+      await waitFor(() => {
+        return notifications.some(
+          (n) => (n.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === "config_option_update"
+        );
+      });
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }

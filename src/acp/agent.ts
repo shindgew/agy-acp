@@ -103,7 +103,7 @@ import {
   persistSession,
   type SessionBuildDeps
 } from "./session/setup.js";
-import { handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
+import { deferAfterResponse, handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
 import { handleLoadSession } from "./session/load.js";
 import { handleResumeSessionV1, handleResumeSessionV2 } from "./session/resume.js";
 import { handleSetSessionMode } from "./session/set-mode.js";
@@ -579,9 +579,13 @@ export class AcpAgent {
           this.persistSession(session.sessionId, session).catch(() => {});
         }
         if (session.v1Client) {
-          notifyConfigOptionUpdateV1(session.v1Client, session.sessionId, session).catch(() => {});
+          const client = session.v1Client;
+          const sessionId = session.sessionId;
+          deferAfterResponse(() => notifyConfigOptionUpdateV1(client, sessionId, session));
         } else if (session.v2Client) {
-          notifyConfigOptionUpdateV2(session.v2Client, session.sessionId, session).catch(() => {});
+          const client = session.v2Client;
+          const sessionId = session.sessionId;
+          deferAfterResponse(() => notifyConfigOptionUpdateV2(client, sessionId, session));
         }
       }
     }

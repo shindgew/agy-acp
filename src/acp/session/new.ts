@@ -21,7 +21,7 @@ import type { SessionState } from "./types.js";
  * `setImmediate` — which only fires once the microtask queue (including the
  * response's own send) has drained — is enough to guarantee it lands second.
  */
-function deferAfterResponse(fn: () => Promise<void>): void {
+export function deferAfterResponse(fn: () => Promise<void>): void {
   setImmediate(() => {
     fn().catch(() => {
       // Connection may already be closed by the time this fires (client
