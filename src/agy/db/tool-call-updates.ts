@@ -21,10 +21,10 @@ import type { StepRow } from "./types.js";
 /** Absolute path -> last known file body from prior view_file / write steps. */
 export type FileContentCache = Map<string, string>;
 
-/** Cached image artifact for a completed tool call (callKey -> image block + path or null). */
+/** Cached image artifact for a completed tool call (callKey -> image block + path). */
 export type ImageArtifactCache = Map<
   string,
-  { block: { type: "image"; data: string; mimeType: string }; path: string } | null
+  { block: { type: "image"; data: string; mimeType: string }; path: string }
 >;
 
 /** Options shared by tool builders that need project context. */
@@ -915,12 +915,10 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
     const callKey = stepRow.stepPayload.toolRun?.call?.callId || String(stepRow.idx);
     const cached = ctx?.imageArtifacts?.get(callKey);
 
-    if (cached !== undefined) {
-      if (cached) {
-        content.push({ type: "content", content: cached.block });
-        if (isReadableLocation(cached.path, ctx)) {
-          locations.push({ path: cached.path });
-        }
+    if (cached) {
+      content.push({ type: "content", content: cached.block });
+      if (isReadableLocation(cached.path, ctx)) {
+        locations.push({ path: cached.path });
       }
     } else {
       const candidatePaths: string[] = [imageName];
@@ -928,7 +926,6 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
         candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
       }
 
-      let attached = false;
       for (const candidate of candidatePaths) {
         const resolved = resolvePath(candidate, displayCwd);
         if (!resolved) continue;
@@ -942,12 +939,8 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
             locations.push({ path: resolved });
           }
           ctx?.imageArtifacts?.set(callKey, { block: imgBlock, path: resolved });
-          attached = true;
           break;
         }
-      }
-      if (!attached && ctx?.imageArtifacts) {
-        ctx.imageArtifacts.set(callKey, null);
       }
     }
   }

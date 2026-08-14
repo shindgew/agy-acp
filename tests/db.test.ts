@@ -4354,6 +4354,81 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("retries image reads on subsequent streaming polls after a transient miss", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
+    try {
+      const imgPath = path.join(testDir, "output.png");
+
+      const db = createConversationDb(testDir, "conv-gen-img-retry");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-retry-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Create logo",
+                ImageName: "output.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+
+      // Poll 1: step is status 3, but file is not on disk yet (transient miss)
+      const poll1 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-retry")!.readAfter(-1));
+      expect(poll1).toHaveLength(1);
+      const update1 = poll1[0] as any;
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: Create logo"
+          }
+        }
+      ]);
+      expect(update1.locations).toBeUndefined();
+
+      // File is now written to disk
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      // Poll 2: full snapshot re-read in StreamPoller retries reading output.png and emits tool_call_update
+      const poll2 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-retry")!.readAfter(-1));
+      expect(poll2).toHaveLength(1);
+      const update2 = poll2[0] as any;
+      expect(update2.sessionUpdate).toBe("tool_call_update");
+      expect(update2.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: Create logo"
+          }
+        },
+        {
+          type: "content",
+          content: {
+            type: "image",
+            data: PNG_PIXEL,
+            mimeType: "image/png"
+          }
+        }
+      ]);
+      expect(update2.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
     try {
