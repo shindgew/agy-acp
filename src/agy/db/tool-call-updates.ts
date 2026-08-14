@@ -870,20 +870,10 @@ export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): Se
 
   // Only attach the generated output artifact once the step has completed successfully (status === 3).
   // Avoid presenting pre-existing files while pending (9), running (1/2), cancelled (6), or failed (7).
-  if (stepRow.status === 3) {
-    // Prioritize newly generated output candidate paths (ImageName) before reference inputs.
-    const candidatePaths: string[] = [];
-    if (imageName) {
-      candidatePaths.push(imageName);
-      if (!imageName.includes(".")) {
-        candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
-      }
-    }
-    const imagePathsRaw = pick(rawInput, "ImagePaths", "imagePaths");
-    if (Array.isArray(imagePathsRaw)) {
-      for (const p of imagePathsRaw) {
-        if (typeof p === "string" && p) candidatePaths.push(p);
-      }
+  if (stepRow.status === 3 && imageName) {
+    const candidatePaths: string[] = [imageName];
+    if (!imageName.includes(".")) {
+      candidatePaths.push(`${imageName}.png`, `${imageName}.jpg`, `${imageName}.webp`);
     }
 
     for (const candidate of candidatePaths) {

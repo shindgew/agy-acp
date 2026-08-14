@@ -4115,12 +4115,12 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
-  it("prioritizes newly generated output ImageName over input reference ImagePaths", () => {
+  it("attaches newly generated output ImageName and does not fall back to input reference ImagePaths", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-prio-"));
     try {
       const refImgPath = path.join(testDir, "reference.png");
       const outImgPath = path.join(testDir, "output.png");
-      fs.writeFileSync(refImgPath, "REFERENCE_BYTES");
+      fs.writeFileSync(refImgPath, Buffer.from(PNG_PIXEL, "base64"));
       fs.writeFileSync(outImgPath, Buffer.from(PNG_PIXEL, "base64"));
 
       const db = createConversationDb(testDir, "conv-gen-img-prio");
@@ -4158,7 +4158,42 @@ describe("agent outbound image ContentBlocks", () => {
         }
       });
 
+      // When output ImageName is unreadable/missing, reference image must NOT be attached
+      const db2 = createConversationDb(testDir, "conv-gen-img-no-out");
+      insertStep(db2, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-no-out-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Failed generation with reference image",
+                ImageName: "missing-output.png",
+                ImagePaths: ["reference.png"]
+              })
+            })
+          })
+        })
+      });
+
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-no-out")!.readAfter(-1));
+      expect(updates2).toHaveLength(1);
+      const update2 = updates2[0] as any;
+      expect(update2.locations).toBeUndefined();
+      expect(update2.content).toHaveLength(1);
+      expect(update2.content[0]).toEqual({
+        type: "content",
+        content: {
+          type: "text",
+          text: "Prompt: Failed generation with reference image"
+        }
+      });
+
       db.close();
+      db2.close();
     } finally {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
