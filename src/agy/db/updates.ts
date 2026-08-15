@@ -9,6 +9,7 @@ import {
   editUpdate,
   executeUpdate,
   fetchUpdate,
+  imageGenerationUpdate,
   isThoughtToolName,
   otherUpdate,
   questionUpdate,
@@ -30,7 +31,7 @@ export type { UpdateContext } from "./tool-call-updates.js";
  *   98  conversation_history — prior-conversation summaries injected as context
  *   101 stop_hook            — termination/auto-proceed decisions
  */
-const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
+export const LIFECYCLE_STEP_TYPES = new Set<number>([90, 98, 101]);
 
 function isFinalQuotaExhaustion(stepRow: StepRow): boolean {
   if (stepRow.status !== 3 && stepRow.status !== 6 && stepRow.status !== 7) return false;
@@ -191,6 +192,7 @@ function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate |
   if (name === "read_url_content") return fetchUpdate(stepRow);
   if (name === "invoke_subagent") return subagentUpdate(stepRow);
   if (name === "ask_question") return questionUpdate(stepRow);
+  if (name === "generate_image") return imageGenerationUpdate(stepRow, ctx);
   if (/write|replace|edit|patch/.test(name)) return editUpdate(stepRow, ctx);
   return otherUpdate(stepRow);
 }

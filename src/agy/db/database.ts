@@ -9,6 +9,7 @@ import Database from "better-sqlite3";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { decodeErrorDetails, decodePermissions, decodeSubagentInfo, decodeTaskDetails } from "./columns.js";
+import { decodeGenMetadata, type GenMetadataUsage } from "./gen-metadata.js";
 import { decodeStepPayload } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
@@ -178,12 +179,19 @@ export function statConversation(dir: string, id: string): DbStat | null {
   }
 }
 
-/** An open, reusable read handle on one conversation's steps table. */
+interface RawGenMetadataRow {
+  idx: number;
+  data: unknown;
+}
+
+/** An open, reusable read handle on one conversation's steps and gen_metadata tables. */
 export class ConversationDb {
   private constructor(
     private readonly db: Database.Database,
     private readonly stmt: Database.Statement,
-    private readonly dataVersionStmt: Database.Statement
+    private readonly dataVersionStmt: Database.Statement,
+    private readonly genMetadataStmt: Database.Statement | null,
+    private readonly latestGenMetadataStmt: Database.Statement | null
   ) {}
 
   /** Open a conversation DB, or null if missing/unreadable or lacking a steps table. */
@@ -213,10 +221,26 @@ export class ConversationDb {
       const selectQuery =
         `SELECT idx, step_type, status, step_payload, error_details, permissions, task_details, ${subagentCol} ` +
         "FROM steps WHERE idx > ? ORDER BY idx";
+
+      const hasGenMetadata = db
+        .prepare(
+          "SELECT COUNT(*) > 0 AS present FROM sqlite_master WHERE type='table' AND name='gen_metadata'"
+        )
+        .get() as { present: number } | undefined;
+
+      const genMetadataStmt = hasGenMetadata?.present
+        ? db.prepare("SELECT idx, data FROM gen_metadata WHERE idx > ? ORDER BY idx")
+        : null;
+      const latestGenMetadataStmt = hasGenMetadata?.present
+        ? db.prepare("SELECT idx, data FROM gen_metadata ORDER BY idx DESC LIMIT 1")
+        : null;
+
       return new ConversationDb(
         db,
         db.prepare(selectQuery),
-        db.prepare("PRAGMA data_version")
+        db.prepare("PRAGMA data_version"),
+        genMetadataStmt,
+        latestGenMetadataStmt
       );
     } catch {
       return null;
@@ -248,6 +272,36 @@ export class ConversationDb {
     return out as StepRow[] & { hasDecodeError: boolean };
   }
 
+  /** Read decoded gen_metadata entries with idx > afterIdx, in order. */
+  readGenMetadataAfter(afterIdx: number): GenMetadataUsage[] {
+    if (!this.genMetadataStmt) return [];
+    const rows = this.genMetadataStmt.all(afterIdx) as RawGenMetadataRow[];
+    const out: GenMetadataUsage[] = [];
+    for (const r of rows) {
+      try {
+        const decoded = decodeGenMetadata(r.idx, toUint8(r.data));
+        if (decoded) out.push(decoded);
+      } catch (error) {
+        console.error(
+          `[agy-acp] WARN: failed to decode gen_metadata ${r.idx}: ${(error as Error).message}`
+        );
+      }
+    }
+    return out;
+  }
+
+  /** Read the latest gen_metadata entry. */
+  readLatestGenMetadata(): GenMetadataUsage | null {
+    if (!this.latestGenMetadataStmt) return null;
+    const row = this.latestGenMetadataStmt.get() as RawGenMetadataRow | undefined;
+    if (!row) return null;
+    try {
+      return decodeGenMetadata(row.idx, toUint8(row.data));
+    } catch {
+      return null;
+    }
+  }
+
   /** SQLite generation counter, incremented when another connection commits. */
   dataVersion(): number {
     const row = this.dataVersionStmt.get() as { data_version?: number } | undefined;
@@ -270,3 +324,15 @@ export function readRows(dir: string, id: string, afterStepIdx: number): StepRow
     conn.close();
   }
 }
+
+/** One-shot read of the latest generation usage metrics. Returns null if missing/unreadable. */
+export function readLatestSessionUsage(dir: string, id: string): GenMetadataUsage | null {
+  const conn = ConversationDb.open(dir, id);
+  if (!conn) return null;
+  try {
+    return conn.readLatestGenMetadata();
+  } finally {
+    conn.close();
+  }
+}
+

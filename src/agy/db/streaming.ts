@@ -4,11 +4,13 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
+import type { GenMetadataUsage } from "./gen-metadata.js";
 import { newConversationId } from "./scan.js";
 import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
 import { Translator } from "./translator.js";
 import type { StepRow } from "./types.js";
+import { LIFECYCLE_STEP_TYPES } from "./updates.js";
 
 export interface PendingInteraction {
   update: SessionUpdate;
@@ -30,10 +32,94 @@ export interface StreamOptions {
   conversationId: string | null;
   /** Highest idx already delivered to the client before this turn. */
   baseStepIdx: number;
+  /** Highest gen_metadata idx seen before this turn. */
+  baseGenMetadataIdx?: number;
   skipNarration: boolean;
   cwd?: string;
   /** Snapshot of conversation ids before the prompt, for binding a new DB. */
   snapshot: Set<string> | null;
+}
+
+function isContentSafetyRefusal(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (
+          c?.finishReason === "SAFETY" ||
+          c?.finishReason === "BLOCKLIST" ||
+          c?.finishReason === "PROHIBITED_CONTENT" ||
+          c?.finishReason === "RECITATION"
+        ) {
+          return true;
+        }
+      }
+      const promptFeedback = parsed?.promptFeedback;
+      if (
+        promptFeedback?.blockReason === "SAFETY" ||
+        promptFeedback?.blockReason === "BLOCKLIST" ||
+        promptFeedback?.blockReason === "PROHIBITED_CONTENT"
+      ) {
+        return true;
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("safety policy") ||
+    text.includes("content filter") ||
+    text.includes("content safety") ||
+    text.includes("harm category") ||
+    text.includes("safety filter") ||
+    text.includes("safety setting") ||
+    text.includes("blocked by safety") ||
+    text.includes("model refusal") ||
+    text.includes("refusal:") ||
+    text.includes("prohibited content") ||
+    text.includes("harassment") ||
+    text.includes("hate speech") ||
+    text.includes("sexually explicit") ||
+    text.includes("dangerous content")
+  );
+}
+
+function isTokenLimitExhaustion(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (c?.finishReason === "MAX_TOKENS" || c?.finishReason === "LENGTH") {
+          return true;
+        }
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("context length") ||
+    text.includes("maximum context") ||
+    text.includes("max_tokens") ||
+    text.includes("max output tokens") ||
+    text.includes("output token limit") ||
+    text.includes("token limit exceeded") ||
+    text.includes("maximum token limit")
+  );
 }
 
 export class StreamPoller {
@@ -59,9 +145,14 @@ export class StreamPoller {
   /** Launched background task id -> idx of the first row that carried it. */
   private readonly _launchedTaskIdxs = new Map<string, number>();
   private readonly _completedTaskIds = new Set<string>();
+  private _latestGenMetadata: GenMetadataUsage | null = null;
+  private _lastGenMetadataIdx = -1;
+  private readonly _promptGenMetadataRows: GenMetadataUsage[] = [];
+  private _lastObservedRows: StepRow[] = [];
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
+    this._lastGenMetadataIdx = opts.baseGenMetadataIdx ?? -1;
     this.translator = new Translator({
       mode: "stream",
       skipNarration: opts.skipNarration,
@@ -71,6 +162,71 @@ export class StreamPoller {
 
   get conversationId(): string | null {
     return this.boundId;
+  }
+
+  get latestGenMetadata(): GenMetadataUsage | null {
+    return this._latestGenMetadata;
+  }
+
+  get lastGenMetadataIdx(): number {
+    return Math.max(this._lastGenMetadataIdx, this.opts.baseGenMetadataIdx ?? -1);
+  }
+
+  /**
+   * Accumulate all generation metadata rows produced during this prompt turn
+   * for terminal token usage reporting.
+   */
+  accumulatedTurnUsage(): {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    thoughtTokens?: number | null;
+    cachedReadTokens?: number | null;
+  } | undefined {
+    if (this._promptGenMetadataRows.length === 0) return undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let thoughtTokens = 0;
+    let cachedReadTokens = 0;
+    for (const g of this._promptGenMetadataRows) {
+      inputTokens += g.totalInputTokens;
+      outputTokens += g.candidatesTokens;
+      thoughtTokens += g.thoughtTokens;
+      cachedReadTokens += g.cachedTokens;
+    }
+    return {
+      totalTokens: inputTokens + outputTokens + thoughtTokens,
+      inputTokens,
+      outputTokens,
+      thoughtTokens: thoughtTokens > 0 ? thoughtTokens : undefined,
+      cachedReadTokens: cachedReadTokens > 0 ? cachedReadTokens : undefined
+    };
+  }
+
+  /**
+   * Evaluates the non-cancellation stop reason for the turn based on observed
+   * model errors, output ceilings, and token limits.
+   */
+  detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
+    // 1. Check if the terminal generation reached its configured output ceiling (including reasoning tokens)
+    const terminalGen = this._promptGenMetadataRows.at(-1);
+    const generatedTokens = (terminalGen?.candidatesTokens ?? 0) + (terminalGen?.thoughtTokens ?? 0);
+    if (terminalGen?.maxOutputTokens && terminalGen.maxOutputTokens > 0 && generatedTokens >= terminalGen.maxOutputTokens) {
+      return "max_tokens";
+    }
+
+    // 2. Check if the terminal model generation encountered a provider limit / content filter error
+    const terminalStep = findLastMeaningfulStep(this._lastObservedRows) ?? this._lastObservedRows.at(-1);
+    const pe = terminalStep?.stepPayload.modelProviderError;
+    if (pe) {
+      if (isContentSafetyRefusal(pe)) {
+        return "refusal";
+      }
+      if (isTokenLimitExhaustion(pe)) {
+        return "max_tokens";
+      }
+    }
+    return "end_turn";
   }
 
   get lastStepIdx(): number {
@@ -256,25 +412,32 @@ export class StreamPoller {
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
     const latest = rows.at(-1);
+    const latestMeaningful = findLastMeaningfulStep(rows);
     const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
     this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
-    // Gate completion on "latest step is terminal" (3/6/7), not "latest is an
-    // agent message", so those turns don't hang until the deadline. Exclude
-    // stepType 14 (user prompt), which is inserted with status 3 as the turn
-    // opens before agy appends any assistant response steps, and exclude empty
-    // stepType 15 placeholders (text: "" and no thought), which agy inserts
-    // while preparing assistant text generation.
+    // Gate completion on "latest meaningful step is terminal" (3/6/7) while no
+    // subsequent step is currently busy, rather than naively checking rows.at(-1).
+    // This excludes early lifecycle rows (90, 98, 101), system message notices,
+    // and empty stepType 15 placeholders that agy inserts while preparing generation.
     this._latestStepTerminal =
       !rows.hasDecodeError &&
-      latest !== undefined &&
-      latest.stepType !== 14 &&
-      !isEmptyAgentText &&
-      isTerminalStepStatus(latest.status);
-    this._latestStepType = latest?.stepType ?? null;
-    this._latestStepStatus = latest?.status ?? null;
+      latestMeaningful !== undefined &&
+      !this._busy &&
+      isTerminalStepStatus(latestMeaningful.status);
+    this._latestStepType = latestMeaningful?.stepType ?? null;
+    this._latestStepStatus = latestMeaningful?.status ?? null;
+    this._lastObservedRows = rows;
+
+    const genRows = db.readGenMetadataAfter(this._lastGenMetadataIdx);
+    if (genRows.length > 0) {
+      this._lastGenMetadataIdx = Math.max(this._lastGenMetadataIdx, ...genRows.map((g) => g.idx));
+      this._latestGenMetadata = genRows.at(-1) ?? this._latestGenMetadata;
+      this._promptGenMetadataRows.push(...genRows);
+    }
+    const usageUpdates = this.translator.translateUsage(genRows);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
@@ -305,7 +468,7 @@ export class StreamPoller {
         this._pending.push(interaction);
       }
     }
-    return updates;
+    return [...usageUpdates, ...updates];
   }
 
   private ensureDb(): ConversationDb | null {
@@ -337,12 +500,37 @@ function isTerminalStepStatus(status: number): boolean {
 }
 
 /**
+ * Step types recorded by agy for its own bookkeeping, prompt framing, or notifications,
+ * which do not represent assistant tool execution or assistant response generation.
+ */
+function isIgnoredTurnStep(row: StepRow): boolean {
+  if (row.stepType === 14) return true;
+  if (row.stepType === 23) return true;
+  if (LIFECYCLE_STEP_TYPES.has(row.stepType)) return true;
+  if (row.stepType === 15) {
+    const text = row.stepPayload.agentText?.text ?? "";
+    if (isSystemMessage(text)) return true;
+    if (isEmptyAgentTextStep(row)) return true;
+  }
+  return false;
+}
+
+function findLastMeaningfulStep(rows: StepRow[]): StepRow | undefined {
+  for (let i = rows.length - 1; i >= 0; i--) {
+    const row = rows[i]!;
+    if (!isIgnoredTurnStep(row)) return row;
+  }
+  return undefined;
+}
+
+/**
  * True when stepType 15 carries no visible agent text and no thought text.
  * agy appends an empty stepType 15 row with status 3 while initializing
  * assistant response generation, which must NOT trigger turn completion.
  */
 function isEmptyAgentTextStep(row: StepRow): boolean {
   if (row.stepType !== 15) return false;
+  if (row.stepPayload.modelProviderError) return false;
   const text = row.stepPayload.agentText?.text ?? "";
   // System message envelopes carry real (internal) content — they are not the
   // empty placeholders agy inserts while initializing response generation.

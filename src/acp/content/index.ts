@@ -7,6 +7,7 @@
 // follow-ups ("continue"), or framing prose around client data.
 
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,7 +46,12 @@ export async function contentBlocksToPrompt(blocks: ContentBlock[], cwd: string)
 
     if (block.type === "resource_link") {
       if (isImageMimeType(block.mimeType) && block.uri) {
-        parts.push(agyAttachmentReference(filePathFromUri(block.uri)));
+        const filePath = filePathFromUri(block.uri);
+        if (filePath) {
+          parts.push(agyAttachmentReference(filePath));
+        } else {
+          parts.push(block.uri);
+        }
       } else if (block.uri) {
         // Client-supplied URI only — no adapter prose.
         parts.push(block.uri);
@@ -123,7 +129,7 @@ async function writeImageAttachment(
   return filePath;
 }
 
-function extensionForMimeType(mimeType: string): string {
+export function extensionForMimeType(mimeType: string): string {
   switch (mimeType.toLowerCase()) {
     case "image/png":
       return ".png";
@@ -138,18 +144,192 @@ function extensionForMimeType(mimeType: string): string {
       return ".bmp";
     case "image/avif":
       return ".avif";
+    case "image/svg+xml":
+      return ".svg";
     default:
       return ".img";
   }
 }
 
-function isImageMimeType(mimeType: string | null | undefined): boolean {
+export function mimeTypeForPath(filePath: string): string | null {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".gif":
+      return "image/gif";
+    case ".webp":
+      return "image/webp";
+    case ".svg":
+      return "image/svg+xml";
+    case ".bmp":
+      return "image/bmp";
+    case ".avif":
+      return "image/avif";
+    default:
+      return null;
+  }
+}
+
+export function isImageMimeType(mimeType: string | null | undefined): boolean {
   return typeof mimeType === "string" && mimeType.toLowerCase().startsWith("image/");
 }
 
-function filePathFromUri(uri: string): string {
+export function filePathFromUri(uri: string): string | null {
   if (uri.startsWith("file://")) {
-    return fileURLToPath(uri);
+    try {
+      return fileURLToPath(uri);
+    } catch {
+      return null;
+    }
   }
   return uri;
+}
+
+const MAX_IMAGE_READ_BYTES = 10 * 1024 * 1024; // 10MB
+
+/**
+ * Attempt to read a local image file and return an ACP image ContentBlock.
+ * Returns null if the file does not exist, is not an image, or exceeds maxBytes.
+ */
+export function tryReadImageContentBlock(
+  filePath: string,
+  maxBytes = MAX_IMAGE_READ_BYTES
+): { type: "image"; data: string; mimeType: string } | null {
+  try {
+    const resolved = filePathFromUri(filePath);
+    if (!resolved) return null;
+    const mimeType = mimeTypeForPath(resolved);
+    if (!mimeType) return null;
+    const stat = fs.statSync(resolved);
+    if (!stat.isFile() || stat.size > maxBytes) return null;
+    const data = fs.readFileSync(resolved).toString("base64");
+    return { type: "image", data, mimeType };
+  } catch {
+    return null;
+  }
+}
+
+function getCodeSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+
+  // Fenced code blocks: ```...``` or ~~~...~~~
+  const fencedRegex = /(?:^|\n)(```+|~~~+)[\s\S]*?(?:\n\1[^\n]*|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = fencedRegex.exec(text)) !== null) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
+
+  // Inline code spans: `...` or ``...``
+  const inlineRegex = /(`+)(?:[\s\S]*?[^`])\1(?!`)/g;
+  while ((m = inlineRegex.exec(text)) !== null) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
+
+  return spans;
+}
+
+export interface SpannedContentBlock {
+  block: ContentBlock;
+  start: number;
+  end: number;
+}
+
+/**
+ * Splits agent markdown text into spanned alternating text and image ContentBlocks with their
+ * character offset ranges [start, end] within the input text.
+ * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
+ */
+export function splitTextAndImagesWithRanges(
+  text: string,
+  cwd?: string,
+  supersededPaths?: Set<string>
+): SpannedContentBlock[] {
+  if (!text || !text.includes("![")) {
+    return [{ block: { type: "text", text }, start: 0, end: text.length }];
+  }
+
+  const codeSpans = getCodeSpans(text);
+  const imageRegex = /!\[(.*?)\]\((?:<([^>]+)>|([^)\s]+))\)/g;
+  const spans: SpannedContentBlock[] = [];
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = imageRegex.exec(text)) !== null) {
+    // Exclude escaped openers: \![caption](...)
+    let backslashes = 0;
+    for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) continue;
+
+    // Exclude inline code spans and fenced code blocks
+    const matchIdx = match.index;
+    if (codeSpans.some(([start, end]) => matchIdx >= start && matchIdx < end)) continue;
+
+    const rawPath = (match[2] ?? match[3])!;
+    let unescaped = rawPath;
+    if (!rawPath.startsWith("file://") && rawPath.includes("%")) {
+      try {
+        unescaped = decodeURIComponent(rawPath);
+      } catch {
+        continue;
+      }
+    }
+
+    const resolvedPath = unescaped.startsWith("file://")
+      ? filePathFromUri(unescaped)
+      : path.isAbsolute(unescaped)
+      ? unescaped
+      : cwd
+      ? path.resolve(cwd, unescaped)
+      : unescaped;
+
+    if (!resolvedPath) continue;
+    // Do not reconstruct historical markdown images from disk if a later step modified that path
+    if (supersededPaths?.has(resolvedPath)) continue;
+
+    const imgBlock = tryReadImageContentBlock(resolvedPath);
+    if (imgBlock) {
+      if (match.index > lastIndex) {
+        spans.push({
+          block: { type: "text", text: text.slice(lastIndex, match.index) },
+          start: lastIndex,
+          end: match.index
+        });
+      }
+      spans.push({
+        block: imgBlock,
+        start: match.index,
+        end: match.index + match[0].length
+      });
+      lastIndex = match.index + match[0].length;
+    }
+  }
+
+  if (lastIndex === 0) {
+    return [{ block: { type: "text", text }, start: 0, end: text.length }];
+  }
+
+  if (lastIndex < text.length) {
+    spans.push({
+      block: { type: "text", text: text.slice(lastIndex) },
+      start: lastIndex,
+      end: text.length
+    });
+  }
+
+  return spans;
+}
+
+/**
+ * Splits agent markdown text into alternating text and image ContentBlocks
+ * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
+ * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
+ */
+export function splitTextAndImages(text: string, cwd?: string, supersededPaths?: Set<string>): ContentBlock[] {
+  return splitTextAndImagesWithRanges(text, cwd, supersededPaths).map((s) => s.block);
 }

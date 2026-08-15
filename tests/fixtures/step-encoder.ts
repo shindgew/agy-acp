@@ -124,6 +124,13 @@ export function encodeModelProviderError(error: {
   return wrapper.finish();
 }
 
+export function encodeErrorDetails(error: { message?: string; detail?: string }): Uint8Array {
+  const w = new BinaryWriter();
+  if (error.message) w.tag(1, 2).string(error.message);
+  if (error.detail) w.tag(2, 2).string(error.detail);
+  return w.finish();
+}
+
 export function encodeViewFileResult(result: {
   fileUri?: string;
   startLine?: number;
@@ -238,4 +245,52 @@ export function encodeStepPayload(opts: {
   if (opts.webSearch) submessage(w, 42, opts.webSearch);
   if (opts.subagentInfo) submessage(w, 127, opts.subagentInfo);
   return w.finish();
+}
+
+export function encodeGenMetadata(stats: {
+  promptTokens?: number;
+  candidatesTokens?: number;
+  cachedTokens?: number;
+  thoughtTokens?: number;
+  contentTokens?: number;
+  contextWindowSize?: number;
+  maxOutputTokens?: number;
+  modelSlug?: string;
+  modelDisplayName?: string;
+}): Uint8Array {
+  const statsWriter = new BinaryWriter();
+  if (stats.promptTokens !== undefined) statsWriter.tag(2, 0).int64(stats.promptTokens);
+  if (stats.candidatesTokens !== undefined) statsWriter.tag(3, 0).int64(stats.candidatesTokens);
+  if (stats.cachedTokens !== undefined) statsWriter.tag(5, 0).int64(stats.cachedTokens);
+  if (stats.thoughtTokens !== undefined) statsWriter.tag(9, 0).int64(stats.thoughtTokens);
+  if (stats.contentTokens !== undefined) statsWriter.tag(10, 0).int64(stats.contentTokens);
+
+  const bodyWriter = new BinaryWriter();
+  submessage(bodyWriter, 4, statsWriter.finish());
+
+  if (stats.contextWindowSize !== undefined) {
+    const limitsWriter = new BinaryWriter();
+    limitsWriter.tag(4, 0).int64(stats.contextWindowSize);
+    const wrapperWriter = new BinaryWriter();
+    submessage(wrapperWriter, 10, limitsWriter.finish());
+    submessage(bodyWriter, 9, wrapperWriter.finish());
+  }
+
+  if (stats.maxOutputTokens !== undefined) {
+    const maxOutputWriter = new BinaryWriter();
+    maxOutputWriter.tag(2, 0).int64(stats.maxOutputTokens);
+    submessage(bodyWriter, 15, maxOutputWriter.finish());
+  }
+
+  if (stats.modelSlug) {
+    bodyWriter.tag(19, 2).string(stats.modelSlug);
+  }
+
+  if (stats.modelDisplayName) {
+    bodyWriter.tag(21, 2).string(stats.modelDisplayName);
+  }
+
+  const rootWriter = new BinaryWriter();
+  submessage(rootWriter, 1, bodyWriter.finish());
+  return rootWriter.finish();
 }

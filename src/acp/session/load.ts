@@ -43,6 +43,7 @@ export async function handleLoadSession(
     params.cwd,
     params.additionalDirectories
   );
+  session.v1Client = client;
 
   if (stored.conversationId) {
     const tracker = createTerminalOutputTracker();

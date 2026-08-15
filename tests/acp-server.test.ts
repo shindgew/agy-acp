@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Readable, Writable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import { describe, expect, it, vi } from "vitest";
 import * as installer from "../src/agy/installer.js";
 import { client as acpClient, methods, PROTOCOL_VERSION } from "@agentclientprotocol/sdk";
@@ -13,14 +13,15 @@ import {
   buildModelCatalog,
   createAcpApp,
   createAcpV2App,
+  createDualAcpApp,
   modelConfigOption,
   contentBlocksToText,
   reasoningEffortConfigOption,
   toModelSlug
 } from "../src/agent.js";
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
-import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
-import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { createConversationDb, insertGenMetadata, insertStep } from "./fixtures/conversation-db.js";
+import { encodeCommandResult, encodeGenMetadata, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { turnsOf } from "../src/acp/session/turn-scheduler.js";
@@ -423,6 +424,128 @@ describe("session prompt", () => {
           }
         ]);
         expect(response.stopReason).toBe("end_turn");
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("emits live usage_update and returns end-of-turn usage metadata in v1 prompt", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpClient({ name: "test-client" })
+        .onNotification(methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const genMetaBytes = encodeGenMetadata({
+        promptTokens: 1500,
+        candidatesTokens: 350,
+        cachedTokens: 500,
+        thoughtTokens: 100,
+        contentTokens: 250,
+        contextWindowSize: 1000000
+      });
+      const connection = client.connect(createAcpApp({
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-usage-v1", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "token counted response" }) }
+        ], [genMetaBytes])
+      }));
+      try {
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          additionalDirectories: [],
+          mcpServers: []
+        });
+        await flushDeferredNotifications();
+        updates.length = 0;
+
+        const response = await connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "count tokens" }]
+        });
+
+        const usageUpdate = updates.find(
+          (u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update"
+        );
+        expect(usageUpdate).toEqual({
+          sessionUpdate: "usage_update",
+          used: 1500,
+          size: 1000000
+        });
+
+        expect(response.stopReason).toBe("end_turn");
+        expect(response.usage).toEqual({
+          totalTokens: 1950,
+          inputTokens: 1500,
+          outputTokens: 350,
+          thoughtTokens: 100,
+          cachedReadTokens: 500
+        });
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("emits terminal state_update carrying usage in v2 prompt", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpV2.client({ name: "test-client-v2" })
+        .onNotification(acpV2.methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const genMetaBytes = encodeGenMetadata({
+        promptTokens: 800,
+        candidatesTokens: 200,
+        cachedTokens: 300,
+        thoughtTokens: 50,
+        contentTokens: 150,
+        contextWindowSize: 256000
+      });
+      const connection = client.connect(createAcpV2App({
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-usage-v2", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "v2 tokens" }) }
+        ], [genMetaBytes])
+      }));
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: acpV2.PROTOCOL_VERSION,
+          info: { name: "test-client-v2", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+        await flushDeferredNotifications();
+        updates.length = 0;
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "v2 prompt" }]
+        });
+
+        await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+
+        const stateUpdates = updates.filter(
+          (u) => (u as { sessionUpdate?: string }).sessionUpdate === "state_update"
+        );
+        const terminalStateUpdate = stateUpdates.find(
+          (u) => (u as { state?: string }).state === "idle"
+        );
+        expect(terminalStateUpdate).toMatchObject({
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "end_turn",
+          usage: {
+            totalTokens: 1050,
+            inputTokens: 800,
+            outputTokens: 200,
+            thoughtTokens: 50,
+            cachedReadTokens: 300
+          }
+        });
       } finally {
         connection.close();
       }
@@ -839,6 +962,617 @@ describe("model discovery cache", () => {
         (restored as unknown as ModelCacheAgent).modelOptionsForConfig(config)
       ).resolves.toEqual(firstModels);
       expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("applies cached models immediately on launch and updates from background refresh when cache is stale", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-stale-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const config = configFromEnv({ cwd: "/repo" });
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const immediateModels = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      expect(immediateModels).toEqual(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"]);
+
+      await waitFor(async () => {
+        const models = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+        return models.length === 2;
+      });
+      expect(modelCalls).toBe(1);
+
+      const updatedModels = await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(config);
+      expect(updatedModels).toEqual([
+        "gemini-3.5-flash-high\tGemini 3.5 Flash (High)",
+        "gemini-3.7-flash-high\tGemini 3.7 Flash (High)"
+      ]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("initializeV1 triggers background model refresh and updates active session catalog", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-init-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await agent.initializeV1({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      expect(modelCalls).toBe(1);
+      await waitFor(() => {
+        const parsed = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+        return parsed.entries?.agy?.models?.length === 2;
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("initializeV2 triggers background model refresh and updates active session catalog", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-init-v2-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await agent.initializeV2({
+        protocolVersion: 2,
+        info: { name: "test-client", version: "1.0.0" },
+        capabilities: {}
+      });
+
+      expect(modelCalls).toBe(1);
+      await waitFor(() => {
+        const parsed = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+        return parsed.entries?.agy?.models?.length === 2;
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("dynamically updates in-memory catalog of active sessions when background refresh completes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-cache-active-session-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"],
+          updatedAt: Date.now()
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([
+          "gemini-3.5-flash-high\tGemini 3.5 Flash (High)\ngemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      requireSession(id: string): { catalog: { baseModels(): string[] } };
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+      refreshModelOptions(config: AgyCliConfig): Promise<void>;
+      authProbeConfig(): AgyCliConfig;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+      const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.5-flash"]);
+
+      // Trigger background refresh while session is active
+      await (agent as unknown as SessionInspectorAgent).refreshModelOptions(
+        (agent as unknown as SessionInspectorAgent).authProbeConfig()
+      );
+
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.5-flash", "gemini-3.7-flash"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles model selection fallback when background refresh replaces catalog", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-reconcile-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["deprecated-model-high\tDeprecated Model (High)"],
+          updatedAt: Date.now()
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess([
+          "gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"
+        ]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const notifications: Array<{ method: string; params: unknown }> = [];
+    const fakeClient = {
+      notify: vi.fn(async (method: string, params: unknown) => {
+        notifications.push({ method, params });
+      })
+    } as unknown as import("@agentclientprotocol/sdk").AgentContext;
+
+    type SessionInspectorAgent = {
+      requireSession(id: string): {
+        selectedBaseModel: string;
+        selectedReasoningEffort: string;
+        catalog: { baseModels(): string[] };
+      };
+      newSessionV1(params: { cwd: string }, client?: unknown): Promise<{ sessionId: string }>;
+      refreshModelOptions(config: AgyCliConfig): Promise<void>;
+      authProbeConfig(): AgyCliConfig;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1(
+        { cwd: "/repo" },
+        fakeClient
+      );
+      const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
+      expect(session.selectedBaseModel).toBe("deprecated-model");
+
+      // Trigger background refresh that replaces the catalog without the deprecated model
+      await (agent as unknown as SessionInspectorAgent).refreshModelOptions(
+        (agent as unknown as SessionInspectorAgent).authProbeConfig()
+      );
+
+      // Reconciled to the new default model in new catalog
+      expect(session.selectedBaseModel).toBe("gemini-3.7-flash");
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.7-flash"]);
+
+      // Verify client received config_option_update notification
+      await waitFor(() => {
+        return notifications.some(
+          (n) => (n.params as { update?: { sessionUpdate?: string } }).update?.sessionUpdate === "config_option_update"
+        );
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("createDualAcpApp shares a single AcpAgent instance and deduplicates launch refreshes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-dual-"));
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    try {
+      createDualAcpApp({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      await waitFor(() => fs.existsSync(path.join(stateDir, "models.json")));
+      // Exactly 1 probe, not 2
+      expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("populates each agent instance cache when model refresh is shared concurrently", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-concurrent-"));
+    let modelCalls = 0;
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        modelCalls++;
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    const config = configFromEnv({ cwd: "/repo" });
+
+    try {
+      const agent1 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+      const agent2 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const [models1, models2] = await Promise.all([
+        (agent1 as unknown as ModelCacheAgent).modelOptionsForConfig(config),
+        (agent2 as unknown as ModelCacheAgent).modelOptionsForConfig(config)
+      ]);
+
+      expect(models1).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+      expect(models2).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+      expect(modelCalls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rechecks and reconciles session catalog with latest cache upon session registration", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-recheck-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["deprecated-model-high\tDeprecated Model (High)"],
+          updatedAt: Date.now() - 10 * 60_000
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      requireSession(id: string): {
+        selectedBaseModel: string;
+        catalog: { baseModels(): string[] };
+      };
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+      const session = (agent as unknown as SessionInspectorAgent).requireSession(sessionId);
+
+      // Successfully reconciled to the latest refreshed catalog
+      expect(session.selectedBaseModel).toBe("gemini-3.7-flash");
+      expect(session.catalog.baseModels()).toEqual(["gemini-3.7-flash"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists updated model selection when catalog reconciliation changes session selection", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-persist-"));
+    const staleCache = {
+      entries: {
+        agy: {
+          models: ["deprecated-model-high\tDeprecated Model (High)"],
+          updatedAt: Date.now()
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(staleCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type SessionInspectorAgent = {
+      newSessionV1(params: { cwd: string }): Promise<{ sessionId: string }>;
+      refreshModelOptions(config: AgyCliConfig): Promise<void>;
+      authProbeConfig(): AgyCliConfig;
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      const { sessionId } = await (agent as unknown as SessionInspectorAgent).newSessionV1({ cwd: "/repo" });
+
+      // Trigger background refresh that removes the deprecated model
+      await (agent as unknown as SessionInspectorAgent).refreshModelOptions(
+        (agent as unknown as SessionInspectorAgent).authProbeConfig()
+      );
+
+      // Verify sessions.json has the updated model
+      await waitFor(() => {
+        const persisted = JSON.parse(fs.readFileSync(path.join(stateDir, "sessions.json"), "utf-8"));
+        return persisted.sessions?.[sessionId]?.model === "gemini-3.7-flash";
+      });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not share model refresh probes across agents when modelCacheEnabled is false", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-unshared-"));
+    let agent1Calls = 0;
+    let agent2Calls = 0;
+
+    const spawnProcess1 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        agent1Calls++;
+        return new FakeProcess(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const spawnProcess2 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        agent2Calls++;
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    const config = configFromEnv({ cwd: "/repo" });
+
+    try {
+      const agent1 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: false,
+        spawnProcess: spawnProcess1 as unknown as SpawnFactory
+      });
+      const agent2 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: false,
+        spawnProcess: spawnProcess2 as unknown as SpawnFactory
+      });
+
+      const [models1, models2] = await Promise.all([
+        (agent1 as unknown as ModelCacheAgent).modelOptionsForConfig(config),
+        (agent2 as unknown as ModelCacheAgent).modelOptionsForConfig(config)
+      ]);
+
+      expect(models1).toEqual(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"]);
+      expect(models2).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+      expect(agent1Calls).toBe(1);
+      expect(agent2Calls).toBe(1);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes concurrent cache writes across multiple agents sharing the same stateDir", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-writes-"));
+
+    const spawnProcess1 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    const spawnProcess2 = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+    };
+
+    const config1: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-custom-1"
+    };
+    const config2: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-custom-2"
+    };
+
+    try {
+      const agent1 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess1 as unknown as SpawnFactory
+      });
+      const agent2 = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess2 as unknown as SpawnFactory
+      });
+
+      await Promise.all([
+        (agent1 as unknown as ModelCacheAgent).modelOptionsForConfig(config1),
+        (agent2 as unknown as ModelCacheAgent).modelOptionsForConfig(config2)
+      ]);
+
+      await waitFor(() => {
+        if (!fs.existsSync(path.join(stateDir, "models.json"))) return false;
+        try {
+          const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+          return cache.entries?.["agy-custom-1"] !== undefined && cache.entries?.["agy-custom-2"] !== undefined;
+        } catch {
+          return false;
+        }
+      });
+
+      const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+      expect(cache.entries["agy-custom-1"].models).toEqual(["gemini-3.5-flash-high\tGemini 3.5 Flash (High)"]);
+      expect(cache.entries["agy-custom-2"].models).toEqual(["gemini-3.7-flash-high\tGemini 3.7 Flash (High)"]);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves newest cache entry timestamps when merging disk cache writes", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-model-merge-ts-"));
+    const newerTime = Date.now() + 60_000;
+    const initialDiskCache = {
+      entries: {
+        "agy-a": {
+          models: ["newer-model-a\tNewer Model A"],
+          updatedAt: newerTime
+        }
+      }
+    };
+    fs.writeFileSync(path.join(stateDir, "models.json"), JSON.stringify(initialDiskCache));
+
+    const spawnProcess = (_command: string, args: string[]) => {
+      if (args[0] === "models") {
+        return new FakeProcess(["refreshed-model-b\tRefreshed Model B\n"]);
+      }
+      return new FakeProcess(["ok"]);
+    };
+
+    type ModelCacheAgent = {
+      modelOptionsForConfig(config: AgyCliConfig): Promise<string[]>;
+      cacheModelOptions(key: string, models: string[]): void;
+    };
+
+    const configB: AgyCliConfig = {
+      ...configFromEnv({ cwd: "/repo" }),
+      agyPath: "agy-b"
+    };
+
+    try {
+      const agent = new AcpAgent({
+        stateDir,
+        modelCacheEnabled: true,
+        spawnProcess: spawnProcess as unknown as SpawnFactory
+      });
+
+      // Manually simulate a stale in-memory snapshot for agy-a on this agent instance
+      (agent as unknown as ModelCacheAgent).cacheModelOptions("agy-a", ["stale-model-a\tStale Model A"]);
+
+      // Trigger refresh for agy-b
+      await (agent as unknown as ModelCacheAgent).modelOptionsForConfig(configB);
+
+      await waitFor(() => {
+        if (!fs.existsSync(path.join(stateDir, "models.json"))) return false;
+        try {
+          const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+          return cache.entries?.["agy-b"] !== undefined;
+        } catch {
+          return false;
+        }
+      });
+
+      const cache = JSON.parse(fs.readFileSync(path.join(stateDir, "models.json"), "utf-8"));
+      // agy-a should still have newer-model-a from disk because its timestamp was newer than the stale in-memory snapshot
+      expect(cache.entries["agy-a"].models).toEqual(["newer-model-a\tNewer Model A"]);
+      expect(cache.entries["agy-a"].updatedAt).toBe(newerTime);
+      expect(cache.entries["agy-b"].models).toEqual(["refreshed-model-b\tRefreshed Model B"]);
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
@@ -2294,9 +3028,9 @@ function printModeOptions(overrides: AcpAgentOptions = {}): AcpAgentOptions {
   };
 }
 
-export async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+export async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
-  while (!predicate()) {
+  while (!(await predicate())) {
     if (Date.now() - start > timeoutMs) {
       throw new Error("waitFor timed out");
     }
@@ -2323,7 +3057,8 @@ export async function withConversationsDir(fn: (dir: string) => Promise<void>): 
 export function spawnAgyWritingConversation(
   dir: string,
   conversationId: string,
-  steps: Parameters<typeof insertStep>[1][]
+  steps: Parameters<typeof insertStep>[1][],
+  genMetadata?: Uint8Array[]
 ): SpawnFactory {
   return ((command: string, args: string[]) => {
     if (args[0] === "models") {
@@ -2331,6 +3066,11 @@ export function spawnAgyWritingConversation(
     }
     const db = createConversationDb(dir, conversationId);
     for (const step of steps) insertStep(db, step);
+    if (genMetadata) {
+      for (let i = 0; i < genMetadata.length; i++) {
+        insertGenMetadata(db, i + 1, genMetadata[i]!);
+      }
+    }
     db.close();
     return new FakeProcess([]);
   }) as unknown as SpawnFactory;

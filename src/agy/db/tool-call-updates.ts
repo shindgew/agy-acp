@@ -14,11 +14,18 @@ import {
   planUpdateFromMarkdown,
   type PlanEntry
 } from "../../acp/agent-plan/index.js";
+import { tryReadImageContentBlock } from "../../acp/content/index.js";
 import type { SearchHit } from "./step-payload.js";
 import type { StepRow } from "./types.js";
 
 /** Absolute path -> last known file body from prior view_file / write steps. */
 export type FileContentCache = Map<string, string>;
+
+/** Cached image artifact for a completed tool call (callKey -> image block + path). */
+export type ImageArtifactCache = Map<
+  string,
+  { block: { type: "image"; data: string; mimeType: string }; path: string }
+>;
 
 /** Options shared by tool builders that need project context. */
 export interface UpdateContext {
@@ -29,6 +36,10 @@ export interface UpdateContext {
   planEntries?: Map<string, PlanEntry[]>;
   /** Candidate location path -> readability observed while translating. */
   locationReadability?: Map<string, boolean>;
+  /** Completed generate_image artifacts cached per tool call (freezes output across file mutations). */
+  imageArtifacts?: ImageArtifactCache;
+  /** Normalized absolute paths modified by later completed steps in the translated batch. */
+  supersededPaths?: Set<string>;
 }
 
 /** Cap on fetched URL / large tool bodies surfaced in session updates. */
@@ -846,6 +857,273 @@ export function subagentUpdate(stepRow: StepRow): SessionUpdate {
   const name = decodedToolName(stepRow) || "invoke_subagent";
 
   return toolCallUpdate({ stepRow, title, kind: "other", name, content });
+}
+
+function getImageCandidatePaths(imageName: string): string[] {
+  const trimmed = imageName.trim();
+  if (!trimmed) return [];
+  const candidates: string[] = [trimmed];
+  if (!path.extname(trimmed)) {
+    candidates.push(`${trimmed}.png`, `${trimmed}.jpg`, `${trimmed}.webp`);
+  }
+  return candidates;
+}
+
+function unwrapLauncherTokens(tokens: string[]): string[] {
+  let idx = 0;
+  while (idx < tokens.length) {
+    const bin = path.basename(tokens[idx]);
+    if (bin === "env") {
+      idx++;
+      while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok === "-u" || tok === "--unset" || tok === "-C" || tok === "--chdir") {
+          idx += 2;
+        } else if (tok.startsWith("-")) {
+          idx++;
+        } else if (tok.includes("=")) {
+          idx++;
+        } else {
+          break;
+        }
+      }
+    } else if (
+      bin === "sudo" ||
+      bin === "doas" ||
+      bin === "nohup" ||
+      bin === "setsid" ||
+      bin === "time" ||
+      bin === "nice" ||
+      bin === "ionice" ||
+      bin === "exec" ||
+      bin === "chroot"
+    ) {
+      idx++;
+      while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok === "-u" || tok === "-g" || tok === "-n" || tok === "-C" || tok === "-a") {
+          idx += 2;
+        } else if (tok.startsWith("-")) {
+          idx++;
+        } else {
+          break;
+        }
+      }
+    } else {
+      break;
+    }
+  }
+  return tokens.slice(idx);
+}
+
+/**
+ * Extract target file paths mutated by a run_command execution.
+ * Distinguishes output/destination operands from read-only sources (e.g. `cp src dest`, `cat file`),
+ * tracking directory changes (e.g. `cd dir && ...`) across sequential command segments.
+ */
+function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
+  let currentCwd = fsPath(cwd) ?? undefined;
+  const targets: string[] = [];
+
+  const redirRegex = /(?:>>?|[12]>)\s*(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/g;
+  const outFlagRegex = /(?:-o|-O|--output|--out)(?:=|\s+)(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/g;
+
+  // Split into sequential command segments
+  const subCommands = cmd.split(/[;&|]+/);
+  for (const sub of subCommands) {
+    const trimmedSub = sub.trim();
+    if (!trimmedSub) continue;
+
+    // Check segment redirections resolved against current segment cwd
+    let redirMatch: RegExpExecArray | null;
+    while ((redirMatch = redirRegex.exec(trimmedSub)) !== null) {
+      const raw = (redirMatch[1] ?? redirMatch[2] ?? redirMatch[3] ?? redirMatch[4])?.trim();
+      if (raw) {
+        const r = resolvePath(raw, currentCwd);
+        if (r) targets.push(r);
+      }
+    }
+
+    // Check segment output flags resolved against current segment cwd
+    let outMatch: RegExpExecArray | null;
+    while ((outMatch = outFlagRegex.exec(trimmedSub)) !== null) {
+      const raw = (outMatch[1] ?? outMatch[2] ?? outMatch[3] ?? outMatch[4])?.trim();
+      if (raw) {
+        const r = resolvePath(raw, currentCwd);
+        if (r) targets.push(r);
+      }
+    }
+
+    const tokens = trimmedSub.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
+    if (tokens.length === 0) continue;
+    const rawTokens = tokens.map((t) => t.replace(/^['"]|['"]$/g, "").trim()).filter(Boolean);
+    if (rawTokens.length === 0) continue;
+    const cleanTokens = unwrapLauncherTokens(rawTokens);
+    if (cleanTokens.length === 0) continue;
+
+    const bin = path.basename(cleanTokens[0]);
+    const positionalArgs = cleanTokens.slice(1).filter((t) => !t.startsWith("-"));
+
+    const targetDirMatch = trimmedSub.match(/(?:-t|--target-directory)(?:=|\s+)(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/);
+    const targetDir = targetDirMatch ? (targetDirMatch[1] ?? targetDirMatch[2] ?? targetDirMatch[3] ?? targetDirMatch[4])?.trim() : undefined;
+
+    if (bin === "cd") {
+      if (positionalArgs.length > 0) {
+        const nextDir = resolvePath(positionalArgs[0], currentCwd);
+        if (nextDir) currentCwd = nextDir;
+      }
+    } else if (bin === "cp" || bin === "install" || bin === "rsync" || bin === "ln" || bin === "link" || bin === "scp") {
+      if (targetDir) {
+        const dirResolved = resolvePath(targetDir, currentCwd);
+        if (dirResolved) targets.push(dirResolved);
+        for (const src of positionalArgs) {
+          const r = resolvePath(path.join(targetDir, path.basename(src)), currentCwd);
+          if (r) targets.push(r);
+        }
+      } else if (positionalArgs.length >= 2) {
+        const dest = positionalArgs[positionalArgs.length - 1];
+        const sources = positionalArgs.slice(0, positionalArgs.length - 1);
+        const destResolved = resolvePath(dest, currentCwd);
+        if (destResolved) targets.push(destResolved);
+        for (const src of sources) {
+          const r = resolvePath(path.join(dest, path.basename(src)), currentCwd);
+          if (r) targets.push(r);
+        }
+      }
+    } else if (bin === "mv") {
+      if (targetDir) {
+        const dirResolved = resolvePath(targetDir, currentCwd);
+        if (dirResolved) targets.push(dirResolved);
+        for (const src of positionalArgs) {
+          const rSrc = resolvePath(src, currentCwd);
+          if (rSrc) targets.push(rSrc);
+          const rDest = resolvePath(path.join(targetDir, path.basename(src)), currentCwd);
+          if (rDest) targets.push(rDest);
+        }
+      } else if (positionalArgs.length >= 2) {
+        const dest = positionalArgs[positionalArgs.length - 1];
+        const sources = positionalArgs.slice(0, positionalArgs.length - 1);
+        const destResolved = resolvePath(dest, currentCwd);
+        if (destResolved) targets.push(destResolved);
+        for (const src of sources) {
+          const rSrc = resolvePath(src, currentCwd);
+          if (rSrc) targets.push(rSrc);
+          const rDest = resolvePath(path.join(dest, path.basename(src)), currentCwd);
+          if (rDest) targets.push(rDest);
+        }
+      } else {
+        for (const arg of positionalArgs) {
+          const r = resolvePath(arg, currentCwd);
+          if (r) targets.push(r);
+        }
+      }
+    } else if (bin === "rm" || bin === "touch" || bin === "tee" || bin === "truncate" || bin === "unlink") {
+      for (const arg of positionalArgs) {
+        const r = resolvePath(arg, currentCwd);
+        if (r) targets.push(r);
+      }
+    }
+  }
+
+  return targets;
+}
+
+/** Extract candidate file paths modified by a terminal step (status === 3, 6, 7). */
+export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): string[] {
+  const isTerminal = stepRow.status === 3 || stepRow.status === 6 || stepRow.status === 7;
+  if (!isTerminal) return [];
+  const rawInput = parseRawInput(stepRow);
+  const name = decodedToolName(stepRow);
+  const displayCwd = fsPath(cwd) ?? undefined;
+
+  if (name === "generate_image") {
+    if (stepRow.status !== 3) return [];
+    const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
+    if (!imageName) return [];
+    const candidates = getImageCandidatePaths(imageName);
+    const resolved: string[] = [];
+    for (const c of candidates) {
+      const r = resolvePath(c, displayCwd);
+      if (r) resolved.push(r);
+    }
+    return resolved;
+  }
+
+  // Mutating file edit tools (step type 5 or write/replace/edit/patch tools).
+  // Read-only tools (view_file, list_dir, grep_search, etc.) must not mark paths as superseded.
+  if (stepRow.stepType === 5 || (name && /write|replace|edit|patch/.test(name))) {
+    const targetFile = fsPath(asStr(pick(rawInput, "TargetFile", "targetFile", "FilePath", "filePath", "path")))?.trim();
+    if (targetFile) {
+      const r = resolvePath(targetFile, displayCwd);
+      if (r) return [r];
+    }
+  }
+
+  // When run_command is executed, identify output destination operands (e.g. cp src dest, redirects, -o out)
+  if (stepRow.stepType === 21 || name === "run_command") {
+    const cmd = asStr(pick(rawInput, "CommandLine", "commandLine", "command", "cmd"))?.trim();
+    if (cmd) {
+      return extractCommandMutationTargets(cmd, displayCwd);
+    }
+  }
+
+  return [];
+}
+
+/** Tool call for generate_image (image creation / manipulation tool). */
+export function imageGenerationUpdate(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate {
+  const cwd = ctx?.cwd;
+  const rawInput = parseRawInput(stepRow);
+  const prompt = asStr(pick(rawInput, "Prompt", "prompt"))?.trim();
+  const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
+  const aspectRatio = asStr(pick(rawInput, "AspectRatio", "aspectRatio"))?.trim();
+  const displayCwd = fsPath(cwd) ?? undefined;
+
+  const defaultTitle = imageName ? `Generate image ${imageName}` : "Generate image";
+  const title = resolveToolTitle(stepRow, defaultTitle);
+
+  const content: Record<string, unknown>[] = [];
+  const locations: Record<string, unknown>[] = [];
+
+  if (prompt) {
+    content.push(textBlock(`Prompt: ${prompt}${aspectRatio ? ` (${aspectRatio})` : ""}`));
+  }
+
+  // Only attach the generated output artifact once the step has completed successfully (status === 3).
+  // Avoid presenting pre-existing files while pending (9), running (1/2), cancelled (6), or failed (7).
+  if (stepRow.status === 3 && imageName) {
+    const callKey = stepRow.stepPayload.toolRun?.call?.callId || String(stepRow.idx);
+    const cached = ctx?.imageArtifacts?.get(callKey);
+
+    if (cached) {
+      content.push({ type: "content", content: cached.block });
+      if (isReadableLocation(cached.path, ctx)) {
+        locations.push({ path: cached.path });
+      }
+    } else {
+      const candidatePaths = getImageCandidatePaths(imageName);
+
+      for (const candidate of candidatePaths) {
+        const resolved = resolvePath(candidate, displayCwd);
+        if (!resolved) continue;
+        // Do not reconstruct historical outputs from the current file if a later step overwrote it.
+        if (ctx?.supersededPaths?.has(resolved)) continue;
+
+        const imgBlock = tryReadImageContentBlock(resolved);
+        if (imgBlock) {
+          content.push({ type: "content", content: imgBlock });
+          if (isReadableLocation(resolved, ctx)) {
+            locations.push({ path: resolved });
+          }
+          ctx?.imageArtifacts?.set(callKey, { block: imgBlock, path: resolved });
+          break;
+        }
+      }
+    }
+  }
+
+  const name = decodedToolName(stepRow) || "generate_image";
+  return toolCallUpdate({ stepRow, title, kind: "other", name, content, locations });
 }
 
 /**

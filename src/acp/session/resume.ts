@@ -50,6 +50,7 @@ export async function handleResumeSessionV1(
   await deps.requireAuthenticated(params.cwd);
   const { session } = await deps.reloadSession(params.sessionId, params.cwd, params.additionalDirectories);
   if (client) {
+    session.v1Client = client;
     await deps.notifyAvailableCommandsV1(client, params.sessionId);
   }
   return {
@@ -76,6 +77,7 @@ export async function handleResumeSessionV2(
     params.cwd,
     params.additionalDirectories
   );
+  session.v2Client = client;
 
   const replayFrom = params.replayFrom ?? null;
   if (replayFrom != null) {
