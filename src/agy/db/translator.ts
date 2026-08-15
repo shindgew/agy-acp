@@ -176,7 +176,7 @@ export class Translator {
     for (let i = rows.length - 1; i >= 0; i--) {
       supersededByRowIndex[i] = new Set(supersededPaths);
       const row = rows[i];
-      if (row.status === 3) {
+      if (row.status === 3 || row.status === 6 || row.status === 7) {
         const modified = getCompletedStepTargetPaths(row, this.opts.cwd);
         for (const p of modified) {
           supersededPaths.add(p);

@@ -979,14 +979,16 @@ function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
   return targets;
 }
 
-/** Extract candidate file paths modified by a completed step (status === 3). */
+/** Extract candidate file paths modified by a terminal step (status === 3, 6, 7). */
 export function getCompletedStepTargetPaths(stepRow: StepRow, cwd?: string): string[] {
-  if (stepRow.status !== 3) return [];
+  const isTerminal = stepRow.status === 3 || stepRow.status === 6 || stepRow.status === 7;
+  if (!isTerminal) return [];
   const rawInput = parseRawInput(stepRow);
   const name = decodedToolName(stepRow);
   const displayCwd = fsPath(cwd) ?? undefined;
 
   if (name === "generate_image") {
+    if (stepRow.status !== 3) return [];
     const imageName = asStr(pick(rawInput, "ImageName", "imageName"))?.trim();
     if (!imageName) return [];
     const candidates = getImageCandidatePaths(imageName);
