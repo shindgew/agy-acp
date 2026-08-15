@@ -316,6 +316,28 @@ describe("outbound image ContentBlocks", () => {
     expect(blocks).toEqual([{ type: "text", text }]);
   });
 
+  it("ignores image-like syntax inside escaped markdown, inline code, and fenced code blocks", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-code-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      // 1. Escaped opener
+      const escapedText = "Escaped image embed: \\![plot](plot.png) should not render.";
+      expect(splitTextAndImages(escapedText, tmpDir)).toEqual([{ type: "text", text: escapedText }]);
+
+      // 2. Inline code span
+      const inlineCodeText = "Here is the code: `![plot](plot.png)` in inline span.";
+      expect(splitTextAndImages(inlineCodeText, tmpDir)).toEqual([{ type: "text", text: inlineCodeText }]);
+
+      // 3. Fenced code block
+      const fencedCodeText = "Example code:\n```markdown\n![plot](plot.png)\n```\nEnd of example.";
+      expect(splitTextAndImages(fencedCodeText, tmpDir)).toEqual([{ type: "text", text: fencedCodeText }]);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("preserves plain text when markdown images do not exist on disk", () => {
     const text = "Here is an external image:\n![remote](https://example.com/img.png)\nDone.";
     const blocks = splitTextAndImages(text);

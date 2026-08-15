@@ -213,21 +213,53 @@ export function tryReadImageContentBlock(
   }
 }
 
+function getCodeSpans(text: string): Array<[number, number]> {
+  const spans: Array<[number, number]> = [];
+
+  // Fenced code blocks: ```...``` or ~~~...~~~
+  const fencedRegex = /(?:^|\n)(```+|~~~+)[\s\S]*?(?:\n\1[^\n]*|$)/g;
+  let m: RegExpExecArray | null;
+  while ((m = fencedRegex.exec(text)) !== null) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
+
+  // Inline code spans: `...` or ``...``
+  const inlineRegex = /(`+)(?:[\s\S]*?[^`])\1(?!`)/g;
+  while ((m = inlineRegex.exec(text)) !== null) {
+    spans.push([m.index, m.index + m[0].length]);
+  }
+
+  return spans;
+}
+
 /**
  * Splits agent markdown text into alternating text and image ContentBlocks
  * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
+ * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
  */
 export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
   if (!text || !text.includes("![")) {
     return [{ type: "text", text }];
   }
 
+  const codeSpans = getCodeSpans(text);
   const imageRegex = /!\[(.*?)\]\((?:<([^>]+)>|([^)\s]+))\)/g;
   const blocks: ContentBlock[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
   while ((match = imageRegex.exec(text)) !== null) {
+    // Exclude escaped openers: \![caption](...)
+    let backslashes = 0;
+    for (let i = match.index - 1; i >= 0 && text[i] === "\\"; i--) {
+      backslashes++;
+    }
+    if (backslashes % 2 === 1) continue;
+
+    // Exclude inline code spans and fenced code blocks
+    const matchIdx = match.index;
+    if (codeSpans.some(([start, end]) => matchIdx >= start && matchIdx < end)) continue;
+
     const rawPath = (match[2] ?? match[3])!;
     let unescaped = rawPath;
     if (!rawPath.startsWith("file://") && rawPath.includes("%")) {
