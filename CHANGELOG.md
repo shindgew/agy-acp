@@ -7,6 +7,36 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.5.1] - 2026-08-15
+
+### Added
+
+- Support agent-outbound image `ContentBlock`s across ACP v1 and v2: detect local image Markdown links in agent text, extract local image files as base64 byte payloads with detected MIME types, and stream alternating text and image content blocks. (#59)
+- Support `generate_image` tool calls by embedding image content blocks directly into tool call content and updates. (#59)
+- Report token usage metrics via `usage_update` notifications in streaming and conversation replay, decoding `gen_metadata` records from the SQLite database for prompt tokens, candidates tokens, thought tokens, cached tokens, and total context size. (#37)
+- Report granular turn `stopReason` (`end_turn`, `max_tokens`, `refusal`, `error`, `cancelled`) on prompt responses and state updates, evaluating output token ceilings (including thought tokens), model provider errors, and content safety filters. (#37)
+- Attach end-of-turn token usage and `stopReason` directly to `session/prompt` response payloads in ACP v1 and draft v2. (#37)
+- Background model discovery on startup and initialization: apply cached model catalogs immediately for zero-latency session setup while refreshing available models asynchronously in the background. (#107)
+- Synchronize and notify connected ACP v1 and v2 clients via `config_option_update` when background model discovery updates available models or changes active session selections. (#107)
+
+### Fixed
+
+- Prevent premature turn completion in `StreamPoller` by ignoring early lifecycle steps and system messages until meaningful turn generation begins. (#97)
+- Allow a single post-prompt PTY idle marker to complete fresh-PTY turns when SQLite DB records terminal completion steps, preventing 5m timeouts during intermediate tool execution. (#105)
+- Treat `modelProviderError` rows without visible text as meaningful terminal steps so provider error turns terminate cleanly instead of hanging. (#37)
+- Buffer incomplete Markdown image syntax (including trailing `!`, brackets, and angle-bracket destinations `<path>`) during streaming to avoid prematurely emitting partial image syntax as plain text. (#59)
+- Ignore image-like Markdown syntax inside escaped sequences and code blocks/spans during streaming translation and replay. (#59)
+- Track filesystem mutations (writes, moves, copies, and working-directory shifts) across command executions and tool calls so historical images from overwritten or superseded file paths are not replayed. (#59)
+- Keep failed image artifact disk reads retryable instead of caching `null` entries permanently. (#59)
+- Safely ignore malformed file URIs and decode percent-encoded local file paths when extracting outbound images. (#59)
+- Safely merge and serialize model cache disk writes across concurrent agent instances using atomic file writes and timestamp-based conflict resolution. (#107)
+
+### Changed
+
+- Update `@bufbuild/protobuf` dependency to `^2.14.0`.
+- Increase vitest `testTimeout` to 15s for consistent test execution in slower environments.
+- Publish release packages to GitHub Packages alongside npm.
+
 ## [0.5.0] - 2026-08-11
 
 ### Added
