@@ -5040,6 +5040,58 @@ describe("agent outbound image ContentBlocks", () => {
       fs.rmSync(testDir, { recursive: true, force: true });
     }
   });
+
+  it("buffers incomplete angle-bracket markdown image syntax when destination contains parentheses", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-angle-paren-"));
+    try {
+      const imgPath = path.join(testDir, "plot (Q1).png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-angle-paren");
+      // Step is active (status 1) and splits inside angle-bracket destination right after internal parenthesis
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](<${imgPath.slice(0, imgPath.indexOf(")"))}`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: must stay buffered because >) has not arrived yet
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-angle-paren")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: full angle-bracket markdown image arrives and step completes
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](<${imgPath}>)\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-angle-paren")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("ConversationDb gen_metadata & token usage", () => {

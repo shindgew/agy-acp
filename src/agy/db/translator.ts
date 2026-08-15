@@ -439,7 +439,15 @@ export class Translator {
       if (lastOpen >= 0) {
         const tail = text.slice(lastOpen);
         const destStart = tail.lastIndexOf("](");
-        const isClosed = destStart >= 0 && tail.slice(destStart + 2).includes(")");
+        let isClosed = false;
+        if (destStart >= 0) {
+          const destBody = tail.slice(destStart + 2);
+          if (destBody.startsWith("<")) {
+            isClosed = destBody.includes(">)");
+          } else {
+            isClosed = destBody.includes(")");
+          }
+        }
         if (!isClosed) {
           limit = Math.min(limit, lastOpen);
         }
