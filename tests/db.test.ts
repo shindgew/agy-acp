@@ -2,17 +2,20 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ConversationDb, type DbStat, statConversation } from "../src/agy/db/database.js";
+import { ConversationDb, type DbStat, readLatestSessionUsage, statConversation } from "../src/agy/db/database.js";
+import { decodeGenMetadata } from "../src/agy/db/gen-metadata.js";
 import { ReplayCache, isDbStatUnchanged } from "../src/agy/db/replay.js";
 import { conversationSnapshot, newConversationId } from "../src/agy/db/scan.js";
 import { StreamPoller } from "../src/agy/db/streaming.js";
 import { Translator } from "../src/agy/db/translator.js";
 import { isSystemMessage, isSystemMessagePrefix } from "../src/agy/db/system-message.js";
 import { sessionUpdateFromStep } from "../src/agy/db/updates.js";
-import { createConversationDb, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
+import { createConversationDb, insertGenMetadata, insertStep, updateStep, updateStepPayload } from "./fixtures/conversation-db.js";
 import {
   encodeAgentText,
   encodeCommandResult,
+  encodeErrorDetails,
+  encodeGenMetadata,
   encodeGrepSearchResult,
   encodeModelProviderError,
   encodePermissions,
@@ -4003,3 +4006,537 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     expect(isSystemMessage("Regular text")).toBe(false);
   });
 });
+
+describe("ConversationDb gen_metadata & token usage", () => {
+
+  it("reads gen_metadata rows from ConversationDb", () => {
+    const db = createConversationDb(dir, "conv-gen-meta");
+    const meta1 = encodeGenMetadata({
+      promptTokens: 100,
+      candidatesTokens: 50,
+      cachedTokens: 20,
+      thoughtTokens: 10,
+      contentTokens: 40,
+      contextWindowSize: 256000
+    });
+    const meta2 = encodeGenMetadata({
+      promptTokens: 250,
+      candidatesTokens: 90,
+      cachedTokens: 50,
+      thoughtTokens: 20,
+      contentTokens: 70,
+      contextWindowSize: 256000
+    });
+
+    insertGenMetadata(db, 1, meta1);
+    insertGenMetadata(db, 2, meta2);
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-gen-meta")!;
+    const allGen = conn.readGenMetadataAfter(-1);
+    expect(allGen).toHaveLength(2);
+    expect(allGen[0].totalInputTokens).toBe(100);
+    expect(allGen[1].totalInputTokens).toBe(250);
+
+    const afterOne = conn.readGenMetadataAfter(1);
+    expect(afterOne).toHaveLength(1);
+    expect(afterOne[0].idx).toBe(2);
+
+    const latest = conn.readLatestGenMetadata();
+    expect(latest?.idx).toBe(2);
+    expect(latest?.totalTokens).toBe(360);
+
+    conn.close();
+
+    const oneshotLatest = readLatestSessionUsage(dir, "conv-gen-meta");
+    expect(oneshotLatest?.idx).toBe(2);
+  });
+
+  it("emits usage_update in Translator and deduplicates unchanged token usage", () => {
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const usage1 = decodeGenMetadata(1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 100,
+      cachedTokens: 200,
+      contextWindowSize: 256000
+    }))!;
+
+    const updates1 = translator.translateUsage([usage1]);
+    expect(updates1).toEqual([
+      {
+        sessionUpdate: "usage_update",
+        used: 500,
+        size: 256000
+      }
+    ]);
+
+    // Same used tokens -> should not emit duplicate update
+    const updates2 = translator.translateUsage([usage1]);
+    expect(updates2).toHaveLength(0);
+
+    // Changed used tokens -> emits new usage_update
+    const usage2 = decodeGenMetadata(2, encodeGenMetadata({
+      promptTokens: 900,
+      candidatesTokens: 150,
+      cachedTokens: 300,
+      contextWindowSize: 256000
+    }))!;
+    const updates3 = translator.translateUsage([usage2]);
+    expect(updates3).toEqual([
+      {
+        sessionUpdate: "usage_update",
+        used: 900,
+        size: 256000
+      }
+    ]);
+  });
+
+  it("StreamPoller polls gen_metadata, scopes to baseGenMetadataIdx, and accumulates turn usage", () => {
+    const db = createConversationDb(dir, "conv-stream-usage");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "What is the weather?" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "It is sunny." })
+    });
+    // Turn 1 metadata
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 400,
+      candidatesTokens: 80,
+      cachedTokens: 100,
+      thoughtTokens: 20,
+      contextWindowSize: 1000000
+    }));
+
+    const poller1 = new StreamPoller({
+      dir,
+      conversationId: "conv-stream-usage",
+      baseStepIdx: -1,
+      baseGenMetadataIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    const updates1 = poller1.poll();
+    const usageUpdate1 = updates1.find((u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
+    expect(usageUpdate1).toEqual({
+      sessionUpdate: "usage_update",
+      used: 400,
+      size: 1000000
+    });
+    expect(poller1.latestGenMetadata?.totalTokens).toBe(500);
+    expect(poller1.accumulatedTurnUsage()).toEqual({
+      totalTokens: 500,
+      inputTokens: 400,
+      outputTokens: 80,
+      thoughtTokens: 20,
+      cachedReadTokens: 100
+    });
+    expect(poller1.detectStopReason()).toBe("end_turn");
+    poller1.close();
+
+    // Turn 2: prompt performs 2 generations (tool call + final answer)
+    insertGenMetadata(db, 2, encodeGenMetadata({
+      promptTokens: 600,
+      candidatesTokens: 50,
+      cachedTokens: 200,
+      thoughtTokens: 10,
+      contextWindowSize: 1000000
+    }));
+    insertGenMetadata(db, 3, encodeGenMetadata({
+      promptTokens: 750,
+      candidatesTokens: 120,
+      cachedTokens: 300,
+      thoughtTokens: 30,
+      contextWindowSize: 1000000
+    }));
+
+    const poller2 = new StreamPoller({
+      dir,
+      conversationId: "conv-stream-usage",
+      baseStepIdx: 2,
+      baseGenMetadataIdx: 1, // Scoped to ignore turn 1
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller2.poll();
+    expect(poller2.latestGenMetadata?.idx).toBe(3);
+    // Accumulated usage across the 2 generations of Turn 2:
+    expect(poller2.accumulatedTurnUsage()).toEqual({
+      totalTokens: (600 + 750) + (50 + 120) + (10 + 30),
+      inputTokens: 600 + 750,
+      outputTokens: 50 + 120,
+      thoughtTokens: 10 + 30,
+      cachedReadTokens: 200 + 300
+    });
+
+    poller2.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies max_tokens on context length / token limit error", () => {
+    const db = createConversationDb(dir, "conv-max-tokens");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Maximum context length exceeded for model",
+          userMessage: "Maximum context length exceeded for model"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-max-tokens",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies max_tokens when generation reaches maxOutputTokens ceiling", () => {
+    const db = createConversationDb(dir, "conv-max-output");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Generate long code" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Truncated output..." })
+    });
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 4096,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-max-output",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies max_tokens when reasoning tokens plus candidates reach maxOutputTokens ceiling", () => {
+    const db = createConversationDb(dir, "conv-thinking-ceiling");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Deep reasoning prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Response" })
+    });
+    // Candidates are only 1000, but thoughtTokens are 3096 -> 4096 = maxOutputTokens
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 1000,
+      thoughtTokens: 3096,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-thinking-ceiling",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("max_tokens");
+
+    poller.close();
+    db.close();
+  });
+
+
+  it("detectStopReason does not classify provider quota exhaustion as max_tokens", () => {
+    const db = createConversationDb(dir, "conv-quota-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "quota error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Resource exhausted: quota exceeded",
+          userMessage: "Resource exhausted: quota exceeded",
+          responseJson: JSON.stringify({
+            error: {
+              code: 429,
+              status: "RESOURCE_EXHAUSTED",
+              details: [{ reason: "QUOTA_EXHAUSTED" }]
+            }
+          })
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-quota-error",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies refusal on safety/content filter error", () => {
+    const db = createConversationDb(dir, "conv-refusal");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "blocked",
+        modelProviderError: encodeModelProviderError({
+          summary: "Request blocked by safety policy filter",
+          userMessage: "Request blocked by safety policy filter"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-refusal",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("refusal");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason identifies refusal on safety error without agentText payload", () => {
+    const db = createConversationDb(dir, "conv-refusal-no-text");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "Blocked by safety filter",
+          userMessage: "Blocked by safety filter"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-refusal-no-text",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("refusal");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason returns end_turn when intermediate generation reached output ceiling but final generation completed normally", () => {
+    const db = createConversationDb(dir, "conv-multi-gen-end-turn");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Perform task" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "echo tool", output: "ok" }) })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Final response after tool." })
+    });
+    // Generation 1 hit 4096 ceiling
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 500,
+      candidatesTokens: 4096,
+      maxOutputTokens: 4096
+    }));
+    // Generation 2 completed with only 80 tokens
+    insertGenMetadata(db, 2, encodeGenMetadata({
+      promptTokens: 800,
+      candidatesTokens: 80,
+      maxOutputTokens: 4096
+    }));
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-multi-gen-end-turn",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason returns end_turn when a tool step has token limit error details", () => {
+    const db = createConversationDb(dir, "conv-tool-error");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run command" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "curl api", output: "error: token limit reached in external service" })
+      }),
+      errorDetails: encodeErrorDetails({ message: "token limit reached in external service", detail: "" })
+    });
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Handled error gracefully." })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-error",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("detectStopReason does not classify organization policy or network blocked errors as refusal", () => {
+    const db = createConversationDb(dir, "conv-org-policy");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        agentText: "org policy error",
+        modelProviderError: encodeModelProviderError({
+          summary: "Disabled by organization policy",
+          userMessage: "Disabled by organization policy",
+          diagnostic: "Request was blocked by enterprise proxy policy"
+        })
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-org-policy",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.detectStopReason()).toBe("end_turn");
+
+    poller.close();
+    db.close();
+  });
+
+  it("ReplayCache includes usage_update from latest gen_metadata", () => {
+    const db = createConversationDb(dir, "conv-replay-usage");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Replay prompt" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Replay response" })
+    });
+    insertGenMetadata(db, 1, encodeGenMetadata({
+      promptTokens: 300,
+      candidatesTokens: 60,
+      cachedTokens: 150,
+      contextWindowSize: 500000
+    }));
+
+    const cache = new ReplayCache(8);
+    const replay = cache.get(dir, "conv-replay-usage", { skipNarration: false });
+
+    expect(replay).not.toBeNull();
+    const usageUpdate = replay?.updates.find((u: unknown) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update");
+    expect(usageUpdate).toEqual({
+      sessionUpdate: "usage_update",
+      used: 300,
+      size: 500000
+    });
+
+    db.close();
+  });
+});
+

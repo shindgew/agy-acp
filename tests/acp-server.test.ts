@@ -20,8 +20,8 @@ import {
   toModelSlug
 } from "../src/agent.js";
 import { configFromEnv, type AgyCliConfig, type PtyFactory, type SpawnFactory } from "../src/agy/cli.js";
-import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
-import { encodeCommandResult, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { createConversationDb, insertGenMetadata, insertStep } from "./fixtures/conversation-db.js";
+import { encodeCommandResult, encodeGenMetadata, encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import { createTerminalOutputTracker, createToolCallContentTracker, expandSessionUpdateToV2, sessionUpdateToV1, sessionUpdateToV2 } from "../src/acp/session/update-wire.js";
 import { filterUpdatesForReplayFrom } from "../src/acp/session/setup.js";
 import { turnsOf } from "../src/acp/session/turn-scheduler.js";
@@ -424,6 +424,128 @@ describe("session prompt", () => {
           }
         ]);
         expect(response.stopReason).toBe("end_turn");
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("emits live usage_update and returns end-of-turn usage metadata in v1 prompt", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpClient({ name: "test-client" })
+        .onNotification(methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const genMetaBytes = encodeGenMetadata({
+        promptTokens: 1500,
+        candidatesTokens: 350,
+        cachedTokens: 500,
+        thoughtTokens: 100,
+        contentTokens: 250,
+        contextWindowSize: 1000000
+      });
+      const connection = client.connect(createAcpApp({
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-usage-v1", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "token counted response" }) }
+        ], [genMetaBytes])
+      }));
+      try {
+        const session = await connection.agent.request(methods.agent.session.new, {
+          cwd: "/repo",
+          additionalDirectories: [],
+          mcpServers: []
+        });
+        await flushDeferredNotifications();
+        updates.length = 0;
+
+        const response = await connection.agent.request(methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "count tokens" }]
+        });
+
+        const usageUpdate = updates.find(
+          (u) => (u as { sessionUpdate?: string }).sessionUpdate === "usage_update"
+        );
+        expect(usageUpdate).toEqual({
+          sessionUpdate: "usage_update",
+          used: 1500,
+          size: 1000000
+        });
+
+        expect(response.stopReason).toBe("end_turn");
+        expect(response.usage).toEqual({
+          totalTokens: 1950,
+          inputTokens: 1500,
+          outputTokens: 350,
+          thoughtTokens: 100,
+          cachedReadTokens: 500
+        });
+      } finally {
+        connection.close();
+      }
+    });
+  });
+
+  it("emits terminal state_update carrying usage in v2 prompt", async () => {
+    await withConversationsDir(async (dir) => {
+      const updates: unknown[] = [];
+      const client = acpV2.client({ name: "test-client-v2" })
+        .onNotification(acpV2.methods.client.session.update, (ctx) => {
+          updates.push(ctx.params.update);
+        });
+      const genMetaBytes = encodeGenMetadata({
+        promptTokens: 800,
+        candidatesTokens: 200,
+        cachedTokens: 300,
+        thoughtTokens: 50,
+        contentTokens: 150,
+        contextWindowSize: 256000
+      });
+      const connection = client.connect(createAcpV2App({
+        ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
+        spawnProcess: spawnAgyWritingConversation(dir, "conv-usage-v2", [
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "v2 tokens" }) }
+        ], [genMetaBytes])
+      }));
+      try {
+        await connection.agent.request(acpV2.methods.agent.initialize, {
+          protocolVersion: acpV2.PROTOCOL_VERSION,
+          info: { name: "test-client-v2", version: "0.0.0" },
+          capabilities: {}
+        });
+        const session = await connection.agent.request(acpV2.methods.agent.session.new, {
+          cwd: "/repo"
+        });
+        await flushDeferredNotifications();
+        updates.length = 0;
+
+        await connection.agent.request(acpV2.methods.agent.session.prompt, {
+          sessionId: session.sessionId,
+          prompt: [{ type: "text", text: "v2 prompt" }]
+        });
+
+        await waitFor(() => updates.some((u) => (u as { state?: string }).state === "idle"));
+
+        const stateUpdates = updates.filter(
+          (u) => (u as { sessionUpdate?: string }).sessionUpdate === "state_update"
+        );
+        const terminalStateUpdate = stateUpdates.find(
+          (u) => (u as { state?: string }).state === "idle"
+        );
+        expect(terminalStateUpdate).toMatchObject({
+          sessionUpdate: "state_update",
+          state: "idle",
+          stopReason: "end_turn",
+          usage: {
+            totalTokens: 1050,
+            inputTokens: 800,
+            outputTokens: 200,
+            thoughtTokens: 50,
+            cachedReadTokens: 300
+          }
+        });
       } finally {
         connection.close();
       }
@@ -2935,7 +3057,8 @@ export async function withConversationsDir(fn: (dir: string) => Promise<void>): 
 export function spawnAgyWritingConversation(
   dir: string,
   conversationId: string,
-  steps: Parameters<typeof insertStep>[1][]
+  steps: Parameters<typeof insertStep>[1][],
+  genMetadata?: Uint8Array[]
 ): SpawnFactory {
   return ((command: string, args: string[]) => {
     if (args[0] === "models") {
@@ -2943,6 +3066,11 @@ export function spawnAgyWritingConversation(
     }
     const db = createConversationDb(dir, conversationId);
     for (const step of steps) insertStep(db, step);
+    if (genMetadata) {
+      for (let i = 0; i < genMetadata.length; i++) {
+        insertGenMetadata(db, i + 1, genMetadata[i]!);
+      }
+    }
     db.close();
     return new FakeProcess([]);
   }) as unknown as SpawnFactory;

@@ -6,6 +6,7 @@ import { chmodSync, existsSync, statSync } from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readLatestSessionUsage } from "./db/database.js";
 import { conversationSnapshot } from "./db/scan.js";
 import { defaultInstallBinDir, ensureAgyInstalled } from "./installer.js";
 import { StreamPoller } from "./db/streaming.js";
@@ -182,8 +183,18 @@ export interface AgyCliConfig {
   env?: NodeJS.ProcessEnv;
 }
 
+export interface PromptUsage {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+}
+
 export interface PromptOutcome {
-  stopReason: "end_turn" | "cancelled";
+  stopReason: "end_turn" | "max_tokens" | "max_turn_requests" | "refusal" | "cancelled";
+  usage?: PromptUsage;
 }
 
 export interface AgyCliConfigInput {
@@ -233,6 +244,7 @@ export class AgyCliSession {
   #extraPath: string | undefined;
   #conversationId: string | null = null;
   #lastStepIdx = -1;
+  #lastGenMetadataIdx = -1;
   #lastPromptUserStepIdxs: number[] = [];
   readonly config: AgyCliConfig;
   readonly spawnProcess: SpawnFactory;
@@ -267,10 +279,23 @@ export class AgyCliSession {
     return this.#lastPromptUserStepIdxs;
   }
 
+  /** Highest gen_metadata idx seen in this session. */
+  get lastGenMetadataIdx(): number {
+    return this.#lastGenMetadataIdx;
+  }
+
   /** Seed the conversation binding from persisted state (for session/load and session/resume). */
-  restoreConversation(conversationId: string | null, lastStepIdx: number): void {
+  restoreConversation(conversationId: string | null, lastStepIdx: number, lastGenMetadataIdx?: number): void {
     this.#conversationId = conversationId;
     this.#lastStepIdx = lastStepIdx;
+    if (lastGenMetadataIdx !== undefined && lastGenMetadataIdx >= 0) {
+      this.#lastGenMetadataIdx = lastGenMetadataIdx;
+    } else if (conversationId) {
+      const latestGen = readLatestSessionUsage(this.config.conversationsDir, conversationId);
+      this.#lastGenMetadataIdx = latestGen ? latestGen.idx : -1;
+    } else {
+      this.#lastGenMetadataIdx = -1;
+    }
   }
 
   setModel(model: string | undefined): void {
@@ -460,7 +485,7 @@ export class AgyCliSession {
       this.#pty.write(`\x1b[200~${prompt.replaceAll("\x1b", "")}\x1b[201~\r`);
     }
     const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
-      baseStepIdx: this.#lastStepIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
+      baseStepIdx: this.#lastStepIdx, baseGenMetadataIdx: this.#lastGenMetadataIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
     // Tracked separately: a toolCallId can legitimately go through the live
     // gate first (status 9 -> keys sent) and later reappear as a completed
     // edit once agy applies it, at which point it's still worth routing
@@ -692,7 +717,10 @@ export class AgyCliSession {
         // reuse its inactivity deadline for client notification/write-through.
         await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
-      return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
+      const detectedStopReason = poller.detectStopReason();
+      const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
+      const usage = poller.accumulatedTurnUsage();
+      return { stopReason, usage };
     } catch (error) {
       failed = true;
       await this.stopPty();
@@ -700,6 +728,7 @@ export class AgyCliSession {
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastGenMetadataIdx = Math.max(this.#lastGenMetadataIdx, poller.lastGenMetadataIdx);
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#cancelled && !failed) await this.stopPty();
@@ -865,6 +894,7 @@ export class AgyCliSession {
       dir: this.config.conversationsDir,
       conversationId: this.#conversationId,
       baseStepIdx: this.#lastStepIdx,
+      baseGenMetadataIdx: this.#lastGenMetadataIdx,
       skipNarration: false,
       cwd: this.config.cwd,
       snapshot
@@ -958,10 +988,14 @@ export class AgyCliSession {
         await this.reflectUnstructuredEdits(editBaseline, fsBridge, onUpdate);
       }
 
-      return { stopReason: this.#cancelled ? "cancelled" : "end_turn" };
+      const detectedStopReason = poller.detectStopReason();
+      const stopReason = this.#cancelled ? "cancelled" : detectedStopReason;
+      const usage = poller.accumulatedTurnUsage();
+      return { stopReason, usage };
     } finally {
       this.#conversationId = poller.conversationId ?? this.#conversationId;
       this.#lastStepIdx = Math.max(this.#lastStepIdx, poller.lastStepIdx);
+      this.#lastGenMetadataIdx = Math.max(this.#lastGenMetadataIdx, poller.lastGenMetadataIdx);
       this.#lastPromptUserStepIdxs = poller.userStepIdxs;
       poller.close();
       if (this.#process === child) {
