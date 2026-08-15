@@ -5053,6 +5053,54 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("preserves code span context across multi-poll streaming chunks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-codespan-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-codespan");
+      // Poll 1: step is active (status 1) and ends right after opening backtick
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is example code: `"
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-codespan")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is example code: `" }
+      });
+
+      // Poll 2: markdown image syntax arrives inside the code span
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is example code: `![plot](plot.png)` finished."
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-codespan")!.readAfter(-1));
+
+      // Must be emitted as text only, not converted to an image block
+      expect(updates2).toHaveLength(1);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "![plot](plot.png)` finished." }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("resolves image fallback extensions when extensionless imageName is inside a dotted directory", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-dotdir-"));
     try {

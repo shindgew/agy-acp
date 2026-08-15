@@ -232,19 +232,29 @@ function getCodeSpans(text: string): Array<[number, number]> {
   return spans;
 }
 
+export interface SpannedContentBlock {
+  block: ContentBlock;
+  start: number;
+  end: number;
+}
+
 /**
- * Splits agent markdown text into alternating text and image ContentBlocks
- * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
+ * Splits agent markdown text into spanned alternating text and image ContentBlocks with their
+ * character offset ranges [start, end] within the input text.
  * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
  */
-export function splitTextAndImages(text: string, cwd?: string, supersededPaths?: Set<string>): ContentBlock[] {
+export function splitTextAndImagesWithRanges(
+  text: string,
+  cwd?: string,
+  supersededPaths?: Set<string>
+): SpannedContentBlock[] {
   if (!text || !text.includes("![")) {
-    return [{ type: "text", text }];
+    return [{ block: { type: "text", text }, start: 0, end: text.length }];
   }
 
   const codeSpans = getCodeSpans(text);
   const imageRegex = /!\[(.*?)\]\((?:<([^>]+)>|([^)\s]+))\)/g;
-  const blocks: ContentBlock[] = [];
+  const spans: SpannedContentBlock[] = [];
   let lastIndex = 0;
   let match: RegExpExecArray | null;
 
@@ -284,23 +294,42 @@ export function splitTextAndImages(text: string, cwd?: string, supersededPaths?:
 
     const imgBlock = tryReadImageContentBlock(resolvedPath);
     if (imgBlock) {
-      const preceding = text.slice(lastIndex, match.index);
-      if (preceding.length > 0) {
-        blocks.push({ type: "text", text: preceding });
+      if (match.index > lastIndex) {
+        spans.push({
+          block: { type: "text", text: text.slice(lastIndex, match.index) },
+          start: lastIndex,
+          end: match.index
+        });
       }
-      blocks.push(imgBlock);
+      spans.push({
+        block: imgBlock,
+        start: match.index,
+        end: match.index + match[0].length
+      });
       lastIndex = match.index + match[0].length;
     }
   }
 
   if (lastIndex === 0) {
-    return [{ type: "text", text }];
+    return [{ block: { type: "text", text }, start: 0, end: text.length }];
   }
 
-  const trailing = text.slice(lastIndex);
-  if (trailing.length > 0) {
-    blocks.push({ type: "text", text: trailing });
+  if (lastIndex < text.length) {
+    spans.push({
+      block: { type: "text", text: text.slice(lastIndex) },
+      start: lastIndex,
+      end: text.length
+    });
   }
 
-  return blocks;
+  return spans;
+}
+
+/**
+ * Splits agent markdown text into alternating text and image ContentBlocks
+ * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
+ * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
+ */
+export function splitTextAndImages(text: string, cwd?: string, supersededPaths?: Set<string>): ContentBlock[] {
+  return splitTextAndImagesWithRanges(text, cwd, supersededPaths).map((s) => s.block);
 }

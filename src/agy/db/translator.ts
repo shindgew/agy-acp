@@ -16,7 +16,7 @@
 
 import type { ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk";
 import type { PlanEntry } from "../../acp/agent-plan/index.js";
-import { splitTextAndImages } from "../../acp/content/index.js";
+import { splitTextAndImages, splitTextAndImagesWithRanges } from "../../acp/content/index.js";
 import type { GenMetadataUsage } from "./gen-metadata.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
@@ -462,10 +462,20 @@ export class Translator {
     if (this.opts.skipNarration && isNarration(text)) return;
     const delta = text.slice(emitted, limit);
     if (delta.length > 0) {
-      const formatted = emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta;
-      const blocks = splitTextAndImages(formatted, this.opts.cwd);
-      for (const block of blocks) {
-        out.push(agentContentBlockChunk(block, messageId));
+      const fullText = text.slice(0, limit);
+      const spanned = splitTextAndImagesWithRanges(fullText, this.opts.cwd);
+      let isFirstEmitted = true;
+      for (const { block, start, end } of spanned) {
+        if (end <= emitted) continue;
+        let b = block;
+        if (start < emitted && b.type === "text") {
+          b = { type: "text", text: b.text.slice(emitted - start) };
+        }
+        if (emitted === 0 && isFirstEmitted && streamingNeedsSeparator && b.type === "text") {
+          b = { type: "text", text: `\n${b.text}` };
+        }
+        isFirstEmitted = false;
+        out.push(agentContentBlockChunk(b, messageId));
       }
     }
   }
