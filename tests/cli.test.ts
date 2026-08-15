@@ -722,6 +722,80 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("completes turn cleanly when trailing stepType 101 and gen_metadata commit after idle marker", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-trailing-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "trailing-meta");
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Final assistant answer." })
+      });
+      // Idle marker arrives
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Trailing stepType 101 and gen_metadata commit after the idle marker
+        setTimeout(() => {
+          insertStep(dbHandle, {
+            idx: 2,
+            stepType: 101,
+            status: 3,
+            stepPayload: encodeStepPayload({ lifecycle: "turn_end" })
+          });
+          insertGenMetadata(
+            dbHandle,
+            1,
+            encodeGenMetadata({
+              promptTokens: 100,
+              candidatesTokens: 50,
+              thoughtTokens: 20
+            })
+          );
+          dbHandle.close();
+        }, 10);
+      }, 20);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const result = await session.prompt("ask question", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({
+      totalTokens: 170,
+      inputTokens: 100,
+      outputTokens: 50,
+      thoughtTokens: 20
+    });
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("settles cleanly via quiescence window when terminal DB rows exist even without PTY idle marker", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-quiescence-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "quiesce-test");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Response ready." })
+      });
+      db.close();
+      // No PTY idle marker is emitted after spawn. Turn must complete via quiescence window (~300ms)
+      // rather than hanging until printTimeout (5s).
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const start = Date.now();
+    const result = await session.prompt("ask", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - start;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(2_000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("maintains turn execution while background tasks are active until completed (gh#68)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
     const pty = new FakePty(() => {

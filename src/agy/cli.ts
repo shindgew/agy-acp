@@ -44,7 +44,8 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
-const PERMISSION_REDRAW_TIMEOUT_MS = 500;
+const PERMISSION_REDRAW_TIMEOUT_MS = 2_000;
+const QUIESCENT_SETTLE_MS = 300;
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -240,6 +241,7 @@ export class AgyCliSession {
   #activeStreamPoller: StreamPoller | undefined;
   #lastPtyIdleMarkerRevision: { count: number; databaseRevision: string } | null = null;
   #ptyConfig = "";
+  #lastPtyActivityTime = 0;
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
   #cancelWait: Promise<void> = Promise.resolve();
@@ -489,9 +491,11 @@ export class AgyCliSession {
           PERMISSION_RENDER_SETTLE_MS
         );
         this.#ptyOutput = (this.#ptyOutput + data).slice(-16_384);
+        this.#lastPtyActivityTime = Date.now();
       });
       this.#ptyExit = new Promise((resolve) => this.#pty!.onExit(resolve));
     } else {
+      this.#lastPtyActivityTime = Date.now();
       this.#pty.write(`\x1b[200~${prompt.replaceAll("\x1b", "")}\x1b[201~\r`);
     }
     // Tracked separately: a toolCallId can legitimately go through the live
@@ -515,9 +519,10 @@ export class AgyCliSession {
     // A newly spawned TUI first draws its initial idle prompt, then draws
     // another when the submitted turn finishes. A reused TUI only owes the
     // latter marker.
-    const startStepIdx = this.#lastStepIdx;
-    const initialIdleMarkerCount = this.#ptyIdleMarkerCount;
-    let requiredIdleMarkerCount = this.#ptyIdleMarkerCount + (freshPty ? 2 : 1);
+    let requiredIdleMarkerCount = freshPty
+      ? 2
+      : this.#ptyIdleMarkerCount + 1;
+    let lastActivityTime = Date.now();
     let failed = false;
     try {
       while (true) {
@@ -527,14 +532,14 @@ export class AgyCliSession {
           seenRevision = poller.revision;
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
           deadline = Date.now() + timeoutMs;
+          lastActivityTime = Date.now();
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
+        if (updates.length > 0) {
+          lastActivityTime = Date.now();
+        }
         if (Date.now() >= deadline) {
-          // Enough idle markers: the TUI is idle; keep the PTY for reuse.
-          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
-          // Soft timeout: DB looks terminal but the required completion marker
-          // never arrived (e.g. intermediate terminal tool + long silence).
-          // Stop the PTY so the next client prompt cannot join a live turn.
-          if (poller.turnCompleteCandidate) {
+          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount && poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx) break;
+          if (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx) {
             await this.stopPty();
             break;
           }
@@ -712,30 +717,12 @@ export class AgyCliSession {
             }
           }
         }
-        const idleMarkerRevision = this.currentIdleMarkerRevision();
-        const markersSinceTurnStart = idleMarkerRevision === null
-          ? 0
-          : idleMarkerRevision.count - initialIdleMarkerCount;
-        // A single post-start marker on a fresh PTY may be a delayed startup
-        // redraw that captured an intermediate terminal tool revision. Only
-        // accept that shortcut when the latest step is a conclusive ending
-        // (agent text or cancelled/failed), or when a later marker proves the
-        // post-turn idle redraw (markersSinceTurnStart >= 2).
-        const revisionShortcutSafe =
-          !freshPty ||
-          markersSinceTurnStart >= 2 ||
-          poller.isConclusiveTurnEnd;
-        const hasRevisionMatchedIdleMarker =
-          idleMarkerRevision !== null &&
-          markersSinceTurnStart >= 1 &&
-          revisionShortcutSafe &&
-          idleMarkerRevision.databaseRevision === poller.observedDatabaseRevision;
+        const hasMatchedMarker = this.#ptyIdleMarkerCount >= requiredIdleMarkerCount;
+        const hasQuiesced = (Date.now() - Math.max(lastActivityTime, this.#lastPtyActivityTime)) >= QUIESCENT_SETTLE_MS;
         const isIdleCandidate =
-          (poller.turnCompleteCandidate &&
-           poller.lastUserStepIdx > startStepIdx &&
-           poller.lastStepIdx > poller.lastUserStepIdx &&
-           hasRevisionMatchedIdleMarker) ||
-          (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount);
+          poller.turnCompleteCandidate &&
+          poller.lastStepIdx > this.#lastStepIdx &&
+          (hasMatchedMarker || (candidateRevision === poller.revision && hasQuiesced));
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
@@ -1184,10 +1171,17 @@ export class AgyCliSession {
   }
 
   private flushPermissionRender(): void {
+    const raw = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+    const clean = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g, "");
     const marker = "Yes, and always allow";
-    const output = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-    const visible = output.includes(marker);
-    this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
+    const visible =
+      raw.includes(marker) ||
+      clean.includes(marker) ||
+      clean.includes("Always allow") ||
+      clean.includes("Allow once") ||
+      clean.includes("Allow this time") ||
+      clean.includes("Allow this command");
+    this.#ptyPermissionMarkerTail = markerPrefixTail(raw, marker);
     if (visible) {
       this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
@@ -1236,7 +1230,11 @@ export class AgyCliSession {
     ) {
       await sleep(5);
     }
-    return this.#ptyPermissionPanelVisible && this.#ptyPermissionRenderTimer === undefined;
+    if (this.#ptyPermissionRenderTimer !== undefined) {
+      clearTimeout(this.#ptyPermissionRenderTimer);
+      this.flushPermissionRender();
+    }
+    return this.#ptyPermissionPanelVisible;
   }
 
   private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
