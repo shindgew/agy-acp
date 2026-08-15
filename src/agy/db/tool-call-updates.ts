@@ -923,7 +923,7 @@ function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
         const nextDir = resolvePath(positionalArgs[0], currentCwd);
         if (nextDir) currentCwd = nextDir;
       }
-    } else if (bin === "cp") {
+    } else if (bin === "cp" || bin === "install" || bin === "rsync" || bin === "ln" || bin === "link" || bin === "scp") {
       if (targetDir) {
         const dirResolved = resolvePath(targetDir, currentCwd);
         if (dirResolved) targets.push(dirResolved);
@@ -968,7 +968,7 @@ function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
           if (r) targets.push(r);
         }
       }
-    } else if (bin === "rm" || bin === "touch" || bin === "tee") {
+    } else if (bin === "rm" || bin === "touch" || bin === "tee" || bin === "truncate" || bin === "unlink") {
       for (const arg of positionalArgs) {
         const r = resolvePath(arg, currentCwd);
         if (r) targets.push(r);
