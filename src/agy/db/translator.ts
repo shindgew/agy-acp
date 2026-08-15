@@ -134,6 +134,7 @@ export class Translator {
   private pendingAgentMessageId: string | null = null;
   private pendingAgentStartStepIdx: number | null = null;
   private pendingAgentEndStepIdx: number | null = null;
+  private pendingAgentSupersededPaths: Set<string> | undefined;
 
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
@@ -250,7 +251,7 @@ export class Translator {
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
+        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow, supersededPaths);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -397,7 +398,8 @@ export class Translator {
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
     streamingNeedsSeparator: boolean,
-    canGrow: boolean
+    canGrow: boolean,
+    supersededPaths?: Set<string>
   ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
@@ -415,6 +417,7 @@ export class Translator {
         if (this.pendingAgentMessageId === null) {
           this.pendingAgentMessageId = messageId;
           this.pendingAgentStartStepIdx = row.idx;
+          this.pendingAgentSupersededPaths = supersededPaths;
         }
         this.pendingAgentEndStepIdx = row.idx;
         this.pendingAgentParts.push(text);
@@ -475,12 +478,14 @@ export class Translator {
     const messageId = this.pendingAgentMessageId ?? "agent";
     const startStepIdx = this.pendingAgentStartStepIdx;
     const endStepIdx = this.pendingAgentEndStepIdx;
+    const superseded = this.pendingAgentSupersededPaths;
     this.pendingAgentParts.length = 0;
     this.pendingAgentMessageId = null;
     this.pendingAgentStartStepIdx = null;
     this.pendingAgentEndStepIdx = null;
+    this.pendingAgentSupersededPaths = undefined;
     if (text && text.length > 0) {
-      const blocks = splitTextAndImages(text, this.opts.cwd);
+      const blocks = splitTextAndImages(text, this.opts.cwd, superseded);
       for (const block of blocks) {
         const chunk = agentContentBlockChunk(block, messageId);
         if (startStepIdx != null) {

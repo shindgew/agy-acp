@@ -237,7 +237,7 @@ function getCodeSpans(text: string): Array<[number, number]> {
  * when local markdown image embeds (![caption](/path/to/img)) reference readable images on disk.
  * Excludes escaped openers (\!) and markdown code contexts (inline spans, fenced blocks).
  */
-export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
+export function splitTextAndImages(text: string, cwd?: string, supersededPaths?: Set<string>): ContentBlock[] {
   if (!text || !text.includes("![")) {
     return [{ type: "text", text }];
   }
@@ -279,6 +279,9 @@ export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
       : unescaped;
 
     if (!resolvedPath) continue;
+    // Do not reconstruct historical markdown images from disk if a later step modified that path
+    if (supersededPaths?.has(resolvedPath)) continue;
+
     const imgBlock = tryReadImageContentBlock(resolvedPath);
     if (imgBlock) {
       const preceding = text.slice(lastIndex, match.index);

@@ -4926,6 +4926,58 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("does not reconstruct historical markdown images in agent messages when superseded by later tools on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-agent-img-superseded-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-agent-img-superseded");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is the mockup:\n![mockup](mockup.png)\nEnd of mockup."
+        })
+      });
+      // Step 2 overwrites mockup.png via cp
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-agent-img-superseded")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Agent message in step 1 must remain plain text instead of attaching the superseded replacement image
+      expect(update1.sessionUpdate).toBe("agent_message_chunk");
+      expect(update1.content).toEqual({
+        type: "text",
+        text: "Here is the mockup:\n![mockup](mockup.png)\nEnd of mockup."
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("retries image reads on subsequent streaming polls after a transient miss", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
     try {
