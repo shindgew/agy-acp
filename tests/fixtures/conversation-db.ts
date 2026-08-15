@@ -9,9 +9,21 @@ export function createConversationDb(dir: string, id: string): Database.Database
   const db = new Database(path.join(dir, `${id}.db`));
   db.exec(
     "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, " +
-      "step_payload BLOB, error_details BLOB, permissions BLOB, task_details BLOB)"
+      "step_payload BLOB, error_details BLOB, permissions BLOB, task_details BLOB);\n" +
+    "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);"
   );
   return db;
+}
+
+export function insertGenMetadata(
+  db: Database.Database,
+  idx: number,
+  data: Uint8Array
+): void {
+  db.prepare("INSERT INTO gen_metadata (idx, data) VALUES (?, ?)").run(
+    idx,
+    Buffer.from(data)
+  );
 }
 
 export function insertStep(

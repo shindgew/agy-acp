@@ -4,6 +4,7 @@
 
 import type { SessionUpdate } from "@agentclientprotocol/sdk";
 import { ConversationDb } from "./database.js";
+import type { GenMetadataUsage } from "./gen-metadata.js";
 import { newConversationId } from "./scan.js";
 import { isSystemMessage } from "./system-message.js";
 import { toolCallId } from "./tool-call-updates.js";
@@ -31,10 +32,94 @@ export interface StreamOptions {
   conversationId: string | null;
   /** Highest idx already delivered to the client before this turn. */
   baseStepIdx: number;
+  /** Highest gen_metadata idx seen before this turn. */
+  baseGenMetadataIdx?: number;
   skipNarration: boolean;
   cwd?: string;
   /** Snapshot of conversation ids before the prompt, for binding a new DB. */
   snapshot: Set<string> | null;
+}
+
+function isContentSafetyRefusal(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (
+          c?.finishReason === "SAFETY" ||
+          c?.finishReason === "BLOCKLIST" ||
+          c?.finishReason === "PROHIBITED_CONTENT" ||
+          c?.finishReason === "RECITATION"
+        ) {
+          return true;
+        }
+      }
+      const promptFeedback = parsed?.promptFeedback;
+      if (
+        promptFeedback?.blockReason === "SAFETY" ||
+        promptFeedback?.blockReason === "BLOCKLIST" ||
+        promptFeedback?.blockReason === "PROHIBITED_CONTENT"
+      ) {
+        return true;
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("safety policy") ||
+    text.includes("content filter") ||
+    text.includes("content safety") ||
+    text.includes("harm category") ||
+    text.includes("safety filter") ||
+    text.includes("safety setting") ||
+    text.includes("blocked by safety") ||
+    text.includes("model refusal") ||
+    text.includes("refusal:") ||
+    text.includes("prohibited content") ||
+    text.includes("harassment") ||
+    text.includes("hate speech") ||
+    text.includes("sexually explicit") ||
+    text.includes("dangerous content")
+  );
+}
+
+function isTokenLimitExhaustion(pe: {
+  summary: string;
+  userMessage: string;
+  diagnostic: string;
+  responseJson?: string;
+}): boolean {
+  if (pe.responseJson) {
+    try {
+      const parsed = JSON.parse(pe.responseJson);
+      const candidates = parsed?.candidates ?? [];
+      for (const c of candidates) {
+        if (c?.finishReason === "MAX_TOKENS" || c?.finishReason === "LENGTH") {
+          return true;
+        }
+      }
+    } catch {
+      // Fall through to text pattern checks below
+    }
+  }
+  const text = (pe.summary + " " + pe.userMessage + " " + pe.diagnostic).toLowerCase();
+  return (
+    text.includes("context length") ||
+    text.includes("maximum context") ||
+    text.includes("max_tokens") ||
+    text.includes("max output tokens") ||
+    text.includes("output token limit") ||
+    text.includes("token limit exceeded") ||
+    text.includes("maximum token limit")
+  );
 }
 
 export class StreamPoller {
@@ -58,9 +143,14 @@ export class StreamPoller {
   /** Launched background task id -> idx of the first row that carried it. */
   private readonly _launchedTaskIdxs = new Map<string, number>();
   private readonly _completedTaskIds = new Set<string>();
+  private _latestGenMetadata: GenMetadataUsage | null = null;
+  private _lastGenMetadataIdx = -1;
+  private readonly _promptGenMetadataRows: GenMetadataUsage[] = [];
+  private _lastObservedRows: StepRow[] = [];
 
   constructor(private readonly opts: StreamOptions) {
     this.boundId = opts.conversationId;
+    this._lastGenMetadataIdx = opts.baseGenMetadataIdx ?? -1;
     this.translator = new Translator({
       mode: "stream",
       skipNarration: opts.skipNarration,
@@ -70,6 +160,71 @@ export class StreamPoller {
 
   get conversationId(): string | null {
     return this.boundId;
+  }
+
+  get latestGenMetadata(): GenMetadataUsage | null {
+    return this._latestGenMetadata;
+  }
+
+  get lastGenMetadataIdx(): number {
+    return Math.max(this._lastGenMetadataIdx, this.opts.baseGenMetadataIdx ?? -1);
+  }
+
+  /**
+   * Accumulate all generation metadata rows produced during this prompt turn
+   * for terminal token usage reporting.
+   */
+  accumulatedTurnUsage(): {
+    totalTokens: number;
+    inputTokens: number;
+    outputTokens: number;
+    thoughtTokens?: number | null;
+    cachedReadTokens?: number | null;
+  } | undefined {
+    if (this._promptGenMetadataRows.length === 0) return undefined;
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let thoughtTokens = 0;
+    let cachedReadTokens = 0;
+    for (const g of this._promptGenMetadataRows) {
+      inputTokens += g.totalInputTokens;
+      outputTokens += g.candidatesTokens;
+      thoughtTokens += g.thoughtTokens;
+      cachedReadTokens += g.cachedTokens;
+    }
+    return {
+      totalTokens: inputTokens + outputTokens + thoughtTokens,
+      inputTokens,
+      outputTokens,
+      thoughtTokens: thoughtTokens > 0 ? thoughtTokens : undefined,
+      cachedReadTokens: cachedReadTokens > 0 ? cachedReadTokens : undefined
+    };
+  }
+
+  /**
+   * Evaluates the non-cancellation stop reason for the turn based on observed
+   * model errors, output ceilings, and token limits.
+   */
+  detectStopReason(): "end_turn" | "max_tokens" | "refusal" {
+    // 1. Check if the terminal generation reached its configured output ceiling (including reasoning tokens)
+    const terminalGen = this._promptGenMetadataRows.at(-1);
+    const generatedTokens = (terminalGen?.candidatesTokens ?? 0) + (terminalGen?.thoughtTokens ?? 0);
+    if (terminalGen?.maxOutputTokens && terminalGen.maxOutputTokens > 0 && generatedTokens >= terminalGen.maxOutputTokens) {
+      return "max_tokens";
+    }
+
+    // 2. Check if the terminal model generation encountered a provider limit / content filter error
+    const terminalStep = findLastMeaningfulStep(this._lastObservedRows) ?? this._lastObservedRows.at(-1);
+    const pe = terminalStep?.stepPayload.modelProviderError;
+    if (pe) {
+      if (isContentSafetyRefusal(pe)) {
+        return "refusal";
+      }
+      if (isTokenLimitExhaustion(pe)) {
+        return "max_tokens";
+      }
+    }
+    return "end_turn";
   }
 
   get lastStepIdx(): number {
@@ -239,6 +394,15 @@ export class StreamPoller {
       latestMeaningful !== undefined &&
       !this._busy &&
       isTerminalStepStatus(latestMeaningful.status);
+    this._lastObservedRows = rows;
+
+    const genRows = this.db.readGenMetadataAfter(this._lastGenMetadataIdx);
+    if (genRows.length > 0) {
+      this._lastGenMetadataIdx = Math.max(this._lastGenMetadataIdx, ...genRows.map((g) => g.idx));
+      this._latestGenMetadata = genRows.at(-1) ?? this._latestGenMetadata;
+      this._promptGenMetadataRows.push(...genRows);
+    }
+    const usageUpdates = this.translator.translateUsage(genRows);
     // readAfter(baseStepIdx) is a complete prompt-scoped snapshot on every DB
     // change. Rebuild derived file history from those rows so completed writes
     // from a prior poll cannot become the oldText of an earlier historical row.
@@ -269,7 +433,7 @@ export class StreamPoller {
         this._pending.push(interaction);
       }
     }
-    return updates;
+    return [...usageUpdates, ...updates];
   }
 
   close(): void {
@@ -314,6 +478,7 @@ function findLastMeaningfulStep(rows: StepRow[]): StepRow | undefined {
  */
 function isEmptyAgentTextStep(row: StepRow): boolean {
   if (row.stepType !== 15) return false;
+  if (row.stepPayload.modelProviderError) return false;
   const text = row.stepPayload.agentText?.text ?? "";
   // System message envelopes carry real (internal) content — they are not the
   // empty placeholders agy inserts while initializing response generation.

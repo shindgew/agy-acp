@@ -17,6 +17,7 @@
 import type { ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk";
 import type { PlanEntry } from "../../acp/agent-plan/index.js";
 import { splitTextAndImages } from "../../acp/content/index.js";
+import type { GenMetadataUsage } from "./gen-metadata.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
 import { getCompletedStepTargetPaths, type FileContentCache, type ImageArtifactCache } from "./tool-call-updates.js";
@@ -96,6 +97,19 @@ function asToolCallUpdate(update: SessionUpdate): SessionUpdate {
   } as SessionUpdate;
 }
 
+function resolveContextWindowSize(usage: GenMetadataUsage): number | undefined {
+  if (usage.contextWindowSize && usage.contextWindowSize > 0) {
+    return usage.contextWindowSize;
+  }
+  if (usage.modelSlug) {
+    const slug = usage.modelSlug.toLowerCase();
+    if (slug.includes("gemini")) return 1048576;
+    if (slug.includes("claude")) return 200000;
+    if (slug.includes("gpt-4") || slug.includes("o1") || slug.includes("o3") || slug.includes("o4")) return 128000;
+  }
+  return undefined;
+}
+
 export class Translator {
   // Streaming: idx -> chars of agent text already emitted (for incremental diff).
   private readonly agentTextLengths = new Map<number, number>();
@@ -124,6 +138,7 @@ export class Translator {
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
   private _hadUpdates = false;
+  private lastEmittedUsageUsed: number | null = null;
 
   constructor(private readonly opts: TranslatorOptions) {}
 
@@ -199,6 +214,27 @@ export class Translator {
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
     if (out.length > 0) this._hadUpdates = true;
+    return out;
+  }
+
+  /** Translate new generation usage metrics into an ACP usage_update notification. */
+  translateUsage(usages: GenMetadataUsage[]): SessionUpdate[] {
+    const out: SessionUpdate[] = [];
+    for (const usage of usages) {
+      if (usage.totalInputTokens <= 0 && usage.totalTokens <= 0) continue;
+      const size = resolveContextWindowSize(usage);
+      if (size === undefined) continue;
+      const used = usage.totalInputTokens;
+      if (this.lastEmittedUsageUsed !== used) {
+        this.lastEmittedUsageUsed = used;
+        this._hadUpdates = true;
+        out.push({
+          sessionUpdate: "usage_update",
+          used,
+          size
+        });
+      }
+    }
     return out;
   }
 
