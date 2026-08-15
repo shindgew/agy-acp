@@ -4978,6 +4978,66 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("unwraps sudo and env command launchers when detecting write targets on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-launcher-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-launcher");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 wraps cp under sudo and env
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "sudo -u root env MODE=x cp replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-launcher")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because sudo/env wrapped command in step 2 overwrote mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("retries image reads on subsequent streaming polls after a transient miss", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
     try {

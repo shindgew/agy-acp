@@ -869,6 +869,53 @@ function getImageCandidatePaths(imageName: string): string[] {
   return candidates;
 }
 
+function unwrapLauncherTokens(tokens: string[]): string[] {
+  let idx = 0;
+  while (idx < tokens.length) {
+    const bin = path.basename(tokens[idx]);
+    if (bin === "env") {
+      idx++;
+      while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok === "-u" || tok === "--unset" || tok === "-C" || tok === "--chdir") {
+          idx += 2;
+        } else if (tok.startsWith("-")) {
+          idx++;
+        } else if (tok.includes("=")) {
+          idx++;
+        } else {
+          break;
+        }
+      }
+    } else if (
+      bin === "sudo" ||
+      bin === "doas" ||
+      bin === "nohup" ||
+      bin === "setsid" ||
+      bin === "time" ||
+      bin === "nice" ||
+      bin === "ionice" ||
+      bin === "exec" ||
+      bin === "chroot"
+    ) {
+      idx++;
+      while (idx < tokens.length) {
+        const tok = tokens[idx];
+        if (tok === "-u" || tok === "-g" || tok === "-n" || tok === "-C" || tok === "-a") {
+          idx += 2;
+        } else if (tok.startsWith("-")) {
+          idx++;
+        } else {
+          break;
+        }
+      }
+    } else {
+      break;
+    }
+  }
+  return tokens.slice(idx);
+}
+
 /**
  * Extract target file paths mutated by a run_command execution.
  * Distinguishes output/destination operands from read-only sources (e.g. `cp src dest`, `cat file`),
@@ -909,7 +956,9 @@ function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
 
     const tokens = trimmedSub.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
     if (tokens.length === 0) continue;
-    const cleanTokens = tokens.map((t) => t.replace(/^['"]|['"]$/g, "").trim()).filter(Boolean);
+    const rawTokens = tokens.map((t) => t.replace(/^['"]|['"]$/g, "").trim()).filter(Boolean);
+    if (rawTokens.length === 0) continue;
+    const cleanTokens = unwrapLauncherTokens(rawTokens);
     if (cleanTokens.length === 0) continue;
 
     const bin = path.basename(cleanTokens[0]);
