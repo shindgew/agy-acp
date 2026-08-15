@@ -229,13 +229,22 @@ export function splitTextAndImages(text: string, cwd?: string): ContentBlock[] {
 
   while ((match = imageRegex.exec(text)) !== null) {
     const rawPath = (match[2] ?? match[3])!;
-    const resolvedPath = rawPath.startsWith("file://")
-      ? filePathFromUri(rawPath)
-      : path.isAbsolute(rawPath)
-      ? rawPath
+    let unescaped = rawPath;
+    if (!rawPath.startsWith("file://") && rawPath.includes("%")) {
+      try {
+        unescaped = decodeURIComponent(rawPath);
+      } catch {
+        continue;
+      }
+    }
+
+    const resolvedPath = unescaped.startsWith("file://")
+      ? filePathFromUri(unescaped)
+      : path.isAbsolute(unescaped)
+      ? unescaped
       : cwd
-      ? path.resolve(cwd, rawPath)
-      : rawPath;
+      ? path.resolve(cwd, unescaped)
+      : unescaped;
 
     if (!resolvedPath) continue;
     const imgBlock = tryReadImageContentBlock(resolvedPath);

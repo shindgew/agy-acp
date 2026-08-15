@@ -282,8 +282,35 @@ describe("outbound image ContentBlocks", () => {
     }
   });
 
+  it("splits text containing URL-escaped relative markdown image destinations", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const artDir = path.join(tmpDir, "artifacts");
+      await mkdir(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "my plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](artifacts/my%20plot.png)\nDone.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nDone." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("safely handles malformed file URIs without throwing and leaves markdown as text", () => {
     const text = "Broken file URL:\n![invalid](file:///tmp/bad%ZZ.png)\nContinuing...";
+    expect(() => splitTextAndImages(text)).not.toThrow();
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
+  });
+
+  it("safely handles malformed URL-escaped destinations without throwing and leaves markdown as text", () => {
+    const text = "Broken escape destination:\n![invalid](artifacts/bad%ZZplot.png)\nContinuing...";
     expect(() => splitTextAndImages(text)).not.toThrow();
     const blocks = splitTextAndImages(text);
     expect(blocks).toEqual([{ type: "text", text }]);
