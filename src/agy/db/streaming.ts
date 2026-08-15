@@ -411,15 +411,14 @@ export class StreamPoller {
     ]));
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
-    const latest = rows.at(-1);
     const latestMeaningful = findLastMeaningfulStep(rows);
-    const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
-    this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
+    const isEmptyAgentText = latestMeaningful !== undefined && isEmptyAgentTextStep(latestMeaningful);
+    this._busy = latestMeaningful === undefined || !isTerminalStepStatus(latestMeaningful.status) || isEmptyAgentText;
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest meaningful step is terminal" (3/6/7) while no
-    // subsequent step is currently busy, rather than naively checking rows.at(-1).
+    // step is currently busy, rather than naively checking rows.at(-1).
     // This excludes early lifecycle rows (90, 98, 101), system message notices,
     // and empty stepType 15 placeholders that agy inserts while preparing generation.
     this._latestStepTerminal =
