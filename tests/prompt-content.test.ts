@@ -1,8 +1,13 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { contentBlocksToPrompt, contentBlocksToText } from "../src/acp/content/index.js";
+import {
+  contentBlocksToPrompt,
+  contentBlocksToText,
+  splitTextAndImages,
+  tryReadImageContentBlock
+} from "../src/acp/content/index.js";
 
 const PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -91,6 +96,21 @@ describe("contentBlocksToPrompt", () => {
     }
   });
 
+  it("does not synthesize an agy attachment path for malformed file URIs in resource_link", async () => {
+    const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
+    try {
+      const prompt = await contentBlocksToPrompt([
+        { type: "text", text: "inspect" },
+        { type: "resource_link", uri: "file:///tmp/bad%ZZ.png", name: "bad.png", mimeType: "image/png" }
+      ], cwd);
+
+      expect(prompt).toBe("inspect\nfile:///tmp/bad%ZZ.png");
+      assertNoInjectedProse(prompt);
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it("forwards embedded resource text body without URI labels", async () => {
     const cwd = await mkdtemp(path.join(os.tmpdir(), "agy-acp-prompt-"));
     try {
@@ -155,5 +175,172 @@ describe("contentBlocksToText", () => {
     ]);
     expect(text).toBe("file:///x.ts\nexport {}");
     assertNoInjectedProse(text);
+  });
+});
+
+describe("outbound image ContentBlocks", () => {
+  it("reads local image file and returns base64 image block", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "test.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const block = tryReadImageContentBlock(imgPath);
+      expect(block).toEqual({
+        type: "image",
+        data: PNG_PIXEL,
+        mimeType: "image/png"
+      });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null for non-existent image or non-image files", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      expect(tryReadImageContentBlock(path.join(tmpDir, "missing.png"))).toBeNull();
+      const txtPath = path.join(tmpDir, "not-image.txt");
+      await writeFile(txtPath, "hello");
+      expect(tryReadImageContentBlock(txtPath)).toBeNull();
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing markdown images into text and image ContentBlocks", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "chart.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = `Here is the chart:\n![chart](${imgPath})\nLooks good!`;
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Here is the chart:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nLooks good!" });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing bare project-relative markdown image paths", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](plot.png)\nEnd of message.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nEnd of message." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing angle-bracket markdown image destinations with spaces", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const artDir = path.join(tmpDir, "artifacts");
+      await mkdir(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "my plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](<artifacts/my plot.png>)\nDone.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nDone." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing angle-bracket markdown image destinations without spaces", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Artifact:\n![plot](<plot.png>)\nFinished.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nFinished." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("splits text containing URL-escaped relative markdown image destinations", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-img-"));
+    try {
+      const artDir = path.join(tmpDir, "artifacts");
+      await mkdir(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "my plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const text = "Generated artifact:\n![plot](artifacts/my%20plot.png)\nDone.";
+      const blocks = splitTextAndImages(text, tmpDir);
+
+      expect(blocks).toHaveLength(3);
+      expect(blocks[0]).toEqual({ type: "text", text: "Generated artifact:\n" });
+      expect(blocks[1]).toEqual({ type: "image", data: PNG_PIXEL, mimeType: "image/png" });
+      expect(blocks[2]).toEqual({ type: "text", text: "\nDone." });
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("safely handles malformed file URIs without throwing and leaves markdown as text", () => {
+    const text = "Broken file URL:\n![invalid](file:///tmp/bad%ZZ.png)\nContinuing...";
+    expect(() => splitTextAndImages(text)).not.toThrow();
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
+  });
+
+  it("safely handles malformed URL-escaped destinations without throwing and leaves markdown as text", () => {
+    const text = "Broken escape destination:\n![invalid](artifacts/bad%ZZplot.png)\nContinuing...";
+    expect(() => splitTextAndImages(text)).not.toThrow();
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
+  });
+
+  it("ignores image-like syntax inside escaped markdown, inline code, and fenced code blocks", async () => {
+    const tmpDir = await mkdtemp(path.join(os.tmpdir(), "agy-acp-code-img-"));
+    try {
+      const imgPath = path.join(tmpDir, "plot.png");
+      await writeFile(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      // 1. Escaped opener
+      const escapedText = "Escaped image embed: \\![plot](plot.png) should not render.";
+      expect(splitTextAndImages(escapedText, tmpDir)).toEqual([{ type: "text", text: escapedText }]);
+
+      // 2. Inline code span
+      const inlineCodeText = "Here is the code: `![plot](plot.png)` in inline span.";
+      expect(splitTextAndImages(inlineCodeText, tmpDir)).toEqual([{ type: "text", text: inlineCodeText }]);
+
+      // 3. Fenced code block
+      const fencedCodeText = "Example code:\n```markdown\n![plot](plot.png)\n```\nEnd of example.";
+      expect(splitTextAndImages(fencedCodeText, tmpDir)).toEqual([{ type: "text", text: fencedCodeText }]);
+    } finally {
+      await rm(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves plain text when markdown images do not exist on disk", () => {
+    const text = "Here is an external image:\n![remote](https://example.com/img.png)\nDone.";
+    const blocks = splitTextAndImages(text);
+    expect(blocks).toEqual([{ type: "text", text }]);
   });
 });

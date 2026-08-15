@@ -4007,6 +4007,1497 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
   });
 });
 
+describe("agent outbound image ContentBlocks", () => {
+  const PNG_PIXEL = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+
+  it("translates generate_image tool calls with input prompt and embedded image block when artifact exists", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "A futuristic login interface",
+                ImageName: "mockup.png",
+                AspectRatio: "16:9"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.name).toBe("generate_image");
+      expect(update.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: A futuristic login interface (16:9)"
+          }
+        },
+        {
+          type: "content",
+          content: {
+            type: "image",
+            data: PNG_PIXEL,
+            mimeType: "image/png"
+          }
+        }
+      ]);
+      expect(update.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not attach pre-existing images when generate_image step is not completed (status 1, 7, 9)", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-pending-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-pending");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 1, // running / in-progress
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-pending-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "A futuristic login interface",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-pending")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.name).toBe("generate_image");
+      // Only text prompt should be present, not the pre-existing image
+      expect(update.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: A futuristic login interface"
+          }
+        }
+      ]);
+      expect(update.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("attaches newly generated output ImageName and does not fall back to input reference ImagePaths", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-prio-"));
+    try {
+      const refImgPath = path.join(testDir, "reference.png");
+      const outImgPath = path.join(testDir, "output.png");
+      fs.writeFileSync(refImgPath, Buffer.from(PNG_PIXEL, "base64"));
+      fs.writeFileSync(outImgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-prio");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-prio-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Edit this reference image",
+                ImageName: "output.png",
+                ImagePaths: ["reference.png"]
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-prio")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.locations).toEqual([{ path: outImgPath }]);
+      expect(update.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+
+      // When output ImageName is unreadable/missing, reference image must NOT be attached
+      const db2 = createConversationDb(testDir, "conv-gen-img-no-out");
+      insertStep(db2, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-no-out-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Failed generation with reference image",
+                ImageName: "missing-output.png",
+                ImagePaths: ["reference.png"]
+              })
+            })
+          })
+        })
+      });
+
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-no-out")!.readAfter(-1));
+      expect(updates2).toHaveLength(1);
+      const update2 = updates2[0] as any;
+      expect(update2.locations).toBeUndefined();
+      expect(update2.content).toHaveLength(1);
+      expect(update2.content[0]).toEqual({
+        type: "content",
+        content: {
+          type: "text",
+          text: "Prompt: Failed generation with reference image"
+        }
+      });
+
+      db.close();
+      db2.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("freezes completed image artifact and retains it when a later step overwrites the file on disk", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-freeze-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      const firstImageBytes = Buffer.from(PNG_PIXEL, "base64");
+      fs.writeFileSync(imgPath, firstImageBytes);
+
+      const db = createConversationDb(testDir, "conv-gen-img-freeze");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "First version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: captures first image
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-freeze")!.readAfter(-1));
+      expect(updates1).toHaveLength(1);
+      const update1 = updates1[0] as any;
+      expect(update1.content[1].content.data).toBe(PNG_PIXEL);
+
+      // A later step overwrites mockup.png with different bytes
+      const modifiedPng = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+        "base64"
+      );
+      fs.writeFileSync(imgPath, modifiedPng);
+
+      // A new row is appended (simulating full prompt-scoped replay in StreamPoller)
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "I updated the design."
+        })
+      });
+
+      // Poll 2: Translator reads all rows from the beginning; call 1 must keep its frozen first image
+      const allRows = ConversationDb.open(testDir, "conv-gen-img-freeze")!.readAfter(-1);
+      // Tool 1 snapshot is unchanged, so only row 2 produces a new update
+      const updates2 = translator.translate(allRows);
+      expect(updates2).toHaveLength(1);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "I updated the design." }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reconstruct historical outputs from overwritten files on replay when imageName is reused", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-replay-superseded-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      const secondImageBytes = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+        "base64"
+      );
+      // Disk currently holds second image bytes (written by call 2)
+      fs.writeFileSync(imgPath, secondImageBytes);
+
+      const db = createConversationDb(testDir, "conv-gen-img-replay-superseded");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "First version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-2",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Second version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      // Replay from scratch: call 1 was superseded by call 2, so it must not read the overwritten file
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-replay-superseded")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+      const update2 = updates[1] as any;
+
+      // Call 1 has prompt text but no image block or location
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: First version of mockup"
+          }
+        }
+      ]);
+      expect(update1.locations).toBeUndefined();
+
+      // Call 2 is the latest step that targeted mockup.png, so it gets the image
+      expect(update2.sessionUpdate).toBe("tool_call");
+      expect(update2.toolCallId).toBe("gen-img-call-2");
+      expect(update2.content).toHaveLength(2);
+      expect(update2.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkWPjfDwAEfQG3X5T30QAAAABJRU5ErkJggg==",
+          mimeType: "image/png"
+        }
+      });
+      expect(update2.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not classify read-only steps as superseding prior image generation outputs on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-readonly-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-readonly");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 is a completed view_file on the same path
+      insertStep(db, {
+        idx: 2,
+        stepType: 8,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "view-file-call-2",
+              namePrimary: "view_file",
+              rawInputJson: JSON.stringify({
+                FilePath: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-readonly")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be marked superseded by the read-only view_file step
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(2);
+      expect(update1.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+      expect(update1.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks prior image generation outputs as superseded on replay when a later run_command targets that path", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cmd-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cmd");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 is a completed run_command overwriting mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cmd")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed from the overwritten file on replay
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.content[0]).toEqual({
+        type: "content",
+        content: {
+          type: "text",
+          text: "Prompt: Version 1 of mockup"
+        }
+      });
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not mark image as superseded when later command only reads from it (e.g. cp source dest)", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cp-read-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cp-read");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 copies mockup.png to backup.png (mockup.png is read, not overwritten)
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp mockup.png backup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cp-read")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must remain attached since mockup.png was not overwritten
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(2);
+      expect(update1.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+      expect(update1.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks image as superseded when later command redirects output to it", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-redir-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-redir");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 redirects output to mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "echo 'overwritten' > mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-redir")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("tracks working directory changes across command segments when resolving superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cd-"));
+    try {
+      const outDir = path.join(testDir, "out");
+      fs.mkdirSync(outDir, { recursive: true });
+      const imgPath = path.join(outDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cd");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup in out",
+                ImageName: "out/mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 changes directory into out and overwrites mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cd out && cp ../replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cd")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because cd out && cp ... mockup.png targeted out/mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves directory-form copy destination paths when determining superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cpdir-"));
+    try {
+      const outDir = path.join(testDir, "out");
+      fs.mkdirSync(outDir, { recursive: true });
+      const imgPath = path.join(outDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cpdir");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup in out",
+                ImageName: "out/mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 uses directory form cp replacements/mockup.png out/
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacements/mockup.png out/"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cpdir")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because cp ... out/ overwrote out/mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves target-directory -t copy destination paths when determining superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cptarget-"));
+    try {
+      const outDir = path.join(testDir, "out");
+      fs.mkdirSync(outDir, { recursive: true });
+      const imgPath = path.join(outDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cptarget");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup in out",
+                ImageName: "out/mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 uses -t target-directory form cp -t out replacements/mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp -t out replacements/mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cptarget")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because cp -t out ... overwrote out/mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("accounts for mutations from failed or cancelled terminal steps when precomputing superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-failed-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-failed");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 failed (status 7), but modified mockup.png during execution
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 7,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacement.png mockup.png; false"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-failed")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because failed command in step 2 overwrote mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("recognizes install command destinations when determining superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-install-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-install");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 uses install command to write replacement to mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "install replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-install")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because install command in step 2 overwrote mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not reconstruct historical markdown images in agent messages when superseded by later tools on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-agent-img-superseded-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-agent-img-superseded");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is the mockup:\n![mockup](mockup.png)\nEnd of mockup."
+        })
+      });
+      // Step 2 overwrites mockup.png via cp
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-agent-img-superseded")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Agent message in step 1 must remain plain text instead of attaching the superseded replacement image
+      expect(update1.sessionUpdate).toBe("agent_message_chunk");
+      expect(update1.content).toEqual({
+        type: "text",
+        text: "Here is the mockup:\n![mockup](mockup.png)\nEnd of mockup."
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("unwraps sudo and env command launchers when detecting write targets on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-launcher-"));
+    try {
+      const imgPath = path.join(testDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-launcher");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup",
+                ImageName: "mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 wraps cp under sudo and env
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "sudo -u root env MODE=x cp replacement.png mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-launcher")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because sudo/env wrapped command in step 2 overwrote mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("retries image reads on subsequent streaming polls after a transient miss", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
+    try {
+      const imgPath = path.join(testDir, "output.png");
+
+      const db = createConversationDb(testDir, "conv-gen-img-retry");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-retry-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Create logo",
+                ImageName: "output.png"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+
+      // Poll 1: step is status 3, but file is not on disk yet (transient miss)
+      const poll1 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-retry")!.readAfter(-1));
+      expect(poll1).toHaveLength(1);
+      const update1 = poll1[0] as any;
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: Create logo"
+          }
+        }
+      ]);
+      expect(update1.locations).toBeUndefined();
+
+      // File is now written to disk
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      // Poll 2: full snapshot re-read in StreamPoller retries reading output.png and emits tool_call_update
+      const poll2 = translator.translate(ConversationDb.open(testDir, "conv-gen-img-retry")!.readAfter(-1));
+      expect(poll2).toHaveLength(1);
+      const update2 = poll2[0] as any;
+      expect(update2.sessionUpdate).toBe("tool_call_update");
+      expect(update2.content).toEqual([
+        {
+          type: "content",
+          content: {
+            type: "text",
+            text: "Prompt: Create logo"
+          }
+        },
+        {
+          type: "content",
+          content: {
+            type: "image",
+            data: PNG_PIXEL,
+            mimeType: "image/png"
+          }
+        }
+      ]);
+      expect(update2.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves code span context across multi-poll streaming chunks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-codespan-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-codespan");
+      // Poll 1: step is active (status 1) and ends right after opening backtick
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is example code: `"
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-codespan")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is example code: `" }
+      });
+
+      // Poll 2: markdown image syntax arrives inside the code span
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is example code: `![plot](plot.png)` finished."
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-codespan")!.readAfter(-1));
+
+      // Must be emitted as text only, not converted to an image block
+      expect(updates2).toHaveLength(1);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "![plot](plot.png)` finished." }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves image fallback extensions when extensionless imageName is inside a dotted directory", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-dotdir-"));
+    try {
+      const artDir = path.join(testDir, ".artifacts");
+      fs.mkdirSync(artDir, { recursive: true });
+      const imgPath = path.join(artDir, "output.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-dotdir");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-dotdir",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Create icon",
+                ImageName: ".artifacts/output"
+              })
+            })
+          })
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-gen-img-dotdir")!.readAfter(-1));
+
+      expect(updates).toHaveLength(1);
+      const update = updates[0] as any;
+      expect(update.sessionUpdate).toBe("tool_call");
+      expect(update.content).toHaveLength(2);
+      expect(update.content[1]).toEqual({
+        type: "content",
+        content: {
+          type: "image",
+          data: PNG_PIXEL,
+          mimeType: "image/png"
+        }
+      });
+      expect(update.locations).toEqual([{ path: imgPath }]);
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("replays agent responses containing markdown images as segmented text and image ContentBlocks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-replay-img-"));
+    try {
+      const imgPath = path.join(testDir, "diagram.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-replay-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the architecture:\n![Architecture Diagram](${imgPath})\nAny questions?`
+        })
+      });
+
+      const translator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-replay-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(3);
+      expect(updates[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the architecture:\n" }
+      });
+      expect(updates[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates[2]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAny questions?" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("streams agent responses containing markdown images as segmented ContentBlocks", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-img-"));
+    try {
+      const imgPath = path.join(testDir, "sample.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-img");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Preview:\n![sample](${imgPath})\nFinished!`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      const updates = translator.translate(ConversationDb.open(testDir, "conv-stream-img")!.readAfter(-1));
+
+      expect(updates).toHaveLength(3);
+      expect(updates[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Preview:\n" }
+      });
+      expect(updates[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates[2]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nFinished!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("buffers incomplete markdown image syntax while streaming until closing parenthesis arrives", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-buf-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-buf");
+      // Step is currently active/in-progress (status 1) and growing
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](${imgPath.slice(0, 10)}` // unclosed markdown image embed
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: only the prefix before ![plot] should be emitted, buffering the incomplete image embed
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-buf")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: full markdown image arrives and step completes (status 3)
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](${imgPath})\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-buf")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("buffers a split exclamation prefix across streaming polls", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-excl-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-excl");
+      // Step is active (status 1) and ends immediately after '!'
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: "Here is the plot:\n!" // ends right after !
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: '!' must stay buffered, only 'Here is the plot:\n' is emitted
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-excl")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: remainder arrives completing the image embed
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](${imgPath})\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-excl")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("buffers incomplete markdown image syntax when caption contains parentheses", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-paren-"));
+    try {
+      const imgPath = path.join(testDir, "plot.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-paren");
+      // Step is active (status 1) and splits before destination closes, with caption containing ()
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![Chart (Q1)](${imgPath.slice(0, 10)}`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: '![Chart (Q1)](' must stay buffered because destination is not closed
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-paren")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: full markdown image arrives and step completes
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![Chart (Q1)](${imgPath})\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-paren")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("buffers incomplete angle-bracket markdown image syntax when destination contains parentheses", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-stream-angle-paren-"));
+    try {
+      const imgPath = path.join(testDir, "plot (Q1).png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-stream-angle-paren");
+      // Step is active (status 1) and splits inside angle-bracket destination right after internal parenthesis
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 1,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](<${imgPath.slice(0, imgPath.indexOf(")"))}`
+        })
+      });
+
+      const translator = new Translator({ mode: "stream", skipNarration: false, cwd: testDir });
+      // Poll 1: must stay buffered because >) has not arrived yet
+      const updates1 = translator.translate(ConversationDb.open(testDir, "conv-stream-angle-paren")!.readAfter(-1));
+
+      expect(updates1).toHaveLength(1);
+      expect(updates1[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "Here is the plot:\n" }
+      });
+
+      // Poll 2: full angle-bracket markdown image arrives and step completes
+      updateStep(db, 1, {
+        status: 3,
+        stepPayload: encodeStepPayload({
+          agentText: `Here is the plot:\n![plot](<${imgPath}>)\nAll done!`
+        })
+      });
+      const updates2 = translator.translate(ConversationDb.open(testDir, "conv-stream-angle-paren")!.readAfter(-1));
+
+      expect(updates2).toHaveLength(2);
+      expect(updates2[0]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "image", data: PNG_PIXEL, mimeType: "image/png" }
+      });
+      expect(updates2[1]).toMatchObject({
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "\nAll done!" }
+      });
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("ConversationDb gen_metadata & token usage", () => {
 
   it("reads gen_metadata rows from ConversationDb", () => {
@@ -4539,4 +6030,3 @@ describe("ConversationDb gen_metadata & token usage", () => {
     db.close();
   });
 });
-

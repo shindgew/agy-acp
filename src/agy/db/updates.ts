@@ -9,6 +9,7 @@ import {
   editUpdate,
   executeUpdate,
   fetchUpdate,
+  imageGenerationUpdate,
   isThoughtToolName,
   otherUpdate,
   questionUpdate,
@@ -191,6 +192,7 @@ function buildByToolName(stepRow: StepRow, ctx?: UpdateContext): SessionUpdate |
   if (name === "read_url_content") return fetchUpdate(stepRow);
   if (name === "invoke_subagent") return subagentUpdate(stepRow);
   if (name === "ask_question") return questionUpdate(stepRow);
+  if (name === "generate_image") return imageGenerationUpdate(stepRow, ctx);
   if (/write|replace|edit|patch/.test(name)) return editUpdate(stepRow, ctx);
   return otherUpdate(stepRow);
 }

@@ -14,12 +14,13 @@
 // This class owns the one row loop; the two modes are just small branches
 // inside it.
 
-import type { SessionUpdate } from "@agentclientprotocol/sdk";
+import type { ContentBlock, SessionUpdate } from "@agentclientprotocol/sdk";
 import type { PlanEntry } from "../../acp/agent-plan/index.js";
+import { splitTextAndImages, splitTextAndImagesWithRanges } from "../../acp/content/index.js";
 import type { GenMetadataUsage } from "./gen-metadata.js";
 import { filterNarration, isNarration } from "./narration.js";
 import { isSystemMessage, isSystemMessagePrefix } from "./system-message.js";
-import type { FileContentCache } from "./tool-call-updates.js";
+import { getCompletedStepTargetPaths, type FileContentCache, type ImageArtifactCache } from "./tool-call-updates.js";
 import type { StepRow } from "./types.js";
 import { sessionUpdateFromStep } from "./updates.js";
 
@@ -37,6 +38,14 @@ function agentChunk(text: string, messageId: string): SessionUpdate {
     sessionUpdate: "agent_message_chunk",
     messageId,
     content: { type: "text", text }
+  };
+}
+
+function agentContentBlockChunk(content: ContentBlock, messageId: string): SessionUpdate {
+  return {
+    sessionUpdate: "agent_message_chunk",
+    messageId,
+    content
   };
 }
 
@@ -115,6 +124,8 @@ export class Translator {
   private readonly fileContents: FileContentCache = new Map();
   // Stream + replay: previous plan entries keyed by plan id (stable entry-id reconciliation).
   private readonly planEntries: Map<string, PlanEntry[]> = new Map();
+  // Stream + replay: completed generate_image artifacts cached per tool call.
+  private readonly imageArtifacts: ImageArtifactCache = new Map();
   // Candidate ACP location paths and their readability during the latest translation.
   readonly locationReadability = new Map<string, boolean>();
   // Replay: buffered consecutive agent-text parts, flushed at boundaries.
@@ -123,6 +134,7 @@ export class Translator {
   private pendingAgentMessageId: string | null = null;
   private pendingAgentStartStepIdx: number | null = null;
   private pendingAgentEndStepIdx: number | null = null;
+  private pendingAgentSupersededPaths: Set<string> | undefined;
 
   private _lastTitle: string | null = null;
   private _lastStepIdx = -1;
@@ -156,6 +168,23 @@ export class Translator {
     const out: SessionUpdate[] = [];
     let streamingAgentMessageId: string | null = null;
     let streamingHasVisibleText = false;
+
+    // Precompute paths modified by later completed steps in this batch.
+    // A historical step cannot reliably attribute the current file on disk if a
+    // later completed step in the batch overwrote that target path.
+    const supersededPaths = new Set<string>();
+    const supersededByRowIndex: Set<string>[] = new Array(rows.length);
+    for (let i = rows.length - 1; i >= 0; i--) {
+      supersededByRowIndex[i] = new Set(supersededPaths);
+      const row = rows[i];
+      if (row.status === 3 || row.status === 6 || row.status === 7) {
+        const modified = getCompletedStepTargetPaths(row, this.opts.cwd);
+        for (const p of modified) {
+          supersededPaths.add(p);
+        }
+      }
+    }
+
     for (const [rowIndex, row] of rows.entries()) {
       let streamingNeedsSeparator = false;
       const canGrow = rowIndex === rows.length - 1 && row.status !== 3 && row.status !== 6 && row.status !== 7;
@@ -174,7 +203,14 @@ export class Translator {
           streamingHasVisibleText = false;
         }
       }
-      this.translateRow(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
+      this.translateRow(
+        row,
+        out,
+        streamingAgentMessageId,
+        streamingNeedsSeparator,
+        canGrow,
+        supersededByRowIndex[rowIndex]
+      );
     }
     // Replay groups agent text per batch; a batch ends a message boundary.
     if (this.opts.mode === "replay") this.flushAgentBuffer(out);
@@ -208,13 +244,14 @@ export class Translator {
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
     streamingNeedsSeparator: boolean,
-    canGrow: boolean
+    canGrow: boolean,
+    supersededPaths?: Set<string>
   ): void {
     this._lastStepIdx = Math.max(this._lastStepIdx, row.idx);
 
     switch (row.stepType) {
       case 15: // agent text chunk
-        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow);
+        this.handleAgentText(row, out, streamingAgentMessageId, streamingNeedsSeparator, canGrow, supersededPaths);
         return;
 
       case 23: // conversation title (+ optional think narration)
@@ -225,7 +262,7 @@ export class Translator {
         // The streaming client already has its own prompt; only replay re-emits it.
         if (this.opts.mode === "stream") return;
         this.flushAgentBuffer(out);
-        this.pushDispatched(row, out);
+        this.pushDispatched(row, out, supersededPaths);
         return;
 
       default: {
@@ -235,17 +272,19 @@ export class Translator {
         if (this.opts.mode === "replay") {
           this.flushAgentBuffer(out);
         }
-        this.pushDispatched(row, out);
+        this.pushDispatched(row, out, supersededPaths);
       }
     }
   }
 
-  private pushDispatched(row: StepRow, out: SessionUpdate[]): void {
+  private pushDispatched(row: StepRow, out: SessionUpdate[], supersededPaths?: Set<string>): void {
     const update = sessionUpdateFromStep(row, {
       cwd: this.opts.cwd,
       fileContents: this.fileContents,
       planEntries: this.planEntries,
-      locationReadability: this.locationReadability
+      locationReadability: this.locationReadability,
+      imageArtifacts: this.imageArtifacts,
+      supersededPaths
     });
     if (Array.isArray(update)) {
       for (const item of update) this.emitProgressive(row.idx, item, out);
@@ -359,7 +398,8 @@ export class Translator {
     out: SessionUpdate[],
     streamingAgentMessageId: string | null,
     streamingNeedsSeparator: boolean,
-    canGrow: boolean
+    canGrow: boolean,
+    supersededPaths?: Set<string>
   ): void {
     const thought = row.stepPayload.agentText?.thought;
     if (thought) {
@@ -377,6 +417,7 @@ export class Translator {
         if (this.pendingAgentMessageId === null) {
           this.pendingAgentMessageId = messageId;
           this.pendingAgentStartStepIdx = row.idx;
+          this.pendingAgentSupersededPaths = supersededPaths;
         }
         this.pendingAgentEndStepIdx = row.idx;
         this.pendingAgentParts.push(text);
@@ -388,11 +429,54 @@ export class Translator {
     // Chunks for the same step share one messageId (required by ACP v2).
     const emitted = this.agentTextLengths.get(row.idx) ?? 0;
     if (text.length <= emitted) return;
-    this.agentTextLengths.set(row.idx, text.length);
+
+    // When the row is actively streaming (canGrow: true), do not cut an incomplete
+    // markdown image embed in half (e.g. trailing `!` or `![plot](path/to` without the closing `)`).
+    // Buffer from the opening `!` or `![` until the closing `)` arrives or the step finishes.
+    let limit = text.length;
+    if (canGrow) {
+      if (text.endsWith("!")) {
+        limit = text.length - 1;
+      }
+      const lastOpen = text.lastIndexOf("![");
+      if (lastOpen >= 0) {
+        const tail = text.slice(lastOpen);
+        const destStart = tail.lastIndexOf("](");
+        let isClosed = false;
+        if (destStart >= 0) {
+          const destBody = tail.slice(destStart + 2);
+          if (destBody.startsWith("<")) {
+            isClosed = destBody.includes(">)");
+          } else {
+            isClosed = destBody.includes(")");
+          }
+        }
+        if (!isClosed) {
+          limit = Math.min(limit, lastOpen);
+        }
+      }
+    }
+    if (limit <= emitted) return;
+
+    this.agentTextLengths.set(row.idx, limit);
     if (this.opts.skipNarration && isNarration(text)) return;
-    const delta = text.slice(emitted);
+    const delta = text.slice(emitted, limit);
     if (delta.length > 0) {
-      out.push(agentChunk(emitted === 0 && streamingNeedsSeparator ? `\n${delta}` : delta, messageId));
+      const fullText = text.slice(0, limit);
+      const spanned = splitTextAndImagesWithRanges(fullText, this.opts.cwd);
+      let isFirstEmitted = true;
+      for (const { block, start, end } of spanned) {
+        if (end <= emitted) continue;
+        let b = block;
+        if (start < emitted && b.type === "text") {
+          b = { type: "text", text: b.text.slice(emitted - start) };
+        }
+        if (emitted === 0 && isFirstEmitted && streamingNeedsSeparator && b.type === "text") {
+          b = { type: "text", text: `\n${b.text}` };
+        }
+        isFirstEmitted = false;
+        out.push(agentContentBlockChunk(b, messageId));
+      }
     }
   }
 
@@ -404,20 +488,25 @@ export class Translator {
     const messageId = this.pendingAgentMessageId ?? "agent";
     const startStepIdx = this.pendingAgentStartStepIdx;
     const endStepIdx = this.pendingAgentEndStepIdx;
+    const superseded = this.pendingAgentSupersededPaths;
     this.pendingAgentParts.length = 0;
     this.pendingAgentMessageId = null;
     this.pendingAgentStartStepIdx = null;
     this.pendingAgentEndStepIdx = null;
+    this.pendingAgentSupersededPaths = undefined;
     if (text && text.length > 0) {
-      const chunk = agentChunk(text, messageId);
-      if (startStepIdx != null) {
-        const stamped = withStepMeta(chunk, startStepIdx);
-        if (endStepIdx != null && endStepIdx > startStepIdx) {
-          ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+      const blocks = splitTextAndImages(text, this.opts.cwd, superseded);
+      for (const block of blocks) {
+        const chunk = agentContentBlockChunk(block, messageId);
+        if (startStepIdx != null) {
+          const stamped = withStepMeta(chunk, startStepIdx);
+          if (endStepIdx != null && endStepIdx > startStepIdx) {
+            ((stamped as unknown as Record<string, unknown>)._meta as Record<string, unknown>).endStepIdx = endStepIdx;
+          }
+          out.push(stamped);
+        } else {
+          out.push(chunk);
         }
-        out.push(stamped);
-      } else {
-        out.push(chunk);
       }
     }
   }
