@@ -1,16 +1,16 @@
 name: Release
 
 # Push a version tag (vX.Y.Z matching package.json) to create a GitHub Release
-# and publish the package to npm via Trusted Publishing (OIDC) — only if the
-# tagged commit is already on main.
+# and publish the package to npm and GitHub Packages — only if the tagged
+# commit is already on main.
 #
 # Configure the matching Trusted Publisher on npmjs.com for this repo and
 # workflow file (`.github/workflows/release.yml`). No long-lived NPM_TOKEN.
 #
-# Stable:     v1.2.3           → GitHub Release + npm --tag latest
-# Pre-release: v1.0.0-alpha.0  → GitHub pre-release + npm --tag alpha
-#              v1.0.0-beta.1   → GitHub pre-release + npm --tag beta
-#              v1.0.0-rc.1     → GitHub pre-release + npm --tag rc
+# Stable:     v1.2.3           → GitHub Release + npm/GitHub Packages latest
+# Pre-release: v1.0.0-alpha.0  → GitHub pre-release + npm/GitHub Packages alpha
+#              v1.0.0-beta.1   → GitHub pre-release + npm/GitHub Packages beta
+#              v1.0.0-rc.1     → GitHub pre-release + npm/GitHub Packages rc
 on:
   push:
     tags:
@@ -18,12 +18,13 @@ on:
 
 permissions:
   contents: write
+  packages: write
   # Required for npm Trusted Publishing (OIDC).
   id-token: write
 
 jobs:
   release:
-    name: GitHub Release + npm publish
+    name: GitHub Release + package publish
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -147,3 +148,32 @@ jobs:
       - name: Publish to npm (Trusted Publisher)
         run: |
           npm publish --access public --tag "${{ steps.version.outputs.npm_tag }}" --provenance
+
+      # GitHub Packages only supports scoped npm packages, while the existing
+      # npmjs package is intentionally unscoped. Repack the same built artifact
+      # under @shindgew/agy-acp in a disposable directory for GitHub Packages.
+      - name: Prepare scoped GitHub package
+        run: |
+          set -euo pipefail
+          package_dir="${RUNNER_TEMP}/github-package"
+          package_archive="${RUNNER_TEMP}/agy-acp-${{ steps.version.outputs.version }}.tgz"
+          mkdir "$package_dir"
+          npm pack --pack-destination "$RUNNER_TEMP"
+          tar -xzf "$package_archive" -C "$package_dir" --strip-components=1
+          cd "$package_dir"
+          npm pkg set name="@shindgew/agy-acp"
+          npm pkg delete scripts.prepublishOnly
+
+      - name: Set up Node for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: https://npm.pkg.github.com
+          scope: "@shindgew"
+
+      - name: Publish to GitHub Packages
+        working-directory: ${{ runner.temp }}/github-package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npm publish --access public --tag "${{ steps.version.outputs.npm_tag }}"
