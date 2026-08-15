@@ -915,23 +915,58 @@ function extractCommandMutationTargets(cmd: string, cwd?: string): string[] {
     const bin = path.basename(cleanTokens[0]);
     const positionalArgs = cleanTokens.slice(1).filter((t) => !t.startsWith("-"));
 
+    const targetDirMatch = trimmedSub.match(/(?:-t|--target-directory)(?:=|\s+)(?:<([^>]+)>|"([^"]*)"|'([^']*)'|([^\s|&;]+))/);
+    const targetDir = targetDirMatch ? (targetDirMatch[1] ?? targetDirMatch[2] ?? targetDirMatch[3] ?? targetDirMatch[4])?.trim() : undefined;
+
     if (bin === "cd") {
       if (positionalArgs.length > 0) {
         const nextDir = resolvePath(positionalArgs[0], currentCwd);
         if (nextDir) currentCwd = nextDir;
       }
     } else if (bin === "cp") {
-      // In `cp [opts] src... dest`, dest is the last positional argument
-      if (positionalArgs.length >= 2) {
+      if (targetDir) {
+        const dirResolved = resolvePath(targetDir, currentCwd);
+        if (dirResolved) targets.push(dirResolved);
+        for (const src of positionalArgs) {
+          const r = resolvePath(path.join(targetDir, path.basename(src)), currentCwd);
+          if (r) targets.push(r);
+        }
+      } else if (positionalArgs.length >= 2) {
         const dest = positionalArgs[positionalArgs.length - 1];
-        const r = resolvePath(dest, currentCwd);
-        if (r) targets.push(r);
+        const sources = positionalArgs.slice(0, positionalArgs.length - 1);
+        const destResolved = resolvePath(dest, currentCwd);
+        if (destResolved) targets.push(destResolved);
+        for (const src of sources) {
+          const r = resolvePath(path.join(dest, path.basename(src)), currentCwd);
+          if (r) targets.push(r);
+        }
       }
     } else if (bin === "mv") {
-      // In `mv [opts] src... dest`, both src (removed) and dest (overwritten) are mutated
-      for (const arg of positionalArgs) {
-        const r = resolvePath(arg, currentCwd);
-        if (r) targets.push(r);
+      if (targetDir) {
+        const dirResolved = resolvePath(targetDir, currentCwd);
+        if (dirResolved) targets.push(dirResolved);
+        for (const src of positionalArgs) {
+          const rSrc = resolvePath(src, currentCwd);
+          if (rSrc) targets.push(rSrc);
+          const rDest = resolvePath(path.join(targetDir, path.basename(src)), currentCwd);
+          if (rDest) targets.push(rDest);
+        }
+      } else if (positionalArgs.length >= 2) {
+        const dest = positionalArgs[positionalArgs.length - 1];
+        const sources = positionalArgs.slice(0, positionalArgs.length - 1);
+        const destResolved = resolvePath(dest, currentCwd);
+        if (destResolved) targets.push(destResolved);
+        for (const src of sources) {
+          const rSrc = resolvePath(src, currentCwd);
+          if (rSrc) targets.push(rSrc);
+          const rDest = resolvePath(path.join(dest, path.basename(src)), currentCwd);
+          if (rDest) targets.push(rDest);
+        }
+      } else {
+        for (const arg of positionalArgs) {
+          const r = resolvePath(arg, currentCwd);
+          if (r) targets.push(r);
+        }
       }
     } else if (bin === "rm" || bin === "touch" || bin === "tee") {
       for (const arg of positionalArgs) {

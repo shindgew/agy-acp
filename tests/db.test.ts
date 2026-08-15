@@ -4682,6 +4682,130 @@ describe("agent outbound image ContentBlocks", () => {
     }
   });
 
+  it("resolves directory-form copy destination paths when determining superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cpdir-"));
+    try {
+      const outDir = path.join(testDir, "out");
+      fs.mkdirSync(outDir, { recursive: true });
+      const imgPath = path.join(outDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cpdir");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup in out",
+                ImageName: "out/mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 uses directory form cp replacements/mockup.png out/
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp replacements/mockup.png out/"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cpdir")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because cp ... out/ overwrote out/mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
+  it("resolves target-directory -t copy destination paths when determining superseded paths on replay", () => {
+    const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-cptarget-"));
+    try {
+      const outDir = path.join(testDir, "out");
+      fs.mkdirSync(outDir, { recursive: true });
+      const imgPath = path.join(outDir, "mockup.png");
+      fs.writeFileSync(imgPath, Buffer.from(PNG_PIXEL, "base64"));
+
+      const db = createConversationDb(testDir, "conv-gen-img-cptarget");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "gen-img-call-1",
+              namePrimary: "generate_image",
+              rawInputJson: JSON.stringify({
+                Prompt: "Version 1 of mockup in out",
+                ImageName: "out/mockup.png"
+              })
+            })
+          })
+        })
+      });
+      // Step 2 uses -t target-directory form cp -t out replacements/mockup.png
+      insertStep(db, {
+        idx: 2,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          toolRun: encodeToolRun({
+            call: encodeToolCall({
+              callId: "run-cmd-call-2",
+              namePrimary: "run_command",
+              rawInputJson: JSON.stringify({
+                CommandLine: "cp -t out replacements/mockup.png"
+              })
+            })
+          })
+        })
+      });
+
+      const replayTranslator = new Translator({ mode: "replay", skipNarration: false, cwd: testDir });
+      const updates = replayTranslator.translate(ConversationDb.open(testDir, "conv-gen-img-cptarget")!.readAfter(-1));
+
+      expect(updates).toHaveLength(2);
+      const update1 = updates[0] as any;
+
+      // Call 1 image must not be reconstructed because cp -t out ... overwrote out/mockup.png
+      expect(update1.sessionUpdate).toBe("tool_call");
+      expect(update1.toolCallId).toBe("gen-img-call-1");
+      expect(update1.content).toHaveLength(1);
+      expect(update1.locations).toBeUndefined();
+
+      db.close();
+    } finally {
+      fs.rmSync(testDir, { recursive: true, force: true });
+    }
+  });
+
   it("retries image reads on subsequent streaming polls after a transient miss", () => {
     const testDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-gen-img-retry-"));
     try {
