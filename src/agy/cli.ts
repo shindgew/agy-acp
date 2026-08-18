@@ -1423,6 +1423,7 @@ export async function defaultPtyFactory(): Promise<PtyFactory> {
       }
     }
   }
+  // @ts-ignore optional runtime dependency
   const pty = await import("node-pty");
   return { spawn: (command, args, options) => pty.spawn(command, args, { ...options, name: "xterm-256color" }) };
 }
