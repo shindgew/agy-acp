@@ -1177,31 +1177,6 @@ export class AgyCliSession {
     return true;
   }
 
-  private async waitForPermissionPanel(deadline: number): Promise<boolean> {
-    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
-    while (
-      !this.#ptyPermissionPanelVisible &&
-      !this.#cancelled &&
-      Date.now() < expires
-    ) {
-      if (this.#ptyPermissionRenderTimer !== undefined && this.#ptyPermissionRender.length > 0) {
-        const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-        const cleanOutput = stripAnsi(rawOutput);
-        if (PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker))) {
-          if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
-          this.flushPermissionRender();
-          break;
-        }
-      }
-      await sleep(5);
-    }
-    if (this.#ptyPermissionRenderTimer !== undefined) {
-      clearTimeout(this.#ptyPermissionRenderTimer);
-      this.flushPermissionRender();
-    }
-    return this.#ptyPermissionPanelVisible;
-  }
-
   private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
     const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
     while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
