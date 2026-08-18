@@ -520,8 +520,8 @@ function isEmptyAgentTextStep(row: StepRow): boolean {
   // empty placeholders agy inserts while initializing response generation.
   if (isSystemMessage(text)) return false;
   const thought = row.stepPayload.agentText?.thought;
-  const hasText = text.length > 0;
-  const hasThought = Boolean(thought && thought.length > 0);
+  const hasText = text.trim().length > 0;
+  const hasThought = Boolean(thought && thought.trim().length > 0);
   return !hasText && !hasThought;
 }
 
