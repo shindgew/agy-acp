@@ -239,7 +239,6 @@ export class AgyCliSession {
   #ptyPermissionMarkerCount = 0;
   #ptyPermissionRender = "";
   #ptyPermissionMarkerTail = "";
-  #ptyPermissionPanelVisible = false;
   #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #activeStreamPoller: StreamPoller | undefined;
   #ptyConfig = "";
@@ -459,7 +458,6 @@ export class AgyCliSession {
       this.#ptyPermissionMarkerCount = 0;
       this.#ptyPermissionRender = "";
       this.#ptyPermissionMarkerTail = "";
-      this.#ptyPermissionPanelVisible = false;
       const activePty = this.#pty;
       activePty.onData((data) => {
         if (this.#pty !== activePty) return;
@@ -1119,7 +1117,6 @@ export class AgyCliSession {
     this.#ptyPermissionRenderTimer = undefined;
     this.#ptyPermissionRender = "";
     this.#ptyPermissionMarkerTail = "";
-    this.#ptyPermissionPanelVisible = false;
     this.#pty = undefined;
     this.#ptyExit = undefined;
     if (pty) {
@@ -1142,15 +1139,12 @@ export class AgyCliSession {
       clean.includes("Yes, and always allow") ||
       clean.includes("Select option:") ||
       clean.includes("Allow this command?") ||
-      clean.includes("Allow this tool") ||
-      clean.includes("Allow once") ||
-      clean.includes("Allow this time");
+      clean.includes("Allow this tool");
     const visible = isPermissionContext && PERMISSION_MARKERS.some((marker) => clean.includes(marker));
     const cleanTail = multiMarkerPrefixTail(clean, PERMISSION_MARKERS);
     this.#ptyPermissionMarkerTail = cleanTail + incomplete;
     if (visible) {
       this.#ptyPermissionMarkerCount++;
-      this.#ptyPermissionPanelVisible = true;
     }
     this.#ptyPermissionRender = "";
     this.#ptyPermissionRenderTimer = undefined;
