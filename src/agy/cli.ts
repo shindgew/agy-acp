@@ -242,7 +242,6 @@ export class AgyCliSession {
   #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #activeStreamPoller: StreamPoller | undefined;
   #ptyConfig = "";
-  #lastPtyActivityTime = 0;
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
   #cancelWait: Promise<void> = Promise.resolve();
@@ -468,11 +467,9 @@ export class AgyCliSession {
           PERMISSION_RENDER_SETTLE_MS
         );
         this.#ptyOutput = (this.#ptyOutput + data).slice(-16_384);
-        this.#lastPtyActivityTime = Date.now();
       });
       this.#ptyExit = new Promise((resolve) => this.#pty!.onExit(resolve));
     } else {
-      this.#lastPtyActivityTime = Date.now();
       this.#pty.write(`\x1b[200~${prompt.replaceAll("\x1b", "")}\x1b[201~\r`);
     }
     // Tracked separately: a toolCallId can legitimately go through the live
@@ -682,12 +679,13 @@ export class AgyCliSession {
         if (hadInteraction) {
           lastActivityTime = Date.now();
         }
-        const hasQuiesced = (Date.now() - Math.max(lastActivityTime, this.#lastPtyActivityTime)) >= QUIESCENT_SETTLE_MS;
+        const hasQuiesced = (Date.now() - lastActivityTime) >= QUIESCENT_SETTLE_MS;
         const isIdleCandidate =
           poller.turnCompleteCandidate &&
           poller.lastStepIdx > this.#lastStepIdx &&
           candidateRevision === poller.revision &&
-          hasQuiesced;
+          hasQuiesced &&
+          (poller.isConclusiveTurnEnd || poller.isSuccessfulToolOnlyEnd);
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".

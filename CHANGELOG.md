@@ -21,6 +21,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Fix interactive turn completion hanging indefinitely until the 5-minute `printTimeout` expires when `agy` completes the turn, adding a 300ms quiescence settle window fallback and ANSI-resilient permission panel detection. (#113)
 - Refine `_busy` calculation in `StreamPoller` to evaluate `latestMeaningful` step status rather than raw trailing rows (such as lifecycle `stepType 101` or `gen_metadata` records), ensuring trailing metadata does not prevent clean turn completion. (#113)
 - Decode protobuf payload field 114 (task completion notifications) on lifecycle `stepType 101` rows and expand `isSystemMessage()` to recognize un-tagged message envelopes (`[Message]`, `[Notice]`, `[System]`, `sender=`), ensuring background task completions properly retire active tasks in `StreamPoller` without hanging turns. (#131)
+- Keep interactive turns open after failed or cancelled tools and background-task completion wakes until a conclusive SQLite follow-up row arrives, instead of idling on PTY silence. (#113, #115, #120)
 
 ## [0.5.1] - 2026-08-15
 

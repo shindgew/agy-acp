@@ -574,6 +574,52 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("captures assistant recovery commentary arriving after the 300ms quiescence window", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-delayed-recovery-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-fail-delayed-recovery");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 7,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "python script.py", output: "Traceback: error occurred" })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "run script",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => "agy-allow-once"
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "tool-fail-delayed-recovery.db"));
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "The Python script failed. I will inspect the traceback."
+      })
+    });
+    db.close();
+
+    expect((await result).stopReason).toBe("end_turn");
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("I will inspect the traceback");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("captures assistant explanation after a cancelled permission check without premature turn cutoff", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
@@ -664,11 +710,11 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not mistake the fresh TUI startup marker for turn completion", async () => {
+  it("does not complete from the fresh TUI startup marker while the latest SQLite row is still in progress", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "startup-marker");
-      insertStep(db, { idx: 1, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      insertStep(db, { idx: 1, stepType: 15, status: 2, stepPayload: encodeStepPayload({ agentText: "" }) });
       db.close();
     });
     const session = interactiveSession(dir, pty);
@@ -680,7 +726,9 @@ describe("permission bridge", () => {
     pty.emitData("redraw without another marker");
     await new Promise((resolve) => setTimeout(resolve, 225));
     expect(resolved).toBe(false);
-    pty.emitData("? for shortcuts");
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "startup-marker.db"));
+    updateStep(db, 1, { status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
     expect((await result).stopReason).toBe("end_turn");
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -1293,6 +1341,58 @@ describe("permission bridge", () => {
 
     expect(outcome.stopReason).toBe("end_turn");
     expect(updates.some(u => JSON.stringify(u).includes("Long job finished successfully"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps turn open after a task-completion wake until a late assistant summary arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-late-summary-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-late-summary");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job &", output: "Started task-77" }) }),
+        task: encodeTaskDetails({ taskId: "task-77", logUri: "", description: "Long job" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running task in background..." })
+      });
+      db.close();
+
+      setTimeout(async () => {
+        const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-late-summary.db"));
+        insertStep(db2, {
+          idx: 3,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job", output: "Done with job" }) }),
+          task: encodeTaskDetails({ taskId: "task-77", logUri: "", description: "Long job" })
+        });
+        setTimeout(() => {
+          insertStep(db2, {
+            idx: 4,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "Late summary: long job finished" })
+          });
+          db2.close();
+        }, 400);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("run job", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Late summary: long job finished"))).toBe(true);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
