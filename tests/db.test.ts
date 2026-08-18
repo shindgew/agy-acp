@@ -2985,6 +2985,52 @@ describe("StreamPoller", () => {
     db.close();
   });
 
+  it("does not treat empty stepType 15 placeholders after tool execution as conclusive turn end (gh#114)", () => {
+    const db = createConversationDb(dir, "conv-tool-empty-placeholder");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Check git log" })
+    });
+    // Tool execution finishes with status 3
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git log -n 6 --oneline", output: "commit abc" }) })
+    });
+    // agy writes an empty stepType 15 placeholder while model prepares the summary
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-empty-placeholder",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // Although the tool step is terminal, the empty placeholder prevents conclusive turn ending
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+
+    // When the model writes the actual summary, it becomes a conclusive turn end
+    updateStep(db, 3, {
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Here are the last 6 commits on this branch." })
+    });
+    poller.poll();
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
   it("does not treat early lifecycle steps (stepType 90, 98, 101, status 3) as turn completion candidates", () => {
     const db = createConversationDb(dir, "conv-early-lifecycle");
     insertStep(db, {
