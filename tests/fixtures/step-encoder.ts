@@ -216,6 +216,18 @@ export function encodePermissions(info: { kind?: string; value?: string; decisio
   return w.finish();
 }
 
+export function encodeTaskNotification(notif: {
+  message?: string;
+  details?: string;
+  type?: string;
+}): Uint8Array {
+  const w = new BinaryWriter();
+  if (notif.message) w.tag(1, 2).string(notif.message);
+  if (notif.details) w.tag(2, 2).string(notif.details);
+  if (notif.type) w.tag(3, 2).string(notif.type);
+  return w.finish();
+}
+
 export function encodeStepPayload(opts: {
   toolRun?: Uint8Array;
   agentText?: string | { text?: string; thought?: string } | Uint8Array;
@@ -228,6 +240,7 @@ export function encodeStepPayload(opts: {
   urlContent?: Uint8Array;
   modelProviderError?: Uint8Array;
   subagentInfo?: Uint8Array;
+  taskNotification?: Uint8Array;
 }): Uint8Array {
   const w = new BinaryWriter();
   if (opts.toolRun) submessage(w, 5, opts.toolRun);
@@ -243,6 +256,7 @@ export function encodeStepPayload(opts: {
   if (opts.titleUpdate !== undefined) submessage(w, 30, encodeTitleUpdate(opts.titleUpdate));
   if (opts.urlContent) submessage(w, 40, opts.urlContent);
   if (opts.webSearch) submessage(w, 42, opts.webSearch);
+  if (opts.taskNotification) submessage(w, 114, opts.taskNotification);
   if (opts.subagentInfo) submessage(w, 127, opts.subagentInfo);
   return w.finish();
 }
