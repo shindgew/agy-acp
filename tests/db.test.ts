@@ -23,6 +23,7 @@ import {
   encodeStepPayload,
   encodeSubagentInfo,
   encodeTaskDetails,
+  encodeTaskNotification,
   encodeToolCall,
   encodeToolRun,
   encodeUrlContentResult,
@@ -3538,6 +3539,155 @@ describe("StreamPoller", () => {
 
     poller.poll();
     expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("tracks background task completion when task notification is received on stepType 101 (field 114)", () => {
+    const db = createConversationDb(dir, "conv-bg-steptype101-notification");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "npm test", output: "Task task-48 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-48", logUri: "", description: "npm test" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Running tests in the background..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-steptype101-notification",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    // agy records task completion notification on stepType 101 in field 114 with null task_details
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv-bg/task-48 priority=MESSAGE_PRIORITY_HIGH content=Task id "task-48" finished with result:\n\nOutput: 14 passed',
+          details: 'Run tests finished Task id "task-48" finished with result',
+          type: "task_notification"
+        })
+      })
+    });
+
+    const updates = poller.poll();
+    // Step 101 lifecycle notifications are filtered from client stream updates
+    expect(updates.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(false);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    // Before follow-up assistant response, turn is not yet conclusively ended
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+
+    // Assistant emits summary response beyond the task completion wake
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "All 14 test files passed successfully."
+      })
+    });
+
+    const finalUpdates = poller.poll();
+    expect(finalUpdates.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(true);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("handles background command alongside scheduled timer without leaving turn hanging", () => {
+    const db = createConversationDb(dir, "conv-bg-command-and-timer");
+    // 1. Long running command launches task-10
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "vitest run", output: "Task task-10 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-10", logUri: "", description: "vitest run" })
+    });
+    // 2. Schedule tool launches timer task-11
+    insertStep(db, {
+      idx: 2,
+      stepType: 132,
+      status: 3,
+      stepPayload: encodeStepPayload({}),
+      task: encodeTaskDetails({ taskId: "task-11", logUri: "", description: "Timer: 60s" })
+    });
+    // 3. Assistant interim text
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Waiting for test execution to complete..."
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-command-and-timer",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // task-10 is active (task-11 stepType 132 completed at step 2)
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // 4. When task-10 completes via stepType 101 field 114
+    insertStep(db, {
+      idx: 4,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-10 content=Task id "task-10" finished with result: OK',
+          type: "task_notification"
+        })
+      })
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    // 5. Follow-up assistant text
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Tests passed cleanly."
+      })
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
 
     poller.close();
     db.close();

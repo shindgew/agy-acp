@@ -334,7 +334,10 @@ export class StreamPoller {
       if (row.task?.taskId && !this._launchedTaskIdxs.has(row.task.taskId)) {
         this._launchedTaskIdxs.set(row.task.taskId, row.idx);
       }
-      const text = row.stepPayload.agentText?.text ?? "";
+      const notification = row.stepPayload.taskNotification;
+      const text =
+        row.stepPayload.agentText?.text ??
+        (notification ? `${notification.message} ${notification.details ?? ""}`.trim() : "");
       // Defer completion tracking until a system message is terminal so a
       // still-streaming system-message envelope cannot close the wait early.
       // Generic stepType 101 turn-end markers without a system message payload
