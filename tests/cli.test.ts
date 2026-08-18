@@ -831,6 +831,67 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not prematurely complete turn during consecutive tool executions when PTY emits prompt redraws between tools", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-consecutive-tools-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "consecutive-tools");
+      // Tool 1 executes & completes
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git diff src/agy/db/streaming.ts", output: "" }) })
+      });
+      insertStep(dbHandle, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "" })
+      });
+      // PTY redraws prompt bar between tool executions
+      setTimeout(() => pty.emitData("\n? for shortcuts\n"), 50);
+
+      // Tool 2 executes & completes 350ms later (exceeding QUIESCENT_SETTLE_MS if not protected by isConclusiveTurnEnd)
+      setTimeout(() => {
+        insertStep(dbHandle, {
+          idx: 3,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git diff src/agy/cli.ts", output: "" }) })
+        });
+        insertStep(dbHandle, {
+          idx: 4,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "" })
+        });
+        // PTY redraws again
+        pty.emitData("\n? for shortcuts\n");
+
+        // Final assistant response arrives after another pause
+        setTimeout(() => {
+          insertStep(dbHandle, {
+            idx: 5,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "Both diffs inspected cleanly." })
+          });
+          dbHandle.close();
+          pty.emitData("\n? for shortcuts\n");
+        }, 350);
+      }, 350);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("inspect diffs", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Both diffs inspected cleanly"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("detects alternate permission markers split across PTY chunks via multi-marker prefix tails", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-chunked-marker-"));
     const pty = new FakePty(() => {
