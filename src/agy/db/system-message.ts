@@ -5,10 +5,10 @@
 
 /**
  * True if the text matches an internal agy system message envelope
- * (starts with `<SYSTEM_MESSAGE>\n[Message]`).
+ * (e.g. `<SYSTEM_MESSAGE>\n[Message]...` or `[Message] timestamp=... sender=...`).
  */
 export function isSystemMessage(text: string): boolean {
-  return /^\s*<SYSTEM_MESSAGE>(?:\s*\n|\s*\r\n|\s)*(?:\[Message\]|\[Notice\]|\[System\]|sender=|content=|timestamp=|priority=|task|Task|\s*$)/i.test(text);
+  return /^\s*(?:<SYSTEM_MESSAGE>(?:\s*\n|\s*\r\n|\s)*(?:\[Message\]|\[Notice\]|\[System\]|sender=|content=|timestamp=|priority=|task|Task|\s*$)|\[Message\]\s*(?:timestamp=|sender=|priority=|content=)|\[Notice\]|\[System\]|sender=)/i.test(text);
 }
 
 /**
