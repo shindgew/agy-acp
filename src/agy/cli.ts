@@ -687,7 +687,6 @@ export class AgyCliSession {
           poller.turnCompleteCandidate &&
           poller.lastStepIdx > this.#lastStepIdx &&
           candidateRevision === poller.revision &&
-          poller.isConclusiveTurnEnd &&
           hasQuiesced;
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this

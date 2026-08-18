@@ -499,6 +499,31 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("completes a tool-only turn promptly after quiescence without waiting for long printTimeout", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-tool-only-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-only-quiescence");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "echo hello", output: "hello\n" })
+        })
+      });
+      db.close();
+    });
+    // Set a very long timeout (60s). Must resolve via quiescence in < 2s rather than waiting 60s.
+    const session = interactiveSession(dir, pty, "60s");
+    const startTime = Date.now();
+    const result = await session.prompt("echo hello", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - startTime;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(5000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("captures assistant recovery commentary after a failed tool execution without premature turn cutoff", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {

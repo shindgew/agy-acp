@@ -417,7 +417,13 @@ export class StreamPoller {
     this._hasRows = rows.length > 0;
     const latestMeaningful = findLastMeaningfulStep(rows);
     const isEmptyAgentText = latestMeaningful !== undefined && isEmptyAgentTextStep(latestMeaningful);
-    this._busy = latestMeaningful === undefined || !isTerminalStepStatus(latestMeaningful.status) || isEmptyAgentText;
+    const lastRow = rows.at(-1);
+    const isTrailingEmptyPlaceholder = lastRow !== undefined && isEmptyAgentTextStep(lastRow);
+    this._busy =
+      latestMeaningful === undefined ||
+      !isTerminalStepStatus(latestMeaningful.status) ||
+      isEmptyAgentText ||
+      isTrailingEmptyPlaceholder;
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
