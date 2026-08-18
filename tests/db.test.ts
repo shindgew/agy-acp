@@ -2833,9 +2833,118 @@ describe("StreamPoller", () => {
     });
     expect(poller.poll()).toHaveLength(1);
     expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
 
     poller.close();
     db.close();
+  });
+
+  it("does not treat failed (status 7), cancelled (status 6), or successful (status 3) tool steps as conclusive turn ends", () => {
+    const db = createConversationDb(dir, "conv-tool-inconclusive");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run a test command" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-inconclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // 1. Tool step runs and fails (status 7)
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "false", output: "exit status 1" })
+      })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    // turnCompleteCandidate is true (valid terminal step), but isConclusiveTurnEnd must be false
+    // so agy-acp does not bypass the settle/marker wait and cut off subsequent assistant recovery text.
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+
+    // 2. Cancelled tool step (status 6)
+    const db2 = createConversationDb(dir, "conv-tool-cancelled");
+    insertStep(db2, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run another command" })
+    });
+    insertStep(db2, {
+      idx: 2,
+      stepType: 21,
+      status: 6,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "cat", output: "cancelled by user" })
+      })
+    });
+    const poller2 = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-cancelled",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller2.poll()).toHaveLength(1);
+    expect(poller2.turnCompleteCandidate).toBe(true);
+    expect(poller2.isConclusiveTurnEnd).toBe(false);
+
+    // When assistant adds recovery text, isConclusiveTurnEnd becomes true
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "The command failed with exit status 1. Let me try an alternative." })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    // 3. Model provider error wrapper (stepType 17, status 7) is also conclusive
+    const db3 = createConversationDb(dir, "conv-model-error-conclusive");
+    insertStep(db3, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Trigger model error" })
+    });
+    insertStep(db3, {
+      idx: 2,
+      stepType: 17,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "Rate limit exceeded",
+          userMessage: "Rate limit exceeded",
+          responseJson: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", details: [{ reason: "QUOTA_EXHAUSTED" }] } })
+        })
+      })
+    });
+    const poller3 = new StreamPoller({
+      dir,
+      conversationId: "conv-model-error-conclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller3.poll()).toHaveLength(1);
+    expect(poller3.turnCompleteCandidate).toBe(true);
+    expect(poller3.isConclusiveTurnEnd).toBe(true);
+
+    poller.close();
+    poller2.close();
+    poller3.close();
+    db.close();
+    db2.close();
+    db3.close();
   });
 
   it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {

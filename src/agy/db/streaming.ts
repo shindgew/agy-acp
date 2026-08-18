@@ -292,7 +292,7 @@ export class StreamPoller {
    * same data_version as that intermediate tool and look like turn end.
    */
   get isConclusiveTurnEnd(): boolean {
-    if (!this._latestStepTerminal || this._latestStepStatus === null) {
+    if (!this._latestStepTerminal || this._latestStepStatus === null || this._latestStepType === null) {
       return false;
     }
     // If a background completion wake has arrived but no follow-up assistant response
@@ -301,13 +301,13 @@ export class StreamPoller {
     if (this._latestSystemMessageStepIdx > (latestMeaningful?.idx ?? -1)) {
       return false;
     }
-    // Cancelled/failed terminal rows (notably denied commands) end the turn
-    // with no trailing agent text and no further tool runs.
-    if (this._latestStepStatus === 6 || this._latestStepStatus === 7) return true;
     // Model provider errors end the turn conclusively.
     if (this._latestStepType === 17 || (this._latestStepStatus === 3 && this._lastObservedRows?.some((r) => r.stepPayload?.modelProviderError))) return true;
-    // Completed agent text (stepType 15, status 3) is the normal conclusive turn ending.
-    return this._latestStepStatus === 3 && this._latestStepType === 15;
+    // Completed agent text (stepType 15) is the normal conclusive turn ending.
+    // Tool steps (status 3/6/7) are turn-complete candidates but must not bypass
+    // the idle marker / quiescence wait, allowing agy to emit trailing error
+    // commentary or recovery explanations after failed (7) or cancelled (6) tools.
+    return this._latestStepType === 15 && isTerminalStepStatus(this._latestStepStatus);
   }
 
   /** Increments whenever the observed rows (including growing in-place rows) change. */
