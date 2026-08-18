@@ -97,13 +97,24 @@ import { handleSetConfigOptionV1, handleSetConfigOptionV2 } from "./session/set-
 import {
   buildSession,
   createSession,
+  forkSession,
   registerSession,
   reloadSession,
   replayConversation,
   persistSession,
+  KeyedAsyncLock,
   type SessionBuildDeps
 } from "./session/setup.js";
 import { deferAfterResponse, handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
+import {
+  handleForkSessionV1,
+  handleForkSessionV2,
+  type ForkSessionDeps,
+  type V1ForkSessionRequest,
+  type V1ForkSessionResponse,
+  type V2ForkSessionRequest,
+  type V2ForkSessionResponse
+} from "./session/fork.js";
 import { handleLoadSession } from "./session/load.js";
 import { handleResumeSessionV1, handleResumeSessionV2 } from "./session/resume.js";
 import { handleSetSessionMode } from "./session/set-mode.js";
@@ -192,6 +203,7 @@ export class AcpAgent {
   readonly #argv: string[];
   readonly #backend: AgyCliBackend;
   readonly #sessions = new Map<string, SessionState>();
+  readonly #setupLocks = new KeyedAsyncLock();
   readonly #store: SessionStore;
   readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
   readonly #modelCacheFile: string;
@@ -350,6 +362,27 @@ export class AcpAgent {
   newSessionV2(params: V2NewSessionRequest, client?: V2AgentContext): Promise<V2NewSessionResponse> {
     return handleNewSessionV2(params, client, {
       ...this.newSessionDeps(),
+      notifyAvailableCommandsV2
+    });
+  }
+
+  private forkSessionDeps(): ForkSessionDeps {
+    return {
+      requireAuthenticated: (cwd) => this.requireAuthenticated(cwd),
+      forkSession: (parentSessionId, cwd, dirs) => this.forkSession(parentSessionId, cwd, dirs)
+    };
+  }
+
+  forkSessionV1(params: V1ForkSessionRequest, client?: V1AgentContext): Promise<V1ForkSessionResponse> {
+    return handleForkSessionV1(params, client, {
+      ...this.forkSessionDeps(),
+      notifyAvailableCommandsV1
+    });
+  }
+
+  forkSessionV2(params: V2ForkSessionRequest, client?: V2AgentContext): Promise<V2ForkSessionResponse> {
+    return handleForkSessionV2(params, client, {
+      ...this.forkSessionDeps(),
       notifyAvailableCommandsV2
     });
   }
@@ -711,9 +744,27 @@ export class AcpAgent {
       ...this.sessionBuildDeps(),
       store: this.#store,
       sessions: this.#sessions,
-      maxActiveSessions: this.#maxActiveSessions
+      maxActiveSessions: this.#maxActiveSessions,
+      setupLocks: this.#setupLocks
     });
     this.reconcileSessionCatalog(result.session);
+    return result;
+  }
+
+  private async forkSession(
+    parentSessionId: string,
+    requestedCwd: string | undefined,
+    requestedDirs: string[] | undefined
+  ): Promise<{ childSession: SessionState; cwd: string; childSessionId: string }> {
+    const result = await forkSession(parentSessionId, requestedCwd, requestedDirs, {
+      ...this.sessionBuildDeps(),
+      store: this.#store,
+      sessions: this.#sessions,
+      maxActiveSessions: this.#maxActiveSessions,
+      persistSession: (sessionId, session) => this.persistSession(sessionId, session),
+      setupLocks: this.#setupLocks
+    });
+    this.reconcileSessionCatalog(result.childSession);
     return result;
   }
 
@@ -759,6 +810,7 @@ export function createAcpApp(options: AcpAgentOptions | AcpAgent = {}): V1AgentA
     .onRequest(v1.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
     .onRequest(v1.methods.agent.session.load, (ctx) => agent.loadSession(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.resume, (ctx) => agent.resumeSessionV1(ctx.params, ctx.client))
+    .onRequest(v1.methods.agent.session.fork, (ctx) => agent.forkSessionV1(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.setMode, (ctx) => agent.setSessionMode(ctx.params, ctx.client))
     .onRequest(v1.methods.agent.session.setConfigOption, (ctx) =>
       agent.setConfigOptionV1(ctx.params, ctx.client)
@@ -783,6 +835,7 @@ export function createAcpV2App(options: AcpAgentOptions | AcpAgent = {}): V2Agen
     .onRequest(v2.methods.agent.session.new, (ctx) => agent.newSessionV2(ctx.params, ctx.client))
     .onRequest(v2.methods.agent.session.list, (ctx) => agent.listSessions(ctx.params))
     .onRequest(v2.methods.agent.session.resume, (ctx) => agent.resumeSessionV2(ctx.params, ctx.client))
+    .onRequest(v2.methods.agent.session.fork, (ctx) => agent.forkSessionV2(ctx.params, ctx.client))
     .onRequest(v2.methods.agent.session.setConfigOption, (ctx) => agent.setConfigOptionV2(ctx.params))
     .onRequest(v2.methods.agent.session.prompt, (ctx) => agent.promptV2(ctx.params, ctx.client))
     .onRequest(v2.methods.agent.session.close, (ctx) => agent.closeSession(ctx.params))

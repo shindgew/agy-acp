@@ -8,9 +8,9 @@ export function createConversationDb(dir: string, id: string): Database.Database
   fs.mkdirSync(dir, { recursive: true });
   const db = new Database(path.join(dir, `${id}.db`));
   db.exec(
-    "CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, " +
+    "CREATE TABLE IF NOT EXISTS steps (idx INTEGER PRIMARY KEY, step_type INTEGER, status INTEGER, " +
       "step_payload BLOB, error_details BLOB, permissions BLOB, task_details BLOB);\n" +
-    "CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);"
+    "CREATE TABLE IF NOT EXISTS gen_metadata (idx INTEGER PRIMARY KEY, data BLOB);"
   );
   return db;
 }
