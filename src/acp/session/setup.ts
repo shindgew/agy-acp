@@ -10,7 +10,7 @@ import {
   type AgyCliBackend,
   type AgyCliConfig
 } from "../../agy/cli.js";
-import { forkConversation } from "../../agy/db/fork.js";
+import { discardForkedConversation, forkConversation } from "../../agy/db/fork.js";
 import type { ReplayCache } from "../../agy/db/replay.js";
 import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
@@ -193,38 +193,55 @@ export async function forkSession(
       const childSessionId = randomUUID();
 
       let childConversationId: string | null = null;
+      let convDir: string | undefined;
       let childLastStepIdx = parentStored.lastStepIdx;
+      let childSession: SessionState | undefined;
+      let registered = false;
 
-      if (parentStored.conversationId) {
-        childConversationId = randomUUID();
-        const convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
-        const forked = await forkConversation(convDir, parentStored.conversationId, childConversationId);
-        // Bind the child cursor to the copied snapshot so inherited rows cannot
-        // be emitted as the child's first-turn output. agy resumes via
-        // `--conversation <id>` and StreamPoller emits idx > lastStepIdx.
-        childLastStepIdx = Math.max(parentStored.lastStepIdx, forked.maxStepIdx);
+      try {
+        if (parentStored.conversationId) {
+          childConversationId = randomUUID();
+          convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
+          const forked = await forkConversation(convDir, parentStored.conversationId, childConversationId);
+          // Bind the child cursor to the copied snapshot so inherited rows cannot
+          // be emitted as the child's first-turn output. agy resumes via
+          // `--conversation <id>` and StreamPoller emits idx > lastStepIdx.
+          childLastStepIdx = Math.max(parentStored.lastStepIdx, forked.maxStepIdx);
+          claim?.throwIfAborted();
+        }
+
+        const childStored: StoredSession = {
+          cwd,
+          additionalDirectories,
+          conversationId: childConversationId,
+          lastStepIdx: childLastStepIdx,
+          model: parentStored.model,
+          reasoningEffort: parentStored.reasoningEffort,
+          mode: parentStored.mode,
+          v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
+          updatedAt: new Date().toISOString()
+        };
+
+        childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
         claim?.throwIfAborted();
+        childSession.sessionId = childSessionId;
+        await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
+        registered = true;
+        await deps.persistSession(childSessionId, childSession);
+
+        return { childSession, cwd, childSessionId };
+      } finally {
+        if (!registered) {
+          if (childSession) {
+            childSession.closed = true;
+            turnsOf(childSession).close();
+            await childSession.agy.close().catch(() => {});
+          }
+          if (childConversationId && convDir) {
+            discardForkedConversation(convDir, childConversationId);
+          }
+        }
       }
-
-      const childStored: StoredSession = {
-        cwd,
-        additionalDirectories,
-        conversationId: childConversationId,
-        lastStepIdx: childLastStepIdx,
-        model: parentStored.model,
-        reasoningEffort: parentStored.reasoningEffort,
-        mode: parentStored.mode,
-        v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
-        updatedAt: new Date().toISOString()
-      };
-
-      const childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
-      claim?.throwIfAborted();
-      childSession.sessionId = childSessionId;
-      await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
-      await deps.persistSession(childSessionId, childSession);
-
-      return { childSession, cwd, childSessionId };
     } finally {
       if (activeParent && claim) {
         turnsOf(activeParent).release(claim);

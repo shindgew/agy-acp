@@ -12,9 +12,11 @@ import {
   createAcpApp,
   createAcpV2App
 } from "../src/agent.js";
-import { forkConversation } from "../src/agy/db/fork.js";
+import { discardForkedConversation, forkConversation } from "../src/agy/db/fork.js";
+import { forkSession } from "../src/acp/session/setup.js";
 import { SessionStore } from "../src/acp/session/store.js";
 import { KeyedAsyncLock } from "../src/acp/session/setup-lock.js";
+import type { AgyCliBackend } from "../src/agy/cli.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import * as installer from "../src/agy/installer.js";
@@ -196,6 +198,85 @@ describe("forkConversation", () => {
       await expect(
         forkConversation(path.join(tmpDir, "conv"), "non-existent-src", "target-id", path.join(tmpDir, "brain"))
       ).rejects.toThrow("Source conversation database not found: non-existent-src");
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("discardForkedConversation removes dest db and brain artifacts", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-test-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    fs.mkdirSync(path.join(brainDir, "child-id"), { recursive: true });
+    fs.writeFileSync(path.join(brainDir, "child-id", "plan.md"), "x");
+    createConversationDb(convDir, "child-id").close();
+    try {
+      discardForkedConversation(convDir, "child-id", brainDir);
+      expect(fs.existsSync(path.join(convDir, "child-id.db"))).toBe(false);
+      expect(fs.existsSync(path.join(brainDir, "child-id"))).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("forkSession artifact cleanup", () => {
+  it("discards copied conversation artifacts if child setup fails after snapshot", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-cleanup-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(brainDir, { recursive: true });
+
+    const srcId = "src-cleanup";
+    const srcDb = createConversationDb(convDir, srcId);
+    insertStep(srcDb, {
+      idx: 0,
+      stepType: 1,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+    });
+    srcDb.close();
+    fs.mkdirSync(path.join(brainDir, srcId), { recursive: true });
+    fs.writeFileSync(path.join(brainDir, srcId, "plan.md"), "# plan");
+
+    const parentId = "parent-cleanup";
+    const store = new SessionStore(stateDir);
+    await store.persist(parentId, {
+      cwd: "/workspace",
+      additionalDirectories: [],
+      conversationId: srcId,
+      lastStepIdx: 0,
+      model: "gemini-2.5-flash",
+      reasoningEffort: "",
+      v2UserMessageIdsByStep: {},
+      updatedAt: new Date().toISOString()
+    });
+
+    try {
+      await expect(
+        forkSession(parentId, "/workspace", [], {
+          env: process.env,
+          argv: ["--no-interactive-permissions"],
+          backend: { startSession: async () => {
+            throw new Error("start failed");
+          } } as unknown as AgyCliBackend,
+          getModelOptions: async () => {
+            throw new Error("catalog failed");
+          },
+          conversationsDir: convDir,
+          store,
+          sessions: new Map(),
+          maxActiveSessions: 8,
+          persistSession: async () => {},
+          setupLocks: new KeyedAsyncLock()
+        })
+      ).rejects.toThrow("catalog failed");
+
+      const leftoverDbs = fs.readdirSync(convDir).filter((name) => name.endsWith(".db"));
+      expect(leftoverDbs).toEqual([`${srcId}.db`]);
+      expect(fs.readdirSync(brainDir)).toEqual([srcId]);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }

@@ -95,6 +95,24 @@ export async function forkConversation(
   return { maxStepIdx };
 }
 
+/** Remove a forked conversation DB (and brain dir) that never became a live session. */
+export function discardForkedConversation(
+  conversationsDir: string,
+  conversationId: string,
+  brainBaseDir?: string
+): void {
+  removeConversationFiles(conversationDbPath(conversationsDir, conversationId));
+  const destBrainDir = path.join(
+    brainBaseDir ?? path.join(path.dirname(conversationsDir), "brain"),
+    conversationId
+  );
+  try {
+    fs.rmSync(destBrainDir, { recursive: true, force: true });
+  } catch {
+    // Destination brain may not have been copied.
+  }
+}
+
 function removeConversationFiles(dbPath: string): void {
   for (const suffix of ["", "-wal", "-shm", "-journal"]) {
     try {
