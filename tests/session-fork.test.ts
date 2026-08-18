@@ -157,12 +157,12 @@ describe("forkConversation", () => {
     }
   });
 
-  it("handles non-existent source conversation db gracefully", async () => {
+  it("rejects fork when source conversation db does not exist", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-test-"));
     try {
       await expect(
         forkConversation(path.join(tmpDir, "conv"), "non-existent-src", "target-id", path.join(tmpDir, "brain"))
-      ).resolves.toBeUndefined();
+      ).rejects.toThrow("Source conversation database not found: non-existent-src");
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -327,6 +327,66 @@ describe("ACP v1 session/fork", () => {
       installSpy.mockRestore();
       connection.close();
       fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects fork when parent session turn is active", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-busy-"));
+
+    const hangingProcess = new EventEmitter() as any;
+    hangingProcess.stdin = new Writable({ write: (_c, _e, cb) => cb() });
+    hangingProcess.stdout = new Readable({ read() {} });
+    hangingProcess.stderr = new Readable({ read() {} });
+    hangingProcess.exitCode = 0;
+    hangingProcess.pid = 123;
+    hangingProcess.kill = () => true;
+
+    const spawnProcess = ((command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS]);
+      return hangingProcess;
+    }) as unknown as SpawnFactory;
+
+    const agent = new AcpAgent({
+      stateDir: tmpStateDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const parent = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/parent/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+
+      // Start prompt turn without awaiting completion
+      const promptPromise = connection.agent.request(methods.agent.session.prompt, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: "text", text: "run slow task" }]
+      });
+
+      // Attempt to fork parent session while turn is active
+      await expect(
+        connection.agent.request(methods.agent.session.fork, {
+          sessionId: parent.sessionId,
+          cwd: "/forked/workspace"
+        })
+      ).rejects.toThrow();
+
+      // Terminate hanging turn
+      hangingProcess.emit("exit", 0, null);
+      await promptPromise.catch(() => {});
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpStateDir, { recursive: true, force: true });
     }
   });
 

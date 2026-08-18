@@ -20,7 +20,7 @@ export async function forkConversation(
   const destDbPath = conversationDbPath(conversationsDir, targetConversationId);
 
   if (!fs.existsSync(srcDbPath)) {
-    return;
+    throw new Error(`Source conversation database not found: ${sourceConversationId}`);
   }
 
   await fs.promises.mkdir(conversationsDir, { recursive: true });
