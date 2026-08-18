@@ -334,7 +334,10 @@ export class StreamPoller {
       if (row.task?.taskId && !this._launchedTaskIdxs.has(row.task.taskId)) {
         this._launchedTaskIdxs.set(row.task.taskId, row.idx);
       }
-      const text = row.stepPayload.agentText?.text ?? "";
+      const notification = row.stepPayload.taskNotification;
+      const text =
+        row.stepPayload.agentText?.text ??
+        (notification ? `${notification.message} ${notification.details ?? ""}`.trim() : "");
       // Defer completion tracking until a system message is terminal so a
       // still-streaming system-message envelope cannot close the wait early.
       // Generic stepType 101 turn-end markers without a system message payload
@@ -371,10 +374,15 @@ export class StreamPoller {
             matchedTask = true;
           }
         }
+        // If the notification/message explicitly referenced an external or older task not
+        // in launchedBefore, do not let the close-all fallback retire currently running tasks.
+        const referencedTaskOrSender = extractTaskOrSenderId(text);
+        const hasUnmatchedExplicitTask = referencedTaskOrSender !== null && !matchedTask;
+
         // Lifecycle/system wake without an embedded task id (common for system message
         // wakes): close every still-pending launch so the turn cannot hang
         // forever waiting for a match that never arrives.
-        if (!matchedTask) {
+        if (!matchedTask && !hasUnmatchedExplicitTask) {
           for (const taskId of launchedBefore) {
             this._completedTaskIds.add(taskId);
           }
@@ -549,4 +557,25 @@ function textMentionsTaskId(text: string, taskId: string): boolean {
     from = index + 1;
   }
   return false;
+}
+
+/**
+ * Extracts explicit task or sender ID token from a notification or system message text.
+ * Returns null if the text is genuinely ID-less (e.g. sender=system or generic wake).
+ */
+function extractTaskOrSenderId(text: string): string | null {
+  if (!text) return null;
+  const taskIdMatch = text.match(/Task id ["'](?:[^"'/]+\/)?([^"']+)["']/i);
+  if (taskIdMatch && taskIdMatch[1]) {
+    return taskIdMatch[1];
+  }
+  const senderMatch = text.match(/sender=(?:[^\s/]+\/)?([^\s]+)/i);
+  if (senderMatch && senderMatch[1] && senderMatch[1].toLowerCase() !== "system") {
+    return senderMatch[1];
+  }
+  const taskTokenMatch = text.match(/\b(task-\d+)\b/i);
+  if (taskTokenMatch && taskTokenMatch[1]) {
+    return taskTokenMatch[1];
+  }
+  return null;
 }
