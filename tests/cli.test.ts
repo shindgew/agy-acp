@@ -984,6 +984,48 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not prematurely complete turn on empty agentText placeholder following tool run when PTY redraws (gh#114)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-placeholder-tool-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "placeholder-tool");
+      // Tool execution finishes
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git log -n 6 --oneline", output: "abc1234 Initial commit" }) })
+      });
+      // Empty agent text placeholder written while model prepares generation
+      insertStep(dbHandle, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "" })
+      });
+      // PTY emits prompt redraw / idle marker during the placeholder window
+      setTimeout(() => pty.emitData("\n? for shortcuts\n"), 40);
+
+      // Model takes 350ms to finish generating actual assistant text
+      setTimeout(() => {
+        updateStep(dbHandle, 2, {
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "Found recent commit abc1234." })
+        });
+        dbHandle.close();
+        pty.emitData("\n? for shortcuts\n");
+      }, 350);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("git log", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Found recent commit abc1234"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("detects alternate permission markers split across PTY chunks via multi-marker prefix tails", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-chunked-marker-"));
     const pty = new FakePty(() => {
