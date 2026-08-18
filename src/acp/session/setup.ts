@@ -196,7 +196,7 @@ export async function forkSession(
       let convDir: string | undefined;
       let childLastStepIdx = parentStored.lastStepIdx;
       let childSession: SessionState | undefined;
-      let registered = false;
+      let setupComplete = false;
 
       try {
         if (parentStored.conversationId) {
@@ -226,12 +226,15 @@ export async function forkSession(
         claim?.throwIfAborted();
         childSession.sessionId = childSessionId;
         await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
-        registered = true;
         await deps.persistSession(childSessionId, childSession);
+        setupComplete = true;
 
         return { childSession, cwd, childSessionId };
       } finally {
-        if (!registered) {
+        if (!setupComplete) {
+          if (deps.sessions.get(childSessionId) === childSession) {
+            deps.sessions.delete(childSessionId);
+          }
           if (childSession) {
             childSession.closed = true;
             turnsOf(childSession).close();

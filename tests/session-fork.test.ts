@@ -281,6 +281,78 @@ describe("forkSession artifact cleanup", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("rolls back registered child session and cleans up artifacts if persistSession fails", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-persist-fail-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(brainDir, { recursive: true });
+
+    const srcId = "src-persist-fail";
+    const srcDb = createConversationDb(convDir, srcId);
+    insertStep(srcDb, {
+      idx: 0,
+      stepType: 1,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+    });
+    srcDb.close();
+    fs.mkdirSync(path.join(brainDir, srcId), { recursive: true });
+    fs.writeFileSync(path.join(brainDir, srcId, "plan.md"), "# plan");
+
+    const parentId = "parent-persist-fail";
+    const store = new SessionStore(stateDir);
+    await store.persist(parentId, {
+      cwd: "/workspace",
+      additionalDirectories: [],
+      conversationId: srcId,
+      lastStepIdx: 0,
+      model: "gemini-2.5-flash",
+      reasoningEffort: "",
+      v2UserMessageIdsByStep: {},
+      updatedAt: new Date().toISOString()
+    });
+
+    const activeSessions = new Map();
+    try {
+      await expect(
+        forkSession(parentId, "/workspace", [], {
+          env: process.env,
+          argv: ["--no-interactive-permissions"],
+          backend: {
+            startSession: async () => ({
+              restoreConversation: () => {},
+              setModel: () => {},
+              setEffort: () => {},
+              setMode: () => {},
+              close: async () => {}
+            })
+          } as unknown as AgyCliBackend,
+          getModelOptions: async () => ["gemini-2.5-flash"],
+          conversationsDir: convDir,
+          store,
+          sessions: activeSessions,
+          maxActiveSessions: 8,
+          persistSession: async () => {
+            throw new Error("disk full on persist");
+          },
+          setupLocks: new KeyedAsyncLock()
+        })
+      ).rejects.toThrow("disk full on persist");
+
+      // Child session must not remain in the active sessions map
+      expect(activeSessions.size).toBe(0);
+
+      // Copied conversation db and brain directory must be removed
+      const leftoverDbs = fs.readdirSync(convDir).filter((name) => name.endsWith(".db"));
+      expect(leftoverDbs).toEqual([`${srcId}.db`]);
+      expect(fs.readdirSync(brainDir)).toEqual([srcId]);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("KeyedAsyncLock", () => {
