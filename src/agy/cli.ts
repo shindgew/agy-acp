@@ -44,13 +44,8 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
-const PERMISSION_REDRAW_TIMEOUT_MS = 2_500;
+const PERMISSION_KEY_DELAY_MS = 50;
 const QUIESCENT_SETTLE_MS = 300;
-
-const ANSI_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1B\\))/g;
-export function stripAnsi(text: string): string {
-  return text.replace(ANSI_REGEX, "");
-}
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -614,7 +609,7 @@ export class AgyCliSession {
                   this.#ptyOutput
                 );
               }
-              if (!await this.writePermissionKeys(keys, deadline)) break;
+              if (!await this.writePermissionKeys(keys)) break;
             }
             gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
             continue;
@@ -1147,55 +1142,21 @@ export class AgyCliSession {
     this.#ptyPermissionRenderTimer = undefined;
   }
 
-  private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
-    if (this.#cancelled) return false;
-
-    // Allow in-flight panel renders to settle before capturing marker count
-    while (this.#ptyPermissionRenderTimer !== undefined && !this.#cancelled) {
-      await sleep(10);
-    }
+  private async writePermissionKeys(keys: string): Promise<boolean> {
     if (this.#cancelled) return false;
 
     const down = "\x1b[B";
     let offset = 0;
     while (keys.startsWith(down, offset)) {
-      const renderCount = this.#ptyPermissionMarkerCount;
       this.#pty?.write(down);
-      if (!await this.waitForPermissionRenderAfter(renderCount, deadline)) {
-        if (this.#cancelled) return false;
-        throw new AgyCliError(
-          "agy permission panel did not redraw after menu navigation",
-          [this.config.agyPath],
-          null,
-          this.#ptyOutput
-        );
-      }
       offset += down.length;
+      if (offset < keys.length) {
+        await sleep(PERMISSION_KEY_DELAY_MS);
+        if (this.#cancelled) return false;
+      }
     }
     this.#pty?.write(keys.slice(offset));
     return true;
-  }
-
-  private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
-    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
-    while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
-      if (this.#ptyPermissionRenderTimer !== undefined && this.#ptyPermissionRender.length > 0) {
-        const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-        const cleanOutput = stripAnsi(rawOutput);
-        if (PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker))) {
-          if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
-          this.flushPermissionRender();
-          if (this.#ptyPermissionMarkerCount > renderCount) break;
-        }
-      }
-      await sleep(5);
-    }
-    if (this.#cancelled) return false;
-    if (this.#ptyPermissionRenderTimer !== undefined) {
-      clearTimeout(this.#ptyPermissionRenderTimer);
-      this.flushPermissionRender();
-    }
-    return this.#ptyPermissionMarkerCount > renderCount;
   }
 
   async close(): Promise<void> {

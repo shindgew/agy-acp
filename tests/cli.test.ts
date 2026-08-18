@@ -1708,6 +1708,39 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  for (const [choice, expectedWrites] of [
+    ["agy-allow-conversation", ["\x1b[B", "\r"]],
+    ["agy-allow-settings", ["\x1b[B", "\x1b[B", "\r"]],
+    ["agy-reject-once", ["\x1b[B", "\x1b[B", "\x1b[B", "\r"]]
+  ] as const) {
+    it(`sends ${choice} without a visible PTY panel and confirms via SQLite`, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-no-panel-"));
+      const pty = new FakePty(() => {
+        const db = createConversationDb(dir, "no-panel-choice");
+        insertStep(db, pendingToolRow("run_command"));
+        db.close();
+      });
+      pty.emitPermissionPanelOnStart = false;
+      pty.emitArrowRedraw = false;
+      const session = interactiveSession(dir, pty);
+      let calls = 0;
+      const result = session.prompt("go", async () => {}, async () => {
+        calls++;
+        const db = new (await import("better-sqlite3")).default(path.join(dir, "no-panel-choice.db"));
+        updateStep(db, 1, { status: 3 });
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        db.close();
+        return choice;
+      });
+
+      expect((await result).stopReason).toBe("end_turn");
+      expect(calls).toBe(1);
+      expect(pty.writes).toEqual([...expectedWrites]);
+      await session.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  }
+
   it("bridges manage_task status-9 interaction through full PTY turn loop", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const manageInput = JSON.stringify({ Action: "send_input", TaskId: "task-7", Input: "yes\n" });
@@ -2223,17 +2256,18 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("cancels cleanly while waiting for an arrow-key panel redraw", async () => {
+  it("cancels cleanly while sending a multi-key permission choice", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
-      const db = createConversationDb(dir, "cancel-panel-redraw");
+      const db = createConversationDb(dir, "cancel-permission-keys");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
     });
+    pty.emitPermissionPanelOnStart = false;
     pty.emitArrowRedraw = false;
     const session = interactiveSession(dir, pty);
     const pending = session.prompt("go", async () => {}, async () => {
-      setTimeout(() => void session.cancel(), 50);
+      setTimeout(() => void session.cancel(), 20);
       return "agy-allow-conversation";
     });
 
