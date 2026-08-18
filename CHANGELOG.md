@@ -9,6 +9,10 @@ for draft v2 may still change before ACP v2 stabilizes.
 
 ## [0.5.2] - Unreleased
 
+### Added
+
+- Support `session/fork` across ACP v1 and v2: duplicate conversation history using atomic SQLite backup, clone brain directory artifacts, rebind trajectory metadata, and inherit active configuration options and working directory. (#58)
+
 ### Fixed
 
 - Fix interactive turn completion hanging indefinitely until the 5-minute `printTimeout` expires when `agy` completes the turn, adding a 300ms quiescence settle window fallback and ANSI-resilient permission panel detection. (#113)
