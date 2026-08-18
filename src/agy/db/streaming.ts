@@ -298,11 +298,8 @@ export class StreamPoller {
     }
     // If a background completion wake has arrived but no follow-up assistant response
     // has been produced beyond that wake, do not treat the prior assistant response as conclusive.
+    if (this.hasNewerWake()) return false;
     const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
-    const latestWakeIdx = Math.max(this._latestSystemMessageStepIdx, this._latestTaskCompletionStepIdx);
-    if (latestWakeIdx >= (latestMeaningful?.idx ?? -1) && latestWakeIdx >= 0) {
-      return false;
-    }
     // Model provider errors end the turn conclusively.
     if (latestMeaningful?.stepPayload?.modelProviderError && isTerminalStepStatus(this._latestStepStatus)) {
       return true;
@@ -312,6 +309,27 @@ export class StreamPoller {
     // the idle marker / quiescence wait, allowing agy to emit trailing error
     // commentary or recovery explanations after failed (7) or cancelled (6) tools.
     return this._latestStepType === 15 && isTerminalStepStatus(this._latestStepStatus);
+  }
+
+  /**
+   * Successful terminal tool with no trailing message and no pending follow-up.
+   * Failed/cancelled tools and task-completion wakes stay open for recovery text.
+   */
+  get isSuccessfulToolOnlyEnd(): boolean {
+    if (!this.turnCompleteCandidate) return false;
+    if (this.hasActiveBackgroundTasks) return false;
+    if (this._latestStepStatus !== 3 || this._latestStepType === null || this._latestStepType === 15) {
+      return false;
+    }
+    if (this.hasNewerWake()) return false;
+    const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
+    return !latestMeaningful?.stepPayload?.modelProviderError;
+  }
+
+  private hasNewerWake(): boolean {
+    const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
+    const latestWakeIdx = Math.max(this._latestSystemMessageStepIdx, this._latestTaskCompletionStepIdx);
+    return latestWakeIdx >= (latestMeaningful?.idx ?? -1) && latestWakeIdx >= 0;
   }
 
   /** Increments whenever the observed rows (including growing in-place rows) change. */

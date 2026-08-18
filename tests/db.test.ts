@@ -2870,6 +2870,7 @@ describe("StreamPoller", () => {
     // so agy-acp does not bypass the settle/marker wait and cut off subsequent assistant recovery text.
     expect(poller.turnCompleteCandidate).toBe(true);
     expect(poller.isConclusiveTurnEnd).toBe(false);
+    expect(poller.isSuccessfulToolOnlyEnd).toBe(false);
 
     // 2. Cancelled tool step (status 6)
     const db2 = createConversationDb(dir, "conv-tool-cancelled");
@@ -2897,6 +2898,7 @@ describe("StreamPoller", () => {
     expect(poller2.poll()).toHaveLength(1);
     expect(poller2.turnCompleteCandidate).toBe(true);
     expect(poller2.isConclusiveTurnEnd).toBe(false);
+    expect(poller2.isSuccessfulToolOnlyEnd).toBe(false);
 
     // When assistant adds recovery text, isConclusiveTurnEnd becomes true
     insertStep(db, {
@@ -2968,6 +2970,7 @@ describe("StreamPoller", () => {
     expect(poller4.poll()).toHaveLength(1);
     expect(poller4.turnCompleteCandidate).toBe(true);
     expect(poller4.isConclusiveTurnEnd).toBe(false);
+    expect(poller4.isSuccessfulToolOnlyEnd).toBe(true);
 
     // 5. Earlier model error in conversation does not make subsequent intermediate tool steps conclusive
     insertStep(db3, {
@@ -2987,6 +2990,7 @@ describe("StreamPoller", () => {
     expect(poller3.poll()).toHaveLength(1);
     expect(poller3.turnCompleteCandidate).toBe(true);
     expect(poller3.isConclusiveTurnEnd).toBe(false);
+    expect(poller3.isSuccessfulToolOnlyEnd).toBe(true);
 
     poller.close();
     poller2.close();
@@ -2996,6 +3000,37 @@ describe("StreamPoller", () => {
     db2.close();
     db3.close();
     db4.close();
+  });
+
+  it("treats a successful terminal tool with no follow-up as a tool-only end", () => {
+    const db = createConversationDb(dir, "conv-tool-only-end");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "echo hello" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "echo hello", output: "hello\n" })
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-only-end",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+    expect(poller.isSuccessfulToolOnlyEnd).toBe(true);
+    poller.close();
+    db.close();
   });
 
   it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {
