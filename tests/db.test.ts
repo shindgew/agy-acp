@@ -4355,10 +4355,58 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     }
   });
 
-  it("identifies complete system message envelopes", () => {
+  it("identifies complete system message envelopes while preserving ordinary label-prefixed replies", () => {
+    // Tagged envelopes
     expect(isSystemMessage("<SYSTEM_MESSAGE>\nsender=system priority=low")).toBe(true);
     expect(isSystemMessage("<SYSTEM_MESSAGE>\n[Message] timestamp=123")).toBe(true);
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\nTask task-1 finished")).toBe(true);
+
+    // Untagged structured envelopes
+    expect(isSystemMessage('[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-48 priority=MESSAGE_PRIORITY_HIGH content=Task id "task-48" finished')).toBe(true);
+    expect(isSystemMessage('[Message] timestamp=2026-07-27T05:55:21Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents...')).toBe(true);
+
+    // Ordinary user/assistant text must NOT match
     expect(isSystemMessage("Regular text")).toBe(false);
+    expect(isSystemMessage("[Notice] Note that this file is read-only.")).toBe(false);
+    expect(isSystemMessage("[System] Architecture diagram is shown below:")).toBe(false);
+    expect(isSystemMessage("sender=user\nreceiver=agent")).toBe(false);
+    expect(isSystemMessage("[Message] from the user about something")).toBe(false);
+  });
+
+  it("emits ordinary label-prefixed replies ([Notice], [System], sender=) as regular text in Translator", () => {
+    const db = createConversationDb(dir, "conv-label-prefixed-text");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "[Notice] Please note that this repository requires Node >= 22."
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "sender=client\nreceiver=server\nport=8080"
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-label-prefixed-text")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(rows);
+
+    const texts = updates
+      .filter((u) => (u as any).sessionUpdate === "agent_message_chunk")
+      .map((u) => (u as any).content?.text);
+
+    const combinedText = texts.join("");
+    expect(combinedText).toContain("[Notice] Please note that this repository requires Node >= 22.");
+    expect(combinedText).toContain("sender=client\nreceiver=server\nport=8080");
   });
 });
 

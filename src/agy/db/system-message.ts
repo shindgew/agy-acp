@@ -8,7 +8,7 @@
  * (e.g. `<SYSTEM_MESSAGE>\n[Message]...` or `[Message] timestamp=... sender=...`).
  */
 export function isSystemMessage(text: string): boolean {
-  return /^\s*(?:<SYSTEM_MESSAGE>(?:\s*\n|\s*\r\n|\s)*(?:\[Message\]|\[Notice\]|\[System\]|sender=|content=|timestamp=|priority=|task|Task|\s*$)|\[Message\]\s*(?:timestamp=|sender=|priority=|content=)|\[Notice\]|\[System\]|sender=)/i.test(text);
+  return /^\s*(?:<SYSTEM_MESSAGE>(?:\s*\n|\s*\r\n|\s)*(?:\[Message\]|\[Notice\]|\[System\]|sender=|content=|timestamp=|priority=|task|Task|\s*$)|\[Message\]\s+timestamp=\S+\s+sender=)/i.test(text);
 }
 
 /**
