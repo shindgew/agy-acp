@@ -518,6 +518,9 @@ export class AgyCliSession {
           throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final turn completion was observed`, [this.config.agyPath], null, this.#ptyOutput);
         }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
+        if (updates.length > 0) {
+          lastActivityTime = Date.now();
+        }
         if (this.#cancelled) break;
         for (const [id, markerCount] of gateMarkerCounts) {
           if (this.#ptyPermissionMarkerCount <= markerCount) continue;
@@ -527,7 +530,9 @@ export class AgyCliSession {
           if (poller.requeuePending(id)) rearmedGateIds.add(id);
           gateMarkerCounts.delete(id);
         }
+        let hadInteraction = false;
         for (const interaction of poller.takePending()) {
+          hadInteraction = true;
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
           if (interaction.blocked) {
@@ -675,6 +680,9 @@ export class AgyCliSession {
               await observeReported(revertedContents(this.config.cwd, toolCall, restored));
             }
           }
+        }
+        if (hadInteraction) {
+          lastActivityTime = Date.now();
         }
         const hasQuiesced = (Date.now() - Math.max(lastActivityTime, this.#lastPtyActivityTime)) >= QUIESCENT_SETTLE_MS;
         const isIdleCandidate =
