@@ -433,6 +433,67 @@ describe("ACP v1 session/fork", () => {
     }
   });
 
+  it("rejects session replacement while turn or fork claim is active", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-replace-"));
+
+    const hangingProcess = new EventEmitter() as any;
+    hangingProcess.stdin = new Writable({ write: (_c, _e, cb) => cb() });
+    hangingProcess.stdout = new Readable({ read() {} });
+    hangingProcess.stderr = new Readable({ read() {} });
+    hangingProcess.exitCode = 0;
+    hangingProcess.pid = 123;
+    hangingProcess.kill = () => true;
+
+    const spawnProcess = ((command: string, args: string[]) => {
+      if (args[0] === "models") return new FakeProcess([TEST_MODELS]);
+      return hangingProcess;
+    }) as unknown as SpawnFactory;
+
+    const agent = new AcpAgent({
+      stateDir: tmpStateDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const session = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/parent/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+
+      // Start prompt turn to make session busy
+      const promptPromise = connection.agent.request(methods.agent.session.prompt, {
+        sessionId: session.sessionId,
+        prompt: [{ type: "text", text: "run slow task" }]
+      });
+
+      // Attempt to load/resume and replace the busy session
+      await expect(
+        connection.agent.request(methods.agent.session.load, {
+          sessionId: session.sessionId,
+          cwd: "/parent/workspace",
+          mcpServers: []
+        })
+      ).rejects.toThrow();
+
+      // Clean up hanging turn
+      hangingProcess.emit("exit", 0, null);
+      await promptPromise.catch(() => {});
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns an error when forking a non-existent session", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
     const connection = acpClient({ name: "test-client" }).connect(

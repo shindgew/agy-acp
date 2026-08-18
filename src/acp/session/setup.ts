@@ -80,6 +80,9 @@ export async function registerSession(
 ): Promise<void> {
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
+    if (sessionTurnBusy(replaced)) {
+      throw new Error(`Cannot replace session while a turn is active: ${sessionId}`);
+    }
     sessions.delete(sessionId);
     replaced.closed = true;
     turnsOf(replaced).close();
@@ -188,6 +191,7 @@ export async function forkSession(
       childConversationId = randomUUID();
       const convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
       await forkConversation(convDir, parentStored.conversationId, childConversationId);
+      claim?.throwIfAborted();
     }
 
     const childStored: StoredSession = {
@@ -203,6 +207,7 @@ export async function forkSession(
     };
 
     const childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
+    claim?.throwIfAborted();
     childSession.sessionId = childSessionId;
     await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
     await deps.persistSession(childSessionId, childSession);
