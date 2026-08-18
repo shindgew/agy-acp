@@ -71,10 +71,11 @@ export class SessionStore {
 
   /** Persist a session binding. Resolves once written (writes are serialized). */
   persist(sessionId: string, session: StoredSession): Promise<void> {
-    this.#writeChain = this.#writeChain.then(() => this.writeOne(sessionId, session)).catch((error) => {
+    const op = this.#writeChain.then(() => this.writeOne(sessionId, session));
+    this.#writeChain = op.catch((error) => {
       console.error(`[agy-acp] WARN: failed to persist session: ${(error as Error).message}`);
     });
-    return this.#writeChain;
+    return op;
   }
 
   /** Delete a persisted session binding. Resolves once written (writes are serialized). Returns true if deleted. */

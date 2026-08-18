@@ -44,7 +44,8 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
-const PERMISSION_REDRAW_TIMEOUT_MS = 500;
+const PERMISSION_KEY_DELAY_MS = 50;
+const QUIESCENT_SETTLE_MS = 300;
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -230,15 +231,11 @@ export class AgyCliSession {
   #pty: PtyProcess | undefined;
   #ptyExit: Promise<{ exitCode: number }> | undefined;
   #ptyOutput = "";
-  #ptyIdleMarkerCount = 0;
-  #ptyIdleMatchTail = "";
   #ptyPermissionMarkerCount = 0;
   #ptyPermissionRender = "";
   #ptyPermissionMarkerTail = "";
-  #ptyPermissionPanelVisible = false;
   #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #activeStreamPoller: StreamPoller | undefined;
-  #lastPtyIdleMarkerRevision: { count: number; databaseRevision: string } | null = null;
   #ptyConfig = "";
   #cancelled = false;
   #cancelTurn: (() => void) | undefined;
@@ -447,41 +444,17 @@ export class AgyCliSession {
     const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
       baseStepIdx: this.#lastStepIdx, baseGenMetadataIdx: this.#lastGenMetadataIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
     this.#activeStreamPoller = poller;
-    this.#lastPtyIdleMarkerRevision = null;
-    let freshPty = false;
     if (!this.#pty) {
       const [program, ...args] = this.interactiveCommandForPrompt(prompt);
       this.#pty = factory!.spawn(program, args, { ...this.spawnOptions(), cols: 120, rows: 40 });
-      freshPty = true;
       this.#ptyConfig = signature;
       this.#ptyOutput = "";
-      this.#ptyIdleMarkerCount = 0;
-      this.#ptyIdleMatchTail = "";
       this.#ptyPermissionMarkerCount = 0;
       this.#ptyPermissionRender = "";
       this.#ptyPermissionMarkerTail = "";
-      this.#ptyPermissionPanelVisible = false;
       const activePty = this.#pty;
       activePty.onData((data) => {
         if (this.#pty !== activePty) return;
-        const idleMarker = "for shortcuts";
-        const searchable = this.#ptyIdleMatchTail + data;
-        let offset = 0;
-        while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
-          this.#ptyIdleMarkerCount++;
-          const databaseRevision = this.#activeStreamPoller?.captureDatabaseRevision() ?? null;
-          this.#lastPtyIdleMarkerRevision = databaseRevision === null
-            ? null
-            : { count: this.#ptyIdleMarkerCount, databaseRevision };
-          this.#ptyPermissionPanelVisible = false;
-          offset += idleMarker.length;
-        }
-        this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
-
-        // Treat a transition into agy's permission panel as one occurrence.
-        // Arrow-key navigation redraws the same panel and must not re-arm the
-        // gate; consecutive identical gates transition through a non-panel
-        // render while the approved command segment runs.
         this.#ptyPermissionRender = (this.#ptyPermissionRender + data).slice(-16_384);
         if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
         this.#ptyPermissionRenderTimer = setTimeout(
@@ -512,12 +485,7 @@ export class AgyCliSession {
     let deadline = Date.now() + timeoutMs;
     let candidateRevision = -1;
     let seenRevision = -1;
-    // A newly spawned TUI first draws its initial idle prompt, then draws
-    // another when the submitted turn finishes. A reused TUI only owes the
-    // latter marker.
-    const startStepIdx = this.#lastStepIdx;
-    const initialIdleMarkerCount = this.#ptyIdleMarkerCount;
-    let requiredIdleMarkerCount = this.#ptyIdleMarkerCount + (freshPty ? 2 : 1);
+    let lastActivityTime = Date.now();
     let failed = false;
     try {
       while (true) {
@@ -527,20 +495,22 @@ export class AgyCliSession {
           seenRevision = poller.revision;
           candidateRevision = poller.turnCompleteCandidate ? poller.revision : -1;
           deadline = Date.now() + timeoutMs;
+          lastActivityTime = Date.now();
         } else if (!poller.turnCompleteCandidate) candidateRevision = -1;
+        if (updates.length > 0) {
+          lastActivityTime = Date.now();
+        }
         if (Date.now() >= deadline) {
-          // Enough idle markers: the TUI is idle; keep the PTY for reuse.
-          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount) break;
-          // Soft timeout: DB looks terminal but the required completion marker
-          // never arrived (e.g. intermediate terminal tool + long silence).
-          // Stop the PTY so the next client prompt cannot join a live turn.
-          if (poller.turnCompleteCandidate) {
+          if (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx) {
             await this.stopPty();
             break;
           }
-          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final turn completion was observed`, [this.config.agyPath], null, this.#ptyOutput);
         }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
+        if (updates.length > 0) {
+          lastActivityTime = Date.now();
+        }
         if (this.#cancelled) break;
         for (const [id, markerCount] of gateMarkerCounts) {
           if (this.#ptyPermissionMarkerCount <= markerCount) continue;
@@ -550,7 +520,9 @@ export class AgyCliSession {
           if (poller.requeuePending(id)) rearmedGateIds.add(id);
           gateMarkerCounts.delete(id);
         }
+        let hadInteraction = false;
         for (const interaction of poller.takePending()) {
+          hadInteraction = true;
           const toolCall = interaction.update;
           const id = String((toolCall as unknown as { toolCallId?: string }).toolCallId);
           if (interaction.blocked) {
@@ -596,16 +568,6 @@ export class AgyCliSession {
               }
             }
 
-            if (interaction.toolName !== "ask_question" && !await this.waitForPermissionPanel(deadline)) {
-              if (this.#cancelled) break;
-              throw new AgyCliError(
-                "agy permission panel was not observed before requesting permission",
-                [this.config.agyPath],
-                null,
-                this.#ptyOutput
-              );
-            }
-
             if (interaction.toolName === "ask_question") {
               const ask = parseAskQuestion(toolCall);
               const count = ask?.questions.length ?? 1;
@@ -647,12 +609,9 @@ export class AgyCliSession {
                   this.#ptyOutput
                 );
               }
-              if (!await this.writePermissionKeys(keys, deadline)) break;
+              if (!await this.writePermissionKeys(keys)) break;
             }
             gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
-            // An idle marker printed before the decision cannot mean that the
-            // approved/rejected command has finished.
-            requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
             continue;
           }
 
@@ -712,30 +671,16 @@ export class AgyCliSession {
             }
           }
         }
-        const idleMarkerRevision = this.currentIdleMarkerRevision();
-        const markersSinceTurnStart = idleMarkerRevision === null
-          ? 0
-          : idleMarkerRevision.count - initialIdleMarkerCount;
-        // A single post-start marker on a fresh PTY may be a delayed startup
-        // redraw that captured an intermediate terminal tool revision. Only
-        // accept that shortcut when the latest step is a conclusive ending
-        // (agent text or cancelled/failed), or when a later marker proves the
-        // post-turn idle redraw (markersSinceTurnStart >= 2).
-        const revisionShortcutSafe =
-          !freshPty ||
-          markersSinceTurnStart >= 2 ||
-          poller.isConclusiveTurnEnd;
-        const hasRevisionMatchedIdleMarker =
-          idleMarkerRevision !== null &&
-          markersSinceTurnStart >= 1 &&
-          revisionShortcutSafe &&
-          idleMarkerRevision.databaseRevision === poller.observedDatabaseRevision;
+        if (hadInteraction) {
+          lastActivityTime = Date.now();
+        }
+        const hasQuiesced = (Date.now() - lastActivityTime) >= QUIESCENT_SETTLE_MS;
         const isIdleCandidate =
-          (poller.turnCompleteCandidate &&
-           poller.lastUserStepIdx > startStepIdx &&
-           poller.lastStepIdx > poller.lastUserStepIdx &&
-           hasRevisionMatchedIdleMarker) ||
-          (candidateRevision === poller.revision && this.#ptyIdleMarkerCount >= requiredIdleMarkerCount);
+          poller.turnCompleteCandidate &&
+          poller.lastStepIdx > this.#lastStepIdx &&
+          candidateRevision === poller.revision &&
+          hasQuiesced &&
+          (poller.isConclusiveTurnEnd || poller.isSuccessfulToolOnlyEnd);
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
@@ -773,10 +718,6 @@ export class AgyCliSession {
       if (this.#activeStreamPoller === poller) this.#activeStreamPoller = undefined;
       if (this.#cancelled && !failed) await this.stopPty();
     }
-  }
-
-  private currentIdleMarkerRevision(): { count: number; databaseRevision: string } | null {
-    return this.#lastPtyIdleMarkerRevision;
   }
 
   private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
@@ -1168,7 +1109,6 @@ export class AgyCliSession {
     this.#ptyPermissionRenderTimer = undefined;
     this.#ptyPermissionRender = "";
     this.#ptyPermissionMarkerTail = "";
-    this.#ptyPermissionPanelVisible = false;
     this.#pty = undefined;
     this.#ptyExit = undefined;
     if (pty) {
@@ -1184,67 +1124,39 @@ export class AgyCliSession {
   }
 
   private flushPermissionRender(): void {
-    const marker = "Yes, and always allow";
-    const output = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-    const visible = output.includes(marker);
-    this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
+    const raw = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+    const { completed, incomplete } = splitIncompleteAnsi(raw);
+    const clean = completed.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g, "");
+    const isPermissionContext =
+      clean.includes("Yes, and always allow") ||
+      clean.includes("Select option:") ||
+      clean.includes("Allow this command?") ||
+      clean.includes("Allow this tool");
+    const visible = isPermissionContext && PERMISSION_MARKERS.some((marker) => clean.includes(marker));
+    const cleanTail = multiMarkerPrefixTail(clean, PERMISSION_MARKERS);
+    this.#ptyPermissionMarkerTail = cleanTail + incomplete;
     if (visible) {
       this.#ptyPermissionMarkerCount++;
-      this.#ptyPermissionPanelVisible = true;
     }
     this.#ptyPermissionRender = "";
     this.#ptyPermissionRenderTimer = undefined;
   }
 
-  private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
-    if (!await this.waitForPermissionPanel(deadline)) {
-      if (this.#cancelled) return false;
-      throw new AgyCliError(
-        "agy permission panel did not settle before applying the permission response",
-        [this.config.agyPath],
-        null,
-        this.#ptyOutput
-      );
-    }
+  private async writePermissionKeys(keys: string): Promise<boolean> {
+    if (this.#cancelled) return false;
 
     const down = "\x1b[B";
     let offset = 0;
     while (keys.startsWith(down, offset)) {
-      const renderCount = this.#ptyPermissionMarkerCount;
       this.#pty?.write(down);
-      if (!await this.waitForPermissionRenderAfter(renderCount, deadline)) {
-        if (this.#cancelled) return false;
-        throw new AgyCliError(
-          "agy permission panel did not redraw after menu navigation",
-          [this.config.agyPath],
-          null,
-          this.#ptyOutput
-        );
-      }
       offset += down.length;
+      if (offset < keys.length) {
+        await sleep(PERMISSION_KEY_DELAY_MS);
+        if (this.#cancelled) return false;
+      }
     }
     this.#pty?.write(keys.slice(offset));
     return true;
-  }
-
-  private async waitForPermissionPanel(deadline: number): Promise<boolean> {
-    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
-    while (
-      (!this.#ptyPermissionPanelVisible || this.#ptyPermissionRenderTimer !== undefined) &&
-      !this.#cancelled &&
-      Date.now() < expires
-    ) {
-      await sleep(5);
-    }
-    return this.#ptyPermissionPanelVisible && this.#ptyPermissionRenderTimer === undefined;
-  }
-
-  private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
-    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
-    while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
-      await sleep(5);
-    }
-    return this.#ptyPermissionMarkerCount > renderCount;
   }
 
   async close(): Promise<void> {
@@ -1252,6 +1164,26 @@ export class AgyCliSession {
   }
 }
 
+function splitIncompleteAnsi(input: string): { completed: string; incomplete: string } {
+  const match = input.match(/\x1b(?:\[[0-9;?]*|\][^\x07]*|[()][AB012]?)?$/);
+  if (match && match.index !== undefined && match[0].length > 0) {
+    return {
+      completed: input.slice(0, match.index),
+      incomplete: match[0]
+    };
+  }
+  return { completed: input, incomplete: "" };
+}
+
+const PERMISSION_MARKERS = [
+  "Yes, and always allow",
+  "Always allow",
+  "Allow this tool",
+  "Allow this command",
+  "Allow once",
+  "Allow this time",
+  "Yes, allow"
+] as const;
 function markerPrefixTail(output: string, marker: string): string {
   const max = Math.min(output.length, marker.length - 1);
   for (let length = max; length > 0; length--) {
@@ -1259,6 +1191,17 @@ function markerPrefixTail(output: string, marker: string): string {
     if (marker.startsWith(suffix)) return suffix;
   }
   return "";
+}
+
+function multiMarkerPrefixTail(output: string, markers: readonly string[]): string {
+  let longest = "";
+  for (const marker of markers) {
+    const tail = markerPrefixTail(output, marker);
+    if (tail.length > longest.length) {
+      longest = tail;
+    }
+  }
+  return longest;
 }
 
 export class AgyCliBackend {
@@ -1423,6 +1366,7 @@ export async function defaultPtyFactory(): Promise<PtyFactory> {
       }
     }
   }
+  // @ts-ignore optional runtime dependency
   const pty = await import("node-pty");
   return { spawn: (command, args, options) => pty.spawn(command, args, { ...options, name: "xterm-256color" }) };
 }

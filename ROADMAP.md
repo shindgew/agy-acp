@@ -37,6 +37,7 @@ Gaps relative to ACP v1 as exposed by `@agentclientprotocol/sdk`.
 - [x] [`session/new`](https://agentclientprotocol.com/protocol/v1/session-setup): create session with persisted bindings
 - [x] [`session/load`](https://agentclientprotocol.com/protocol/v1/session-setup): restore and replay conversation history
 - [x] [`session/resume`](https://agentclientprotocol.com/rfds/session-resume): reattach without replaying history
+- [x] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): fork conversation into a new independent session
 - [x] [`session/close`](https://agentclientprotocol.com/rfds/session-close): close active session
 - [x] [`session/delete`](https://agentclientprotocol.com/protocol/v1/session-delete): delete persisted session binding from session store
 - [x] [`session/list`](https://agentclientprotocol.com/protocol/v1/session-list): list sessions from the session store
@@ -74,7 +75,6 @@ Need interactive agy control plane or client terminal protocol beyond DB polling
 
 ### Medium priority
 
-- [ ] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): fork when useful for clients
 - [ ] [`usage_update`](https://agentclientprotocol.com/rfds/session-usage): when token/usage data is available from agy
 - [ ] [`usage`](https://agentclientprotocol.com/rfds/end-turn-token-usage): prompt-response field when available
 - [ ] [`stopReason`](https://agentclientprotocol.com/protocol/v1/prompt-turn#stop-reasons): richer values (`max_tokens`, `refusal`, `max_turn_requests`) when agy exposes them (today: `end_turn` or `cancelled`)
@@ -115,6 +115,7 @@ differs or is incomplete.
 - [x] [`session/new`](https://agentclientprotocol.com/protocol/v2/session-setup): create session
 - [x] [`session/list`](https://agentclientprotocol.com/protocol/v2/session-list): list sessions
 - [x] [`session/resume`](https://agentclientprotocol.com/protocol/v2/session-setup): optional `replayFrom: { "type": "start" }` ([replay RFD](https://agentclientprotocol.com/rfds/v2/session-resume-replay))
+- [x] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): fork conversation into a new independent session
 - [x] [`session/close`](https://agentclientprotocol.com/protocol/v2/session-setup): close session
 - [x] [`session/delete`](https://agentclientprotocol.com/protocol/v2/session-delete): delete persisted session binding from session store
 - [x] [`session/prompt`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): accept with `{}` immediately
@@ -145,7 +146,6 @@ differs or is incomplete.
 
 ### Medium priority
 
-- [ ] [`session/fork`](https://agentclientprotocol.com/rfds/session-fork): when useful
 - [ ] [`usage_update`](https://agentclientprotocol.com/rfds/session-usage): when token data is available from agy
 - [ ] [`stopReason`](https://agentclientprotocol.com/protocol/v2/prompt-lifecycle): richer values on idle `state_update` when agy exposes them
 - [ ] [`agent_message`](https://agentclientprotocol.com/rfds/v2/message-updates): optional full-message updates (+ `agent_thought`) in addition to chunks

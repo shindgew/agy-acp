@@ -23,6 +23,7 @@ import {
   encodeStepPayload,
   encodeSubagentInfo,
   encodeTaskDetails,
+  encodeTaskNotification,
   encodeToolCall,
   encodeToolRun,
   encodeUrlContentResult,
@@ -2833,7 +2834,201 @@ describe("StreamPoller", () => {
     });
     expect(poller.poll()).toHaveLength(1);
     expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
 
+    poller.close();
+    db.close();
+  });
+
+  it("does not treat failed (status 7), cancelled (status 6), or successful (status 3) tool steps as conclusive turn ends", () => {
+    const db = createConversationDb(dir, "conv-tool-inconclusive");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run a test command" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-inconclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    // 1. Tool step runs and fails (status 7)
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "false", output: "exit status 1" })
+      })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    // turnCompleteCandidate is true (valid terminal step), but isConclusiveTurnEnd must be false
+    // so agy-acp does not bypass the settle/marker wait and cut off subsequent assistant recovery text.
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+    expect(poller.isSuccessfulToolOnlyEnd).toBe(false);
+
+    // 2. Cancelled tool step (status 6)
+    const db2 = createConversationDb(dir, "conv-tool-cancelled");
+    insertStep(db2, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Run another command" })
+    });
+    insertStep(db2, {
+      idx: 2,
+      stepType: 21,
+      status: 6,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "cat", output: "cancelled by user" })
+      })
+    });
+    const poller2 = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-cancelled",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller2.poll()).toHaveLength(1);
+    expect(poller2.turnCompleteCandidate).toBe(true);
+    expect(poller2.isConclusiveTurnEnd).toBe(false);
+    expect(poller2.isSuccessfulToolOnlyEnd).toBe(false);
+
+    // When assistant adds recovery text, isConclusiveTurnEnd becomes true
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "The command failed with exit status 1. Let me try an alternative." })
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    // 3. Model provider error wrapper (stepType 17, status 7) is also conclusive
+    const db3 = createConversationDb(dir, "conv-model-error-conclusive");
+    insertStep(db3, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Trigger model error" })
+    });
+    insertStep(db3, {
+      idx: 2,
+      stepType: 17,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "Rate limit exceeded",
+          userMessage: "Rate limit exceeded",
+          responseJson: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", details: [{ reason: "QUOTA_EXHAUSTED" }] } })
+        })
+      })
+    });
+    const poller3 = new StreamPoller({
+      dir,
+      conversationId: "conv-model-error-conclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller3.poll()).toHaveLength(1);
+    expect(poller3.turnCompleteCandidate).toBe(true);
+    expect(poller3.isConclusiveTurnEnd).toBe(true);
+
+    // 4. StepType 17 carrying a routed tool call (without modelProviderError) is NOT conclusive
+    const db4 = createConversationDb(dir, "conv-steptype17-tool-inconclusive");
+    insertStep(db4, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Generate an image" })
+    });
+    insertStep(db4, {
+      idx: 2,
+      stepType: 17,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c1", namePrimary: "generate_image", rawInputJson: '{"Prompt":"a test image"}' })
+        })
+      })
+    });
+    const poller4 = new StreamPoller({
+      dir,
+      conversationId: "conv-steptype17-tool-inconclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller4.poll()).toHaveLength(1);
+    expect(poller4.turnCompleteCandidate).toBe(true);
+    expect(poller4.isConclusiveTurnEnd).toBe(false);
+    expect(poller4.isSuccessfulToolOnlyEnd).toBe(true);
+
+    // 5. Earlier model error in conversation does not make subsequent intermediate tool steps conclusive
+    insertStep(db3, {
+      idx: 3,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Follow up with tool" })
+    });
+    insertStep(db3, {
+      idx: 4,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "ls", output: "file1" })
+      })
+    });
+    expect(poller3.poll()).toHaveLength(1);
+    expect(poller3.turnCompleteCandidate).toBe(true);
+    expect(poller3.isConclusiveTurnEnd).toBe(false);
+    expect(poller3.isSuccessfulToolOnlyEnd).toBe(true);
+
+    poller.close();
+    poller2.close();
+    poller3.close();
+    poller4.close();
+    db.close();
+    db2.close();
+    db3.close();
+    db4.close();
+  });
+
+  it("treats a successful terminal tool with no follow-up as a tool-only end", () => {
+    const db = createConversationDb(dir, "conv-tool-only-end");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "echo hello" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "echo hello", output: "hello\n" })
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-only-end",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller.poll()).toHaveLength(1);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+    expect(poller.isSuccessfulToolOnlyEnd).toBe(true);
     poller.close();
     db.close();
   });
@@ -2871,6 +3066,52 @@ describe("StreamPoller", () => {
     });
     expect(poller.poll()).toHaveLength(1);
     expect(poller.turnCompleteCandidate).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not treat empty stepType 15 placeholders after tool execution as conclusive turn end (gh#114)", () => {
+    const db = createConversationDb(dir, "conv-tool-empty-placeholder");
+    insertStep(db, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Check git log" })
+    });
+    // Tool execution finishes with status 3
+    insertStep(db, {
+      idx: 2,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git log -n 6 --oneline", output: "commit abc" }) })
+    });
+    // agy writes an empty stepType 15 placeholder while model prepares the summary
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "" })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-tool-empty-placeholder",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // Although the tool step is terminal, the empty placeholder prevents conclusive turn ending
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+
+    // When the model writes the actual summary, it becomes a conclusive turn end
+    updateStep(db, 3, {
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "Here are the last 6 commits on this branch." })
+    });
+    poller.poll();
+    expect(poller.isConclusiveTurnEnd).toBe(true);
 
     poller.close();
     db.close();
@@ -3329,6 +3570,224 @@ describe("StreamPoller", () => {
       baseStepIdx: -1,
       skipNarration: false,
       snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
+
+  it("tracks background task completion when task notification is received on stepType 101 (field 114)", () => {
+    const db = createConversationDb(dir, "conv-bg-steptype101-notification");
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "npm test", output: "Task task-48 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-48", logUri: "", description: "npm test" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Running tests in the background..."
+      })
+    });
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-steptype101-notification",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+    expect(poller.turnCompleteCandidate).toBe(true);
+
+    // agy records task completion notification on stepType 101 in field 114 with null task_details
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv-bg/task-48 priority=MESSAGE_PRIORITY_HIGH content=Task id "task-48" finished with result:\n\nOutput: 14 passed',
+          details: 'Run tests finished Task id "task-48" finished with result',
+          type: "task_notification"
+        })
+      })
+    });
+
+    const updates = poller.poll();
+    // Step 101 lifecycle notifications are filtered from client stream updates
+    expect(updates.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(false);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    // Before follow-up assistant response, turn is not yet conclusively ended
+    expect(poller.isConclusiveTurnEnd).toBe(false);
+
+    // Assistant emits summary response beyond the task completion wake
+    insertStep(db, {
+      idx: 4,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "All 14 test files passed successfully."
+      })
+    });
+
+    const finalUpdates = poller.poll();
+    expect(finalUpdates.some((u) => (u as { sessionUpdate?: string }).sessionUpdate === "agent_message_chunk")).toBe(true);
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("handles background command alongside scheduled timer without leaving turn hanging", () => {
+    const db = createConversationDb(dir, "conv-bg-command-and-timer");
+    // 1. Long running command launches task-10
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "vitest run", output: "Task task-10 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-10", logUri: "", description: "vitest run" })
+    });
+    // 2. Schedule tool launches timer task-11
+    insertStep(db, {
+      idx: 2,
+      stepType: 132,
+      status: 3,
+      stepPayload: encodeStepPayload({}),
+      task: encodeTaskDetails({ taskId: "task-11", logUri: "", description: "Timer: 60s" })
+    });
+    // 3. Assistant interim text
+    insertStep(db, {
+      idx: 3,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Waiting for test execution to complete..."
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-command-and-timer",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    // task-10 is active (task-11 stepType 132 completed at step 2)
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // 4. When task-10 completes via stepType 101 field 114
+    insertStep(db, {
+      idx: 4,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-10 content=Task id "task-10" finished with result: OK',
+          type: "task_notification"
+        })
+      })
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    // 5. Follow-up assistant text
+    insertStep(db, {
+      idx: 5,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Tests passed cleanly."
+      })
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+    expect(poller.turnCompleteCandidate).toBe(true);
+    expect(poller.isConclusiveTurnEnd).toBe(true);
+
+    poller.close();
+    db.close();
+  });
+
+  it("does not retire current active tasks when receiving a notification for an unknown or older task id", () => {
+    const db = createConversationDb(dir, "conv-bg-unknown-task-notif");
+    // Current turn launches task-100
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "long-job &", output: "Task task-100 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-100", logUri: "", description: "long-job" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Running long-job in background..."
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-unknown-task-notif",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Delayed notification arrives from an older task (task-40) not in the current poller scope
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-40 content=Task id "task-40" finished with result: OK',
+          type: "task_notification"
+        })
+      })
+    });
+
+    poller.poll();
+    // task-100 MUST still be active and not prematurely closed by the unknown task notification
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Now task-100 actually completes
+    insertStep(db, {
+      idx: 4,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:17:10Z sender=conv/task-100 content=Task id "task-100" finished with result: OK',
+          type: "task_notification"
+        })
+      })
     });
 
     poller.poll();
@@ -3974,8 +4433,10 @@ describe("subagent_info metadata propagation", () => {
 });
 
 describe("isSystemMessage & isSystemMessagePrefix", () => {
-  it("buffers every accepted system-message prefix form", () => {
+  it("buffers every accepted system-message prefix form including untagged [Message] timestamp=", () => {
     const prefixes = [
+      "<",
+      "<system",
       "<SYSTEM_MESSAGE>",
       "<SYSTEM_MESSAGE>\n",
       "<SYSTEM_MESSAGE>\n[Mes",
@@ -3984,7 +4445,14 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
       "<SYSTEM_MESSAGE>\ncontent=hello",
       "<SYSTEM_MESSAGE>\ntimestamp=123",
       "<SYSTEM_MESSAGE>\npriority=high",
-      "<SYSTEM_MESSAGE>\ntask"
+      "<SYSTEM_MESSAGE>\ntask",
+      "[",
+      "[M",
+      "[Mess",
+      "[Message]",
+      "[Message] ",
+      "[Message] time",
+      "[Message] timestamp="
     ];
     for (const p of prefixes) {
       expect(isSystemMessagePrefix(p)).toBe(true);
@@ -3993,17 +4461,69 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     const nonPrefixes = [
       "Hello world",
       "<SYSTEM_MESSAGE>\nHello world",
-      "<SYSTEM_MESSAGE>\nsome random text"
+      "<SYSTEM_MESSAGE>\nsome random text",
+      "[Notice] Note that this is read-only",
+      "[System] Architecture diagram",
+      "sender=user\nreceiver=agent",
+      "[Message] from the user"
     ];
     for (const p of nonPrefixes) {
       expect(isSystemMessagePrefix(p)).toBe(false);
     }
   });
 
-  it("identifies complete system message envelopes", () => {
+  it("identifies complete system message envelopes while preserving ordinary label-prefixed replies", () => {
+    // Tagged envelopes
     expect(isSystemMessage("<SYSTEM_MESSAGE>\nsender=system priority=low")).toBe(true);
     expect(isSystemMessage("<SYSTEM_MESSAGE>\n[Message] timestamp=123")).toBe(true);
+    expect(isSystemMessage("<SYSTEM_MESSAGE>\nTask task-1 finished")).toBe(true);
+
+    // Untagged structured envelopes
+    expect(isSystemMessage('[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-48 priority=MESSAGE_PRIORITY_HIGH content=Task id "task-48" finished')).toBe(true);
+    expect(isSystemMessage('[Message] timestamp=2026-07-27T05:55:21Z sender=system priority=MESSAGE_PRIORITY_LOW content=[Notice] All your subagents...')).toBe(true);
+
+    // Ordinary user/assistant text must NOT match
     expect(isSystemMessage("Regular text")).toBe(false);
+    expect(isSystemMessage("[Notice] Note that this file is read-only.")).toBe(false);
+    expect(isSystemMessage("[System] Architecture diagram is shown below:")).toBe(false);
+    expect(isSystemMessage("sender=user\nreceiver=agent")).toBe(false);
+    expect(isSystemMessage("[Message] from the user about something")).toBe(false);
+  });
+
+  it("emits ordinary label-prefixed replies ([Notice], [System], sender=) as regular text in Translator", () => {
+    const db = createConversationDb(dir, "conv-label-prefixed-text");
+    insertStep(db, {
+      idx: 1,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "[Notice] Please note that this repository requires Node >= 22."
+      })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "sender=client\nreceiver=server\nport=8080"
+      })
+    });
+    db.close();
+
+    const conn = ConversationDb.open(dir, "conv-label-prefixed-text")!;
+    const rows = conn.readAfter(-1);
+    conn.close();
+
+    const translator = new Translator({ mode: "stream", skipNarration: false });
+    const updates = translator.translate(rows);
+
+    const texts = updates
+      .filter((u) => (u as any).sessionUpdate === "agent_message_chunk")
+      .map((u) => (u as any).content?.text);
+
+    const combinedText = texts.join("");
+    expect(combinedText).toContain("[Notice] Please note that this repository requires Node >= 22.");
+    expect(combinedText).toContain("sender=client\nreceiver=server\nport=8080");
   });
 });
 

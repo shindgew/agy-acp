@@ -28,7 +28,7 @@ import {
 } from "../src/acp/tool-calls/permissions.js";
 import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertGenMetadata, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodeCommandResult, encodeGenMetadata, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodeCommandResult, encodeGenMetadata, encodeModelProviderError, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -499,6 +499,169 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("completes a tool-only turn promptly after quiescence without waiting for long printTimeout", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-tool-only-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-only-quiescence");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "echo hello", output: "hello\n" })
+        })
+      });
+      db.close();
+    });
+    // Set a very long timeout (60s). Must resolve via quiescence in < 2s rather than waiting 60s.
+    const session = interactiveSession(dir, pty, "60s");
+    const startTime = Date.now();
+    const result = await session.prompt("echo hello", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - startTime;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(5000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("captures assistant recovery commentary after a failed tool execution without premature turn cutoff", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-fail-recovery");
+      // Prompt starts, tool executes and fails
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 7,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "python script.py", output: "Traceback: error occurred" })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "run script",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => "agy-allow-once"
+    );
+
+    // After tool fails, agy generates assistant recovery explanation before emitting idle marker
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "tool-fail-recovery.db"));
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "The Python script failed with an error. I will analyze the traceback."
+      })
+    });
+    db.close();
+    setTimeout(() => pty.emitData("? for shortcuts"), 100);
+
+    expect((await result).stopReason).toBe("end_turn");
+    // Ensure the recovery explanation was delivered in updates
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("The Python script failed with an error");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("captures assistant recovery commentary arriving after the 300ms quiescence window", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-delayed-recovery-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-fail-delayed-recovery");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 7,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "python script.py", output: "Traceback: error occurred" })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "run script",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => "agy-allow-once"
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "tool-fail-delayed-recovery.db"));
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "The Python script failed. I will inspect the traceback."
+      })
+    });
+    db.close();
+
+    expect((await result).stopReason).toBe("end_turn");
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("I will inspect the traceback");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("captures assistant explanation after a cancelled permission check without premature turn cutoff", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-cancel-recovery");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"rm -rf /tmp/test"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "clean directory",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => {
+        // User rejects the permission, agy writes status 7 for tool and then explains
+        const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-cancel-recovery.db"));
+        updateStep(db, 1, { status: 7 });
+        insertStep(db, {
+          idx: 2,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({
+            agentText: "Permission was denied. I will proceed without deleting the directory."
+          })
+        });
+        db.close();
+        setTimeout(() => pty.emitData("? for shortcuts"), 100);
+        return "agy-reject-once";
+      }
+    );
+
+    expect((await result).stopReason).toBe("end_turn");
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("Permission was denied");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("preserves permission panel visibility when intervening non-marker PTY data arrives before applying permission response", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
@@ -547,11 +710,11 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("does not mistake the fresh TUI startup marker for turn completion", async () => {
+  it("does not complete from the fresh TUI startup marker while the latest SQLite row is still in progress", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "startup-marker");
-      insertStep(db, { idx: 1, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      insertStep(db, { idx: 1, stepType: 15, status: 2, stepPayload: encodeStepPayload({ agentText: "" }) });
       db.close();
     });
     const session = interactiveSession(dir, pty);
@@ -563,7 +726,9 @@ describe("permission bridge", () => {
     pty.emitData("redraw without another marker");
     await new Promise((resolve) => setTimeout(resolve, 225));
     expect(resolved).toBe(false);
-    pty.emitData("? for shortcuts");
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "startup-marker.db"));
+    updateStep(db, 1, { status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+    db.close();
     expect((await result).stopReason).toBe("end_turn");
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
@@ -722,6 +887,334 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("completes turn cleanly when trailing stepType 101 and gen_metadata commit after idle marker", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-trailing-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "trailing-meta");
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Final assistant answer." })
+      });
+      // Idle marker arrives
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Trailing stepType 101 and gen_metadata commit after the idle marker
+        setTimeout(() => {
+          insertStep(dbHandle, {
+            idx: 2,
+            stepType: 101,
+            status: 3,
+            stepPayload: encodeStepPayload({})
+          });
+          insertGenMetadata(
+            dbHandle,
+            1,
+            encodeGenMetadata({
+              promptTokens: 100,
+              candidatesTokens: 50,
+              thoughtTokens: 20
+            })
+          );
+          dbHandle.close();
+        }, 10);
+      }, 20);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const result = await session.prompt("ask question", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(result.usage).toEqual({
+      totalTokens: 170,
+      inputTokens: 100,
+      outputTokens: 50,
+      thoughtTokens: 20
+    });
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("settles cleanly via quiescence window when terminal DB rows exist even without PTY idle marker", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-quiescence-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "quiesce-test");
+      insertStep(db, {
+        idx: 1,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Response ready." })
+      });
+      db.close();
+      // No PTY idle marker is emitted after spawn. Turn must complete via quiescence window (~300ms)
+      // rather than hanging until printTimeout (5s).
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const start = Date.now();
+    const result = await session.prompt("ask", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - start;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(2_000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not prematurely quiesce on intermediate tool rows without conclusive turn ending", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-intermediate-tool-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "intermediate-tool");
+      // Intermediate tool completes (status 3), but agent response text is not ready yet
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git status", output: "clean" }) })
+      });
+      // Model thinks for 400ms before emitting final agent text
+      setTimeout(() => {
+        insertStep(dbHandle, {
+          idx: 2,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "Repository is clean." })
+        });
+        dbHandle.close();
+        setTimeout(() => pty.emitData("? for shortcuts"), 10);
+      }, 400);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("status", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    // Ensure final agent text was delivered and not cut off by premature 300ms quiescence
+    expect(updates.some((u) => u.content?.type === "text" || u.kind === "agent_message" || JSON.stringify(u).includes("Repository is clean"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not prematurely complete turn during consecutive tool executions when PTY emits prompt redraws between tools", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-consecutive-tools-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "consecutive-tools");
+      // Tool 1 executes & completes
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git diff src/agy/db/streaming.ts", output: "" }) })
+      });
+      insertStep(dbHandle, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "" })
+      });
+      // PTY redraws prompt bar between tool executions
+      setTimeout(() => pty.emitData("\n? for shortcuts\n"), 50);
+
+      // Tool 2 executes & completes 350ms later (exceeding QUIESCENT_SETTLE_MS if not protected by isConclusiveTurnEnd)
+      setTimeout(() => {
+        insertStep(dbHandle, {
+          idx: 3,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git diff src/agy/cli.ts", output: "" }) })
+        });
+        insertStep(dbHandle, {
+          idx: 4,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "" })
+        });
+        // PTY redraws again
+        pty.emitData("\n? for shortcuts\n");
+
+        // Final assistant response arrives after another pause
+        setTimeout(() => {
+          insertStep(dbHandle, {
+            idx: 5,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "Both diffs inspected cleanly." })
+          });
+          dbHandle.close();
+          pty.emitData("\n? for shortcuts\n");
+        }, 350);
+      }, 350);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("inspect diffs", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Both diffs inspected cleanly"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not prematurely complete turn on empty agentText placeholder following tool run when PTY redraws (gh#114)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-placeholder-tool-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "placeholder-tool");
+      // Tool execution finishes
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git log -n 6 --oneline", output: "abc1234 Initial commit" }) })
+      });
+      // Empty agent text placeholder written while model prepares generation
+      insertStep(dbHandle, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "" })
+      });
+      // PTY emits prompt redraw / idle marker during the placeholder window
+      setTimeout(() => pty.emitData("\n? for shortcuts\n"), 40);
+
+      // Model takes 350ms to finish generating actual assistant text
+      setTimeout(() => {
+        updateStep(dbHandle, 2, {
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "Found recent commit abc1234." })
+        });
+        dbHandle.close();
+        pty.emitData("\n? for shortcuts\n");
+      }, 350);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("git log", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Found recent commit abc1234"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects alternate permission markers split across PTY chunks via multi-marker prefix tails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-chunked-marker-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "chunked-marker");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+      // Split "Allow once" into two chunks: "\x1b[32mAllow " then "once\x1b[0m\nSelect option:"
+      setTimeout(() => {
+        pty.emitData("\x1b[32mAllow ");
+        setTimeout(() => {
+          pty.emitData("once\x1b[0m\nSelect option:");
+        }, 10);
+      }, 10);
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "chunked-marker.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toContain("\r");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects permission markers when ANSI escape is split across PTY chunks", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-split-ansi-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "split-ansi");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+      // Split ANSI sequence "\x1b[" across chunk boundaries: "Select option:\nAllow \x1b[" then "32monce\x1b[0m"
+      setTimeout(() => {
+        pty.emitData("Select option:\nAllow \x1b[");
+        setTimeout(() => {
+          pty.emitData("32monce\x1b[0m");
+        }, 10);
+      }, 10);
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "split-ansi.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(pty.writes).toContain("\r");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not trigger permission panel from generic labels in non-menu command output", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-generic-output-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "generic-output");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "echo", output: "Please Allow once in your config file" }) })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Done." })
+      });
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    // Normal command stdout contains phrase "Allow once" without menu context
+    pty.emitData("Please Allow once in your config file\nDone.\n");
+
+    const result = await session.prompt("check", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    // Should NOT have sent premature permission keys
+    expect(pty.writes).not.toContain("\r");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("concludes turn promptly when terminal step is a modelProviderError (stepType 17)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-provider-error-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "provider-error");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({ modelProviderError: encodeModelProviderError({ summary: "Rate limit exceeded" }) })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty, "5s");
+    const start = Date.now();
+    const result = await session.prompt("ask", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - start;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(2_000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("maintains turn execution while background tasks are active until completed (gh#68)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
     const pty = new FakePty(() => {
@@ -755,6 +1248,14 @@ describe("permission bridge", () => {
               agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
             })
           });
+          insertStep(db2, {
+            idx: 4,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              agentText: "Background task task-1 finished."
+            })
+          });
           db2.close();
         }, 250);
       }, 20);
@@ -782,6 +1283,175 @@ describe("permission bridge", () => {
     // Zero prompt injection: never invent follow-ups (e.g. "continue").
     // Fresh interactive spawn puts the user prompt in argv; PTY writes stay empty.
     expect(pty.writes).toEqual([]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps turn open when background task completes via task_details terminal row until assistant summary arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-task-row-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-task-row");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job &", output: "Started task-99" }) }),
+        task: encodeTaskDetails({ taskId: "task-99", logUri: "", description: "Long job" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running task in background..." })
+      });
+      db.close();
+
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Task finishes after 200ms with a terminal task_details row (no system message)
+        setTimeout(async () => {
+          const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-task-row.db"));
+          insertStep(db2, {
+            idx: 3,
+            stepType: 21,
+            status: 3,
+            stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job", output: "Done with job" }) }),
+            task: encodeTaskDetails({ taskId: "task-99", logUri: "", description: "Long job" })
+          });
+          // Model takes another 250ms to generate the summary response
+          setTimeout(() => {
+            insertStep(db2, {
+              idx: 4,
+              stepType: 15,
+              status: 3,
+              stepPayload: encodeStepPayload({ agentText: "Long job finished successfully with output: Done with job" })
+            });
+            db2.close();
+            pty.emitData("? for shortcuts");
+          }, 250);
+        }, 200);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("run job", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some(u => JSON.stringify(u).includes("Long job finished successfully"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps turn open after a task-completion wake until a late assistant summary arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-late-summary-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-late-summary");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job &", output: "Started task-77" }) }),
+        task: encodeTaskDetails({ taskId: "task-77", logUri: "", description: "Long job" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running task in background..." })
+      });
+      db.close();
+
+      setTimeout(async () => {
+        const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-late-summary.db"));
+        insertStep(db2, {
+          idx: 3,
+          stepType: 21,
+          status: 3,
+          stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job", output: "Done with job" }) }),
+          task: encodeTaskDetails({ taskId: "task-77", logUri: "", description: "Long job" })
+        });
+        setTimeout(() => {
+          insertStep(db2, {
+            idx: 4,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({ agentText: "Late summary: long job finished" })
+          });
+          db2.close();
+        }, 400);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("run job", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some((u) => JSON.stringify(u).includes("Late summary: long job finished"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps turn open when cancelled background task (status 6) is the latest meaningful step until assistant responds", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-cancelled-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-cancelled");
+      // Task launches
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "agy models | cat", output: "" }) }),
+        task: encodeTaskDetails({ taskId: "task-82", logUri: "", description: "agy models | cat" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running models query..." })
+      });
+      db.close();
+
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Task cancelled (status 6) after 200ms — this row IS the latest meaningful step
+        setTimeout(async () => {
+          const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-cancelled.db"));
+          insertStep(db2, {
+            idx: 3,
+            stepType: 21,
+            status: 6,
+            stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "agy models | cat", output: "cancelled" }) }),
+            task: encodeTaskDetails({ taskId: "task-82", logUri: "", description: "agy models | cat" })
+          });
+          // Model responds 250ms later with summary
+          setTimeout(() => {
+            insertStep(db2, {
+              idx: 4,
+              stepType: 15,
+              status: 3,
+              stepPayload: encodeStepPayload({ agentText: "The background task was cancelled." })
+            });
+            db2.close();
+            pty.emitData("? for shortcuts");
+          }, 250);
+        }, 200);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("list models", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some(u => JSON.stringify(u).includes("background task was cancelled"))).toBe(true);
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
@@ -979,6 +1649,97 @@ describe("permission bridge", () => {
     await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
+
+  it("handles ANSI styling sequences splitting permission panel markers", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "ansi-permission");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      // Emit ANSI styled permission marker
+      pty.emitData("\x1b[1m\x1b[32mYes, and always allow\x1b[0m in this conversation\r\n");
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "ansi-permission.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 100);
+      return "agy-allow-conversation";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
+    expect(pty.writes).toEqual(["\x1b[B", "\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("triggers permission prompt directly from SQLite without requiring terminal panel screen scraping", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "no-panel-stream");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    // Terminal never emits permission panel markers to stdout
+    pty.emitPermissionPanelOnStart = false;
+    pty.emitArrowRedraw = false;
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "no-panel-stream.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
+    expect(pty.writes).toEqual(["\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  for (const [choice, expectedWrites] of [
+    ["agy-allow-conversation", ["\x1b[B", "\r"]],
+    ["agy-allow-settings", ["\x1b[B", "\x1b[B", "\r"]],
+    ["agy-reject-once", ["\x1b[B", "\x1b[B", "\x1b[B", "\r"]]
+  ] as const) {
+    it(`sends ${choice} without a visible PTY panel and confirms via SQLite`, async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-no-panel-"));
+      const pty = new FakePty(() => {
+        const db = createConversationDb(dir, "no-panel-choice");
+        insertStep(db, pendingToolRow("run_command"));
+        db.close();
+      });
+      pty.emitPermissionPanelOnStart = false;
+      pty.emitArrowRedraw = false;
+      const session = interactiveSession(dir, pty);
+      let calls = 0;
+      const result = session.prompt("go", async () => {}, async () => {
+        calls++;
+        const db = new (await import("better-sqlite3")).default(path.join(dir, "no-panel-choice.db"));
+        updateStep(db, 1, { status: 3 });
+        insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+        db.close();
+        return choice;
+      });
+
+      expect((await result).stopReason).toBe("end_turn");
+      expect(calls).toBe(1);
+      expect(pty.writes).toEqual([...expectedWrites]);
+      await session.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+  }
 
   it("bridges manage_task status-9 interaction through full PTY turn loop", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
@@ -1475,7 +2236,7 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("cancels cleanly while waiting for the permission panel to render", async () => {
+  it("cancels cleanly while waiting for the permission response", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "cancel-panel-wait");
@@ -1484,7 +2245,10 @@ describe("permission bridge", () => {
     });
     pty.emitPermissionPanelOnStart = false;
     const session = interactiveSession(dir, pty);
-    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
+    const pending = session.prompt("go", async () => {}, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return "agy-allow-once";
+    });
     setTimeout(() => void session.cancel(), 50);
 
     expect((await pending).stopReason).toBe("cancelled");
@@ -1492,17 +2256,18 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("cancels cleanly while waiting for an arrow-key panel redraw", async () => {
+  it("cancels cleanly while sending a multi-key permission choice", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
-      const db = createConversationDb(dir, "cancel-panel-redraw");
+      const db = createConversationDb(dir, "cancel-permission-keys");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
     });
+    pty.emitPermissionPanelOnStart = false;
     pty.emitArrowRedraw = false;
     const session = interactiveSession(dir, pty);
     const pending = session.prompt("go", async () => {}, async () => {
-      setTimeout(() => void session.cancel(), 50);
+      setTimeout(() => void session.cancel(), 20);
       return "agy-allow-conversation";
     });
 

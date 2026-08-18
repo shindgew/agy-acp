@@ -153,6 +153,19 @@ export interface SubagentInfo {
   type?: string;
 }
 
+/**
+ * Step-payload field 114 — task_notification / system message wrapper.
+ * Field numbers from observed conversation DBs:
+ *   1 = message string ([Message] timestamp=... sender=... content=...)
+ *   2 = details / status
+ *   3 = notification type ("task_notification" / etc.)
+ */
+export interface TaskNotification {
+  message: string;
+  details?: string;
+  type?: string;
+}
+
 /** The blob in the `task_details` column. */
 export interface TaskDetails {
   taskId: string;
@@ -177,6 +190,7 @@ export interface StepPayload {
   urlContent: UrlContentResult | undefined;
   modelProviderError: ModelProviderError | undefined;
   subagentInfo: SubagentInfo | undefined;
+  taskNotification: TaskNotification | undefined;
 }
 
 function decodeToolCall(bytes: Uint8Array): ToolCall {
@@ -468,6 +482,18 @@ export function decodeSubagentInfo(bytes: Uint8Array): SubagentInfo {
   );
 }
 
+export function decodeTaskNotification(bytes: Uint8Array): TaskNotification {
+  return readMessage<TaskNotification>(
+    bytes,
+    { message: "", details: "", type: "" },
+    {
+      1: (m, r) => (m.message = r.string()),
+      2: (m, r) => (m.details = r.string()),
+      3: (m, r) => (m.type = r.string())
+    }
+  );
+}
+
 export function decodeStepPayload(bytes: Uint8Array): StepPayload {
   return readMessage<StepPayload>(
     bytes,
@@ -485,7 +511,8 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       webSearch: undefined,
       urlContent: undefined,
       modelProviderError: undefined,
-      subagentInfo: undefined
+      subagentInfo: undefined,
+      taskNotification: undefined
     },
     {
       1: (m, r) => (m.validityCheck = readInt(r)),
@@ -501,6 +528,7 @@ export function decodeStepPayload(bytes: Uint8Array): StepPayload {
       30: (m, r) => (m.titleUpdate = readSubmessage(r, decodeTitleUpdate)),
       40: (m, r) => (m.urlContent = readSubmessage(r, decodeUrlContentResult)),
       42: (m, r) => (m.webSearch = readSubmessage(r, decodeWebSearchResult)),
+      114: (m, r) => (m.taskNotification = readSubmessage(r, decodeTaskNotification)),
       127: (m, r) => (m.subagentInfo = readSubmessage(r, decodeSubagentInfo))
     }
   );

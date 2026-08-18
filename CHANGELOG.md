@@ -7,6 +7,26 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.5.2] - 2026-08-19
+
+### Added
+
+- Support `session/fork` across ACP v1 and v2: duplicate conversation history using atomic SQLite backup, clone brain directory artifacts, rebind trajectory metadata, and inherit active configuration options and working directory. (#58)
+
+### Fixed
+
+- Serialize `session/fork` against `session/resume` and `session/load` for the same parent session ID — including persisted-but-inactive parents — and bind the child's `lastStepIdx` to the copied conversation snapshot so inherited agy step rows cannot be emitted as the child's first-turn output. (#58)
+- Fail `session/fork` and delete the partial child database when rebinding `trajectory_meta.cascade_id` or reading the snapshot cursor fails, instead of returning a child that still carries the source conversation identity. (#58)
+- Delete the copied child conversation database and brain directory if `session/fork` is aborted or fails after the snapshot is taken and before the child is registered. (#58)
+- Fix interactive turn completion hanging indefinitely until the 5-minute `printTimeout` expires when `agy` completes the turn, adding a 300ms quiescence settle window fallback and ANSI-resilient permission panel detection. (#113)
+- Refine `_busy` calculation in `StreamPoller` to evaluate `latestMeaningful` step status rather than raw trailing rows (such as lifecycle `stepType 101` or `gen_metadata` records), ensuring trailing metadata does not prevent clean turn completion. (#113)
+- Decode protobuf payload field 114 (task completion notifications) on lifecycle `stepType 101` rows and expand `isSystemMessage()` to recognize un-tagged message envelopes (`[Message]`, `[Notice]`, `[System]`, `sender=`), ensuring background task completions properly retire active tasks in `StreamPoller` without hanging turns. (#131)
+- Keep interactive turns open after failed or cancelled tools and background-task completion wakes until a conclusive SQLite follow-up row arrives, instead of idling on PTY silence. (#113, #115, #120)
+- Send alternate permission-menu choices without waiting for a PTY panel redraw; confirm the decision from the status-9 row and `permissions` blob. (#122)
+- Surface `SessionStore.persist` write failures to callers so `session/fork` can roll back a registered child instead of returning an unpersisted session ID. (#58)
+- Fail `session/fork` and discard the partial child when cloning brain-directory artifacts fails, instead of returning a child with an incomplete artifact tree. (#58)
+- Evict the forked parent when `maxActiveSessions` is already full so a fork claim cannot bypass the active-session cap. (#58)
+
 ## [0.5.1] - 2026-08-15
 
 ### Added

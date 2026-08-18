@@ -5,18 +5,23 @@ import { randomUUID } from "node:crypto";
 import type * as v1 from "@agentclientprotocol/sdk";
 import {
   configFromEnv,
+  DEFAULT_CONVERSATIONS_DIR,
   isSessionModeId,
   type AgyCliBackend,
   type AgyCliConfig
 } from "../../agy/cli.js";
+import { discardForkedConversation, forkConversation } from "../../agy/db/fork.js";
 import type { ReplayCache } from "../../agy/db/replay.js";
 import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { sessionTurnBusy } from "./prompt.js";
-import { turnsOf } from "./turn-scheduler.js";
+import { notifyIdleAndDrainQueue, sessionTurnBusy } from "./prompt.js";
+import { KeyedAsyncLock } from "./setup-lock.js";
+import { type TurnClaim, turnsOf } from "./turn-scheduler.js";
+
+export { KeyedAsyncLock } from "./setup-lock.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -74,10 +79,14 @@ export async function registerSession(
   sessionId: string,
   session: SessionState,
   sessions: Map<string, SessionState>,
-  maxActiveSessions: number
+  maxActiveSessions: number,
+  options?: { evictable?: ReadonlySet<string> }
 ): Promise<void> {
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
+    if (sessionTurnBusy(replaced)) {
+      throw new Error(`Cannot replace session while a turn is active: ${sessionId}`);
+    }
     sessions.delete(sessionId);
     replaced.closed = true;
     turnsOf(replaced).close();
@@ -86,7 +95,9 @@ export async function registerSession(
   }
 
   while (sessions.size >= maxActiveSessions) {
-    const candidate = [...sessions].find(([, current]) => !sessionTurnBusy(current));
+    const candidate = [...sessions].find(
+      ([id, current]) => !sessionTurnBusy(current) || options?.evictable?.has(id)
+    );
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
@@ -131,19 +142,125 @@ export async function reloadSession(
     store: SessionStore;
     sessions: Map<string, SessionState>;
     maxActiveSessions: number;
+    setupLocks: KeyedAsyncLock;
   }
 ): Promise<{ session: SessionState; cwd: string; stored: StoredSession }> {
-  const stored = await deps.store.restore(sessionId);
-  if (!stored) {
-    throw new Error(`Unknown session: ${sessionId}`);
-  }
-  const cwd = requestedCwd || stored.cwd;
-  const additionalDirectories = dedupe(requestedDirs ?? stored.additionalDirectories);
+  return deps.setupLocks.run(sessionId, async () => {
+    const stored = await deps.store.restore(sessionId);
+    if (!stored) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+    const cwd = requestedCwd || stored.cwd;
+    const additionalDirectories = dedupe(requestedDirs ?? stored.additionalDirectories);
 
-  const session = await buildSession(cwd, additionalDirectories, stored, deps);
-  session.sessionId = sessionId;
-  await registerSession(sessionId, session, deps.sessions, deps.maxActiveSessions);
-  return { session, cwd, stored };
+    const session = await buildSession(cwd, additionalDirectories, stored, deps);
+    session.sessionId = sessionId;
+    await registerSession(sessionId, session, deps.sessions, deps.maxActiveSessions);
+    return { session, cwd, stored };
+  });
+}
+
+/** Fork an existing session into a new independent session binding. */
+export async function forkSession(
+  parentSessionId: string,
+  requestedCwd: string | undefined,
+  requestedDirs: string[] | undefined,
+  deps: SessionBuildDeps & {
+    store: SessionStore;
+    sessions: Map<string, SessionState>;
+    maxActiveSessions: number;
+    persistSession(sessionId: string, session: SessionState): Promise<void>;
+    setupLocks: KeyedAsyncLock;
+  }
+): Promise<{ childSession: SessionState; cwd: string; childSessionId: string }> {
+  return deps.setupLocks.run(parentSessionId, async () => {
+    const activeParent = deps.sessions.get(parentSessionId);
+    let claim: TurnClaim | undefined;
+    if (activeParent) {
+      if (sessionTurnBusy(activeParent)) {
+        throw new Error(`Cannot fork session while a turn is active: ${parentSessionId}`);
+      }
+      claim = turnsOf(activeParent).claimIdle("foreground");
+    }
+
+    try {
+      const parentStored = activeParent
+        ? sessionRecord(activeParent)
+        : await deps.store.restore(parentSessionId);
+      if (!parentStored) {
+        throw new Error(`Unknown session: ${parentSessionId}`);
+      }
+
+      const cwd = requestedCwd || parentStored.cwd;
+      const additionalDirectories = dedupe(requestedDirs ?? parentStored.additionalDirectories);
+      const childSessionId = randomUUID();
+
+      let childConversationId: string | null = null;
+      let convDir: string | undefined;
+      let childLastStepIdx = parentStored.lastStepIdx;
+      let childSession: SessionState | undefined;
+      let setupComplete = false;
+
+      try {
+        if (parentStored.conversationId) {
+          childConversationId = randomUUID();
+          convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
+          const forked = await forkConversation(convDir, parentStored.conversationId, childConversationId);
+          // Bind the child cursor to the copied snapshot so inherited rows cannot
+          // be emitted as the child's first-turn output. agy resumes via
+          // `--conversation <id>` and StreamPoller emits idx > lastStepIdx.
+          childLastStepIdx = Math.max(parentStored.lastStepIdx, forked.maxStepIdx);
+          claim?.throwIfAborted();
+        }
+
+        const childStored: StoredSession = {
+          cwd,
+          additionalDirectories,
+          conversationId: childConversationId,
+          lastStepIdx: childLastStepIdx,
+          model: parentStored.model,
+          reasoningEffort: parentStored.reasoningEffort,
+          mode: parentStored.mode,
+          v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
+          updatedAt: new Date().toISOString()
+        };
+
+        childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
+        claim?.throwIfAborted();
+        childSession.sessionId = childSessionId;
+        await registerSession(
+          childSessionId,
+          childSession,
+          deps.sessions,
+          deps.maxActiveSessions,
+          activeParent ? { evictable: new Set([parentSessionId]) } : undefined
+        );
+        await deps.persistSession(childSessionId, childSession);
+        setupComplete = true;
+
+        return { childSession, cwd, childSessionId };
+      } finally {
+        if (!setupComplete) {
+          if (deps.sessions.get(childSessionId) === childSession) {
+            deps.sessions.delete(childSessionId);
+          }
+          if (childSession) {
+            childSession.closed = true;
+            turnsOf(childSession).close();
+            await childSession.agy.close().catch(() => {});
+          }
+          if (childConversationId && convDir) {
+            discardForkedConversation(convDir, childConversationId);
+          }
+        }
+      }
+    } finally {
+      if (activeParent && claim) {
+        turnsOf(activeParent).release(claim);
+        notifyIdleAndDrainQueue(activeParent);
+      }
+    }
+  });
 }
 
 export function sessionRecord(session: SessionState): StoredSession {
