@@ -980,6 +980,64 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("handles ANSI styling sequences splitting permission panel markers", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "ansi-permission");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      // Emit ANSI styled permission marker
+      pty.emitData("\x1b[1m\x1b[32mYes, and always allow\x1b[0m in this conversation\r\n");
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "ansi-permission.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 100);
+      return "agy-allow-conversation";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
+    expect(pty.writes).toEqual(["\x1b[B", "\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("triggers permission prompt directly from SQLite without requiring terminal panel screen scraping", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "no-panel-stream");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    // Terminal never emits permission panel markers to stdout
+    pty.emitPermissionPanelOnStart = false;
+    pty.emitArrowRedraw = false;
+    const session = interactiveSession(dir, pty);
+    let calls = 0;
+    const result = session.prompt("go", async () => {}, async () => {
+      calls++;
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "no-panel-stream.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      setTimeout(() => pty.emitData("? for shortcuts"), 50);
+      return "agy-allow-once";
+    });
+
+    expect((await result).stopReason).toBe("end_turn");
+    expect(calls).toBe(1);
+    expect(pty.writes).toEqual(["\r"]);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("bridges manage_task status-9 interaction through full PTY turn loop", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const manageInput = JSON.stringify({ Action: "send_input", TaskId: "task-7", Input: "yes\n" });

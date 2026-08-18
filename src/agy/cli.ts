@@ -44,7 +44,20 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
-const PERMISSION_REDRAW_TIMEOUT_MS = 500;
+const PERMISSION_REDRAW_TIMEOUT_MS = 2_500;
+
+const ANSI_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1B\\))/g;
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_REGEX, "");
+}
+
+const PERMISSION_MARKERS = [
+  "Yes, and always allow",
+  "Always allow",
+  "Allow this tool",
+  "Allow this command",
+  "Yes, allow"
+];
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -1174,10 +1187,10 @@ export class AgyCliSession {
   }
 
   private flushPermissionRender(): void {
-    const marker = "Yes, and always allow";
-    const output = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-    const visible = output.includes(marker);
-    this.#ptyPermissionMarkerTail = markerPrefixTail(output, marker);
+    const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+    const cleanOutput = stripAnsi(rawOutput);
+    const visible = PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker));
+    this.#ptyPermissionMarkerTail = permissionMarkerPrefixTail(cleanOutput);
     if (visible) {
       this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
@@ -1218,19 +1231,46 @@ export class AgyCliSession {
   private async waitForPermissionPanel(deadline: number): Promise<boolean> {
     const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
     while (
-      (!this.#ptyPermissionPanelVisible || this.#ptyPermissionRenderTimer !== undefined) &&
+      !this.#ptyPermissionPanelVisible &&
       !this.#cancelled &&
       Date.now() < expires
     ) {
+      if (this.#ptyPermissionRenderTimer !== undefined && this.#ptyPermissionRender.length > 0) {
+        const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+        const cleanOutput = stripAnsi(rawOutput);
+        if (PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker))) {
+          if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+          this.flushPermissionRender();
+          break;
+        }
+      }
       await sleep(5);
     }
-    return this.#ptyPermissionPanelVisible && this.#ptyPermissionRenderTimer === undefined;
+    if (this.#ptyPermissionRenderTimer !== undefined) {
+      clearTimeout(this.#ptyPermissionRenderTimer);
+      this.flushPermissionRender();
+    }
+    return this.#ptyPermissionPanelVisible;
   }
 
   private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
     const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
     while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
+      if (this.#ptyPermissionRenderTimer !== undefined && this.#ptyPermissionRender.length > 0) {
+        const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+        const cleanOutput = stripAnsi(rawOutput);
+        if (PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker))) {
+          if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+          this.flushPermissionRender();
+          if (this.#ptyPermissionMarkerCount > renderCount) break;
+        }
+      }
       await sleep(5);
+    }
+    if (this.#cancelled) return false;
+    if (this.#ptyPermissionRenderTimer !== undefined) {
+      clearTimeout(this.#ptyPermissionRenderTimer);
+      this.flushPermissionRender();
     }
     return this.#ptyPermissionMarkerCount > renderCount;
   }
@@ -1238,6 +1278,21 @@ export class AgyCliSession {
   async close(): Promise<void> {
     await this.cancel();
   }
+}
+
+function permissionMarkerPrefixTail(output: string): string {
+  let longest = "";
+  for (const marker of PERMISSION_MARKERS) {
+    const max = Math.min(output.length, marker.length - 1);
+    for (let length = max; length > longest.length; length--) {
+      const suffix = output.slice(-length);
+      if (marker.startsWith(suffix)) {
+        longest = suffix;
+        break;
+      }
+    }
+  }
+  return longest;
 }
 
 function markerPrefixTail(output: string, marker: string): string {
