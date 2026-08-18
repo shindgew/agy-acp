@@ -295,30 +295,19 @@ export class StreamPoller {
     if (!this._latestStepTerminal || this._latestStepStatus === null || this._latestStepType === null) {
       return false;
     }
-    // Completed agent text (stepType 15) or model error wrapper (stepType 17) is the conclusive turn ending.
+    // If a background completion wake has arrived but no follow-up assistant response
+    // has been produced beyond that wake, do not treat the prior assistant response as conclusive.
+    const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
+    if (this._latestSystemMessageStepIdx > (latestMeaningful?.idx ?? -1)) {
+      return false;
+    }
+    // Model provider errors end the turn conclusively.
+    if (this._latestStepType === 17 || (this._latestStepStatus === 3 && this._lastObservedRows?.some((r) => r.stepPayload?.modelProviderError))) return true;
+    // Completed agent text (stepType 15) is the normal conclusive turn ending.
     // Tool steps (status 3/6/7) are turn-complete candidates but must not bypass
     // the idle marker / quiescence wait, allowing agy to emit trailing error
     // commentary or recovery explanations after failed (7) or cancelled (6) tools.
-    return (this._latestStepType === 15 || this._latestStepType === 17) && isTerminalStepStatus(this._latestStepStatus);
-  }
-
-  /**
-   * Snapshot the conversation revision currently visible to SQLite.
-   *
-   * Idle-marker handling uses this before the normal polling loop runs, so a
-   * marker emitted after a DB commit but before the next poll can still prove
-   * ordering without consuming or dropping that poll's session updates.
-   */
-  captureDatabaseRevision(): string | null {
-    const db = this.ensureDb();
-    if (db === null || this.boundId === null) return null;
-    return databaseRevisionToken(this.boundId, db.dataVersion());
-  }
-
-  /** Last conversation revision successfully processed by poll(). */
-  get observedDatabaseRevision(): string | null {
-    if (this.boundId === null || this.dataVersion === null) return null;
-    return databaseRevisionToken(this.boundId, this.dataVersion);
+    return this._latestStepType === 15 && isTerminalStepStatus(this._latestStepStatus);
   }
 
   /** Increments whenever the observed rows (including growing in-place rows) change. */
@@ -411,15 +400,14 @@ export class StreamPoller {
     ]));
     if (snapshot !== this.rowSnapshot) { this.rowSnapshot = snapshot; this._revision++; }
     this._hasRows = rows.length > 0;
-    const latest = rows.at(-1);
     const latestMeaningful = findLastMeaningfulStep(rows);
-    const isEmptyAgentText = latest !== undefined && isEmptyAgentTextStep(latest);
-    this._busy = latest !== undefined && (!isTerminalStepStatus(latest.status) || isEmptyAgentText);
+    const isEmptyAgentText = latestMeaningful !== undefined && isEmptyAgentTextStep(latestMeaningful);
+    this._busy = latestMeaningful === undefined || !isTerminalStepStatus(latestMeaningful.status) || isEmptyAgentText;
     // A turn can end on a completed agent message, but also on a terminal tool
     // step with no trailing message — most notably a denied/failed command
     // (status 7), after which agy returns to idle without emitting more text.
     // Gate completion on "latest meaningful step is terminal" (3/6/7) while no
-    // subsequent step is currently busy, rather than naively checking rows.at(-1).
+    // step is currently busy, rather than naively checking rows.at(-1).
     // This excludes early lifecycle rows (90, 98, 101), system message notices,
     // and empty stepType 15 placeholders that agy inserts while preparing generation.
     this._latestStepTerminal =
@@ -490,10 +478,6 @@ export class StreamPoller {
   }
 }
 
-function databaseRevisionToken(conversationId: string, dataVersion: number): string {
-  return `${conversationId}\0${dataVersion}`;
-}
-
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
 function isTerminalStepStatus(status: number): boolean {
   return status === 3 || status === 6 || status === 7;
@@ -536,8 +520,8 @@ function isEmptyAgentTextStep(row: StepRow): boolean {
   // empty placeholders agy inserts while initializing response generation.
   if (isSystemMessage(text)) return false;
   const thought = row.stepPayload.agentText?.thought;
-  const hasText = text.length > 0;
-  const hasThought = Boolean(thought && thought.length > 0);
+  const hasText = text.trim().length > 0;
+  const hasThought = Boolean(thought && thought.trim().length > 0);
   return !hasText && !hasThought;
 }
 
