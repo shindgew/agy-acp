@@ -499,6 +499,98 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("captures assistant recovery commentary after a failed tool execution without premature turn cutoff", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-fail-recovery");
+      // Prompt starts, tool executes and fails
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 7,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "python script.py", output: "Traceback: error occurred" })
+        })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "run script",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => "agy-allow-once"
+    );
+
+    // After tool fails, agy generates assistant recovery explanation before emitting idle marker
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "tool-fail-recovery.db"));
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "The Python script failed with an error. I will analyze the traceback."
+      })
+    });
+    db.close();
+    setTimeout(() => pty.emitData("? for shortcuts"), 100);
+
+    expect((await result).stopReason).toBe("end_turn");
+    // Ensure the recovery explanation was delivered in updates
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("The Python script failed with an error");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("captures assistant explanation after a cancelled permission check without premature turn cutoff", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "permission-cancel-recovery");
+      insertStep(db, pendingToolRow("run_command", '{"CommandLine":"rm -rf /tmp/test"}'));
+      db.close();
+    });
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt(
+      "clean directory",
+      async (update) => {
+        updates.push(update);
+      },
+      async () => {
+        // User rejects the permission, agy writes status 7 for tool and then explains
+        const db = new (await import("better-sqlite3")).default(path.join(dir, "permission-cancel-recovery.db"));
+        updateStep(db, 1, { status: 7 });
+        insertStep(db, {
+          idx: 2,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({
+            agentText: "Permission was denied. I will proceed without deleting the directory."
+          })
+        });
+        db.close();
+        setTimeout(() => pty.emitData("? for shortcuts"), 100);
+        return "agy-reject-once";
+      }
+    );
+
+    expect((await result).stopReason).toBe("end_turn");
+    const textChunks = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "");
+    expect(textChunks.join("")).toContain("Permission was denied");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("preserves permission panel visibility when intervening non-marker PTY data arrives before applying permission response", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
