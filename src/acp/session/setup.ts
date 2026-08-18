@@ -5,10 +5,12 @@ import { randomUUID } from "node:crypto";
 import type * as v1 from "@agentclientprotocol/sdk";
 import {
   configFromEnv,
+  DEFAULT_CONVERSATIONS_DIR,
   isSessionModeId,
   type AgyCliBackend,
   type AgyCliConfig
 } from "../../agy/cli.js";
+import { forkConversation } from "../../agy/db/fork.js";
 import type { ReplayCache } from "../../agy/db/replay.js";
 import { buildModelCatalog } from "../../agy/model/catalog.js";
 import { applyModelSelection, initialModelSelection, restoredModelSelection } from "../../agy/model/selection.js";
@@ -144,6 +146,59 @@ export async function reloadSession(
   session.sessionId = sessionId;
   await registerSession(sessionId, session, deps.sessions, deps.maxActiveSessions);
   return { session, cwd, stored };
+}
+
+/** Fork an existing session into a new independent session binding. */
+export async function forkSession(
+  parentSessionId: string,
+  requestedCwd: string | undefined,
+  requestedDirs: string[] | undefined,
+  deps: SessionBuildDeps & {
+    store: SessionStore;
+    sessions: Map<string, SessionState>;
+    maxActiveSessions: number;
+    persistSession(sessionId: string, session: SessionState): Promise<void>;
+  }
+): Promise<{ childSession: SessionState; cwd: string; childSessionId: string }> {
+  const activeParent = deps.sessions.get(parentSessionId);
+  const parentStored = activeParent
+    ? sessionRecord(activeParent)
+    : await deps.store.restore(parentSessionId);
+  if (!parentStored) {
+    throw new Error(`Unknown session: ${parentSessionId}`);
+  }
+
+  const cwd = requestedCwd || parentStored.cwd;
+  const additionalDirectories = dedupe(requestedDirs ?? parentStored.additionalDirectories);
+  const childSessionId = randomUUID();
+
+  let childConversationId: string | null = null;
+  const childLastStepIdx = parentStored.lastStepIdx;
+
+  if (parentStored.conversationId) {
+    childConversationId = randomUUID();
+    const convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
+    await forkConversation(convDir, parentStored.conversationId, childConversationId);
+  }
+
+  const childStored: StoredSession = {
+    cwd,
+    additionalDirectories,
+    conversationId: childConversationId,
+    lastStepIdx: childLastStepIdx,
+    model: parentStored.model,
+    reasoningEffort: parentStored.reasoningEffort,
+    mode: parentStored.mode,
+    v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
+    updatedAt: new Date().toISOString()
+  };
+
+  const childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
+  childSession.sessionId = childSessionId;
+  await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
+  await deps.persistSession(childSessionId, childSession);
+
+  return { childSession, cwd, childSessionId };
 }
 
 export function sessionRecord(session: SessionState): StoredSession {

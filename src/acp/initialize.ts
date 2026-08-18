@@ -105,7 +105,8 @@ export function handleInitializeV1(
           list: {},
           additionalDirectories: {},
           resume: {},
-          close: {}
+          close: {},
+          fork: {}
         },
         auth: {
           logout: {}
@@ -140,7 +141,8 @@ export function handleInitializeV2(
             image: {},
             embeddedContext: {}
           },
-          additionalDirectories: {}
+          additionalDirectories: {},
+          fork: {}
         },
         auth: {},
         toolCallName: {},
