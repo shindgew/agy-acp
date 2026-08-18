@@ -298,6 +298,8 @@ export class StreamPoller {
     // Cancelled/failed terminal rows (notably denied commands) end the turn
     // with no trailing agent text and no further tool runs.
     if (this._latestStepStatus === 6 || this._latestStepStatus === 7) return true;
+    // Model provider errors end the turn conclusively.
+    if (this._latestStepType === 17 || (this._latestStepStatus === 3 && this._lastObservedRows?.some((r) => r.stepPayload?.modelProviderError))) return true;
     // Completed agent text (stepType 15, status 3) is the normal conclusive turn ending.
     return this._latestStepStatus === 3 && this._latestStepType === 15;
   }
