@@ -742,7 +742,7 @@ describe("permission bridge", () => {
             idx: 2,
             stepType: 101,
             status: 3,
-            stepPayload: encodeStepPayload({ lifecycle: "turn_end" })
+            stepPayload: encodeStepPayload({})
           });
           insertGenMetadata(
             dbHandle,
