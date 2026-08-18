@@ -302,25 +302,6 @@ export class StreamPoller {
     return this._latestStepStatus === 3 && this._latestStepType === 15;
   }
 
-  /**
-   * Snapshot the conversation revision currently visible to SQLite.
-   *
-   * Idle-marker handling uses this before the normal polling loop runs, so a
-   * marker emitted after a DB commit but before the next poll can still prove
-   * ordering without consuming or dropping that poll's session updates.
-   */
-  captureDatabaseRevision(): string | null {
-    const db = this.ensureDb();
-    if (db === null || this.boundId === null) return null;
-    return databaseRevisionToken(this.boundId, db.dataVersion());
-  }
-
-  /** Last conversation revision successfully processed by poll(). */
-  get observedDatabaseRevision(): string | null {
-    if (this.boundId === null || this.dataVersion === null) return null;
-    return databaseRevisionToken(this.boundId, this.dataVersion);
-  }
-
   /** Increments whenever the observed rows (including growing in-place rows) change. */
   get revision(): number { return this._revision; }
 
@@ -487,10 +468,6 @@ export class StreamPoller {
     this.db?.close();
     this.db = null;
   }
-}
-
-function databaseRevisionToken(conversationId: string, dataVersion: number): string {
-  return `${conversationId}\0${dataVersion}`;
 }
 
 /** status 3/6/7 — completed, cancelled/aborted, or failed. */
