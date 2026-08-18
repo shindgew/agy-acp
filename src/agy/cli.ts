@@ -596,16 +596,6 @@ export class AgyCliSession {
               }
             }
 
-            if (interaction.toolName !== "ask_question" && !await this.waitForPermissionPanel(deadline)) {
-              if (this.#cancelled) break;
-              throw new AgyCliError(
-                "agy permission panel was not observed before requesting permission",
-                [this.config.agyPath],
-                null,
-                this.#ptyOutput
-              );
-            }
-
             if (interaction.toolName === "ask_question") {
               const ask = parseAskQuestion(toolCall);
               const count = ask?.questions.length ?? 1;
@@ -1197,15 +1187,13 @@ export class AgyCliSession {
   }
 
   private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
-    if (!await this.waitForPermissionPanel(deadline)) {
-      if (this.#cancelled) return false;
-      throw new AgyCliError(
-        "agy permission panel did not settle before applying the permission response",
-        [this.config.agyPath],
-        null,
-        this.#ptyOutput
-      );
+    if (this.#cancelled) return false;
+
+    // Allow in-flight panel renders to settle before capturing marker count
+    while (this.#ptyPermissionRenderTimer !== undefined && !this.#cancelled) {
+      await sleep(10);
     }
+    if (this.#cancelled) return false;
 
     const down = "\x1b[B";
     let offset = 0;

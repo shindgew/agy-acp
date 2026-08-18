@@ -1475,7 +1475,7 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it("cancels cleanly while waiting for the permission panel to render", async () => {
+  it("cancels cleanly while waiting for the permission response", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
       const db = createConversationDb(dir, "cancel-panel-wait");
@@ -1484,7 +1484,10 @@ describe("permission bridge", () => {
     });
     pty.emitPermissionPanelOnStart = false;
     const session = interactiveSession(dir, pty);
-    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
+    const pending = session.prompt("go", async () => {}, async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return "agy-allow-once";
+    });
     setTimeout(() => void session.cancel(), 50);
 
     expect((await pending).stopReason).toBe("cancelled");
