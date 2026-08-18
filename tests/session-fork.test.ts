@@ -203,6 +203,39 @@ describe("forkConversation", () => {
     }
   });
 
+  it("rejects fork and discards dest db when brain artifact copy fails", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-brain-fail-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(brainDir, { recursive: true });
+
+    try {
+      const srcId = "src-brain-fail";
+      const targetId = "target-brain-fail";
+      const srcDb = createConversationDb(convDir, srcId);
+      insertStep(srcDb, {
+        idx: 0,
+        stepType: 1,
+        status: 3,
+        stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+      });
+      srcDb.close();
+      fs.mkdirSync(path.join(brainDir, srcId), { recursive: true });
+      fs.writeFileSync(path.join(brainDir, srcId, "plan.md"), "# plan");
+      fs.writeFileSync(path.join(brainDir, targetId), "not-a-directory");
+
+      await expect(forkConversation(convDir, srcId, targetId, brainDir)).rejects.toThrow(
+        /Failed to copy brain artifacts/
+      );
+      expect(fs.existsSync(path.join(convDir, `${targetId}.db`))).toBe(false);
+      expect(fs.existsSync(path.join(brainDir, targetId))).toBe(false);
+      expect(fs.existsSync(path.join(brainDir, srcId, "plan.md"))).toBe(true);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("discardForkedConversation removes dest db and brain artifacts", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-test-"));
     const convDir = path.join(tmpDir, "conversations");

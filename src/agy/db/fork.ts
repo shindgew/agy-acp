@@ -87,8 +87,9 @@ export async function forkConversation(
       await fs.promises.cp(srcBrainDir, destBrainDir, { recursive: true });
     }
   } catch (error) {
-    console.error(
-      `[agy-acp] WARN: failed to copy brain artifacts for forked conversation ${targetConversationId}: ${(error as Error).message}`
+    discardForkedConversation(conversationsDir, targetConversationId, resolvedBrainBase);
+    throw new Error(
+      `Failed to copy brain artifacts for forked conversation ${targetConversationId}: ${(error as Error).message}`
     );
   }
 

@@ -24,6 +24,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Keep interactive turns open after failed or cancelled tools and background-task completion wakes until a conclusive SQLite follow-up row arrives, instead of idling on PTY silence. (#113, #115, #120)
 - Send alternate permission-menu choices without waiting for a PTY panel redraw; confirm the decision from the status-9 row and `permissions` blob. (#122)
 - Surface `SessionStore.persist` write failures to callers so `session/fork` can roll back a registered child instead of returning an unpersisted session ID. (#58)
+- Fail `session/fork` and discard the partial child when cloning brain-directory artifacts fails, instead of returning a child with an incomplete artifact tree. (#58)
 
 ## [0.5.1] - 2026-08-15
 
