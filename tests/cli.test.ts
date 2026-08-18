@@ -980,6 +980,14 @@ describe("permission bridge", () => {
               agentText: '<SYSTEM_MESSAGE>\n[Message] sender=task-1 content=Task id "task-1" finished'
             })
           });
+          insertStep(db2, {
+            idx: 4,
+            stepType: 15,
+            status: 3,
+            stepPayload: encodeStepPayload({
+              agentText: "Background task task-1 finished."
+            })
+          });
           db2.close();
         }, 250);
       }, 20);

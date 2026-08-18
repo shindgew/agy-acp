@@ -295,6 +295,12 @@ export class StreamPoller {
     if (!this._latestStepTerminal || this._latestStepStatus === null) {
       return false;
     }
+    // If a background completion wake has arrived but no follow-up assistant response
+    // has been produced beyond that wake, do not treat the prior assistant response as conclusive.
+    const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
+    if (this._latestSystemMessageStepIdx > (latestMeaningful?.idx ?? -1)) {
+      return false;
+    }
     // Cancelled/failed terminal rows (notably denied commands) end the turn
     // with no trailing agent text and no further tool runs.
     if (this._latestStepStatus === 6 || this._latestStepStatus === 7) return true;
