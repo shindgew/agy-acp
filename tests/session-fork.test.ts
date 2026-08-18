@@ -390,6 +390,49 @@ describe("ACP v1 session/fork", () => {
     }
   });
 
+  it("holds turn reservation on parent session during fork and releases cleanly", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpStateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-res-"));
+
+    const agent = new AcpAgent({
+      stateDir: tmpStateDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess: makeSpawnProcess() as unknown as SpawnFactory
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const parent = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/parent/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+
+      const forked = (await connection.agent.request(methods.agent.session.fork, {
+        sessionId: parent.sessionId,
+        cwd: "/forked/workspace"
+      })) as V1ForkSessionResponse;
+      expect(forked.sessionId).toBeDefined();
+
+      // Ensure parent session is completely idle and clean after fork
+      await expect(
+        connection.agent.request(methods.agent.session.prompt, {
+          sessionId: parent.sessionId,
+          prompt: [{ type: "text", text: "hello after fork" }]
+        })
+      ).resolves.toBeDefined();
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpStateDir, { recursive: true, force: true });
+    }
+  });
+
   it("returns an error when forking a non-existent session", async () => {
     const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
     const connection = acpClient({ name: "test-client" }).connect(

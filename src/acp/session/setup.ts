@@ -17,8 +17,8 @@ import { applyModelSelection, initialModelSelection, restoredModelSelection } fr
 import type { SessionStore, StoredSession } from "./store.js";
 import type { SessionState } from "./types.js";
 import { cancelQueuedPrompts } from "./cancel.js";
-import { sessionTurnBusy } from "./prompt.js";
-import { turnsOf } from "./turn-scheduler.js";
+import { notifyIdleAndDrainQueue, sessionTurnBusy } from "./prompt.js";
+import { type TurnClaim, turnsOf } from "./turn-scheduler.js";
 
 export interface SessionBuildDeps {
   env: NodeJS.ProcessEnv;
@@ -161,47 +161,59 @@ export async function forkSession(
   }
 ): Promise<{ childSession: SessionState; cwd: string; childSessionId: string }> {
   const activeParent = deps.sessions.get(parentSessionId);
-  if (activeParent && sessionTurnBusy(activeParent)) {
-    throw new Error(`Cannot fork session while a turn is active: ${parentSessionId}`);
-  }
-  const parentStored = activeParent
-    ? sessionRecord(activeParent)
-    : await deps.store.restore(parentSessionId);
-  if (!parentStored) {
-    throw new Error(`Unknown session: ${parentSessionId}`);
+  let claim: TurnClaim | undefined;
+  if (activeParent) {
+    if (sessionTurnBusy(activeParent)) {
+      throw new Error(`Cannot fork session while a turn is active: ${parentSessionId}`);
+    }
+    claim = turnsOf(activeParent).claimIdle("foreground");
   }
 
-  const cwd = requestedCwd || parentStored.cwd;
-  const additionalDirectories = dedupe(requestedDirs ?? parentStored.additionalDirectories);
-  const childSessionId = randomUUID();
+  try {
+    const parentStored = activeParent
+      ? sessionRecord(activeParent)
+      : await deps.store.restore(parentSessionId);
+    if (!parentStored) {
+      throw new Error(`Unknown session: ${parentSessionId}`);
+    }
 
-  let childConversationId: string | null = null;
-  const childLastStepIdx = parentStored.lastStepIdx;
+    const cwd = requestedCwd || parentStored.cwd;
+    const additionalDirectories = dedupe(requestedDirs ?? parentStored.additionalDirectories);
+    const childSessionId = randomUUID();
 
-  if (parentStored.conversationId) {
-    childConversationId = randomUUID();
-    const convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
-    await forkConversation(convDir, parentStored.conversationId, childConversationId);
+    let childConversationId: string | null = null;
+    const childLastStepIdx = parentStored.lastStepIdx;
+
+    if (parentStored.conversationId) {
+      childConversationId = randomUUID();
+      const convDir = deps.conversationsDir ?? DEFAULT_CONVERSATIONS_DIR;
+      await forkConversation(convDir, parentStored.conversationId, childConversationId);
+    }
+
+    const childStored: StoredSession = {
+      cwd,
+      additionalDirectories,
+      conversationId: childConversationId,
+      lastStepIdx: childLastStepIdx,
+      model: parentStored.model,
+      reasoningEffort: parentStored.reasoningEffort,
+      mode: parentStored.mode,
+      v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
+      updatedAt: new Date().toISOString()
+    };
+
+    const childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
+    childSession.sessionId = childSessionId;
+    await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
+    await deps.persistSession(childSessionId, childSession);
+
+    return { childSession, cwd, childSessionId };
+  } finally {
+    if (activeParent && claim) {
+      turnsOf(activeParent).release(claim);
+      notifyIdleAndDrainQueue(activeParent);
+    }
   }
-
-  const childStored: StoredSession = {
-    cwd,
-    additionalDirectories,
-    conversationId: childConversationId,
-    lastStepIdx: childLastStepIdx,
-    model: parentStored.model,
-    reasoningEffort: parentStored.reasoningEffort,
-    mode: parentStored.mode,
-    v2UserMessageIdsByStep: { ...(parentStored.v2UserMessageIdsByStep ?? {}) },
-    updatedAt: new Date().toISOString()
-  };
-
-  const childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
-  childSession.sessionId = childSessionId;
-  await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
-  await deps.persistSession(childSessionId, childSession);
-
-  return { childSession, cwd, childSessionId };
 }
 
 export function sessionRecord(session: SessionState): StoredSession {
