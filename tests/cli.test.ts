@@ -796,6 +796,67 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("does not prematurely quiesce on intermediate tool rows without conclusive turn ending", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-intermediate-tool-"));
+    let dbHandle: any;
+    const pty = new FakePty(() => {
+      dbHandle = createConversationDb(dir, "intermediate-tool");
+      // Intermediate tool completes (status 3), but agent response text is not ready yet
+      insertStep(dbHandle, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "git status", output: "clean" }) })
+      });
+      // Model thinks for 400ms before emitting final agent text
+      setTimeout(() => {
+        insertStep(dbHandle, {
+          idx: 2,
+          stepType: 15,
+          status: 3,
+          stepPayload: encodeStepPayload({ agentText: "Repository is clean." })
+        });
+        dbHandle.close();
+        setTimeout(() => pty.emitData("? for shortcuts"), 10);
+      }, 400);
+    });
+
+    const session = interactiveSession(dir, pty, "5s");
+    const updates: any[] = [];
+    const result = await session.prompt("status", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    // Ensure final agent text was delivered and not cut off by premature 300ms quiescence
+    expect(updates.some((u) => u.content?.type === "text" || u.kind === "agent_message" || JSON.stringify(u).includes("Repository is clean"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects alternate permission markers split across PTY chunks via multi-marker prefix tails", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-chunked-marker-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "chunked-marker");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    // Split "Allow once" into two chunks: "\x1b[32mAllow " then "once\x1b[0m"
+    setTimeout(() => {
+      pty.emitData("\x1b[32mAllow ");
+      setTimeout(() => {
+        pty.emitData("once\x1b[0m\nSelect option:");
+      }, 30);
+    }, 50);
+
+    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
+    // Should successfully detect the permission panel and send Enter (\r)
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(pty.writes).toContain("\r");
+    await session.cancel();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("maintains turn execution while background tasks are active until completed (gh#68)", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-"));
     const pty = new FakePty(() => {

@@ -1173,15 +1173,8 @@ export class AgyCliSession {
   private flushPermissionRender(): void {
     const raw = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
     const clean = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g, "");
-    const marker = "Yes, and always allow";
-    const visible =
-      raw.includes(marker) ||
-      clean.includes(marker) ||
-      clean.includes("Always allow") ||
-      clean.includes("Allow once") ||
-      clean.includes("Allow this time") ||
-      clean.includes("Allow this command");
-    this.#ptyPermissionMarkerTail = markerPrefixTail(raw, marker);
+    const visible = PERMISSION_MARKERS.some((marker) => raw.includes(marker) || clean.includes(marker));
+    this.#ptyPermissionMarkerTail = multiMarkerPrefixTail(clean, PERMISSION_MARKERS);
     if (visible) {
       this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
@@ -1250,6 +1243,14 @@ export class AgyCliSession {
   }
 }
 
+const PERMISSION_MARKERS = [
+  "Yes, and always allow",
+  "Always allow",
+  "Allow once",
+  "Allow this time",
+  "Allow this command"
+] as const;
+
 function markerPrefixTail(output: string, marker: string): string {
   const max = Math.min(output.length, marker.length - 1);
   for (let length = max; length > 0; length--) {
@@ -1257,6 +1258,17 @@ function markerPrefixTail(output: string, marker: string): string {
     if (marker.startsWith(suffix)) return suffix;
   }
   return "";
+}
+
+function multiMarkerPrefixTail(output: string, markers: readonly string[]): string {
+  let longest = "";
+  for (const marker of markers) {
+    const tail = markerPrefixTail(output, marker);
+    if (tail.length > longest.length) {
+      longest = tail;
+    }
+  }
+  return longest;
 }
 
 export class AgyCliBackend {
