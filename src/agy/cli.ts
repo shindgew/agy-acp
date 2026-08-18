@@ -231,15 +231,12 @@ export class AgyCliSession {
   #pty: PtyProcess | undefined;
   #ptyExit: Promise<{ exitCode: number }> | undefined;
   #ptyOutput = "";
-  #ptyIdleMarkerCount = 0;
-  #ptyIdleMatchTail = "";
   #ptyPermissionMarkerCount = 0;
   #ptyPermissionRender = "";
   #ptyPermissionMarkerTail = "";
   #ptyPermissionPanelVisible = false;
   #ptyPermissionRenderTimer: ReturnType<typeof setTimeout> | undefined;
   #activeStreamPoller: StreamPoller | undefined;
-  #lastPtyIdleMarkerRevision: { count: number; databaseRevision: string } | null = null;
   #ptyConfig = "";
   #lastPtyActivityTime = 0;
   #cancelled = false;
@@ -449,16 +446,11 @@ export class AgyCliSession {
     const poller = new StreamPoller({ dir: this.config.conversationsDir, conversationId: this.#conversationId,
       baseStepIdx: this.#lastStepIdx, baseGenMetadataIdx: this.#lastGenMetadataIdx, skipNarration: false, cwd: this.config.cwd, snapshot });
     this.#activeStreamPoller = poller;
-    this.#lastPtyIdleMarkerRevision = null;
-    let freshPty = false;
     if (!this.#pty) {
       const [program, ...args] = this.interactiveCommandForPrompt(prompt);
       this.#pty = factory!.spawn(program, args, { ...this.spawnOptions(), cols: 120, rows: 40 });
-      freshPty = true;
       this.#ptyConfig = signature;
       this.#ptyOutput = "";
-      this.#ptyIdleMarkerCount = 0;
-      this.#ptyIdleMatchTail = "";
       this.#ptyPermissionMarkerCount = 0;
       this.#ptyPermissionRender = "";
       this.#ptyPermissionMarkerTail = "";
@@ -466,24 +458,6 @@ export class AgyCliSession {
       const activePty = this.#pty;
       activePty.onData((data) => {
         if (this.#pty !== activePty) return;
-        const idleMarker = "for shortcuts";
-        const searchable = this.#ptyIdleMatchTail + data;
-        let offset = 0;
-        while ((offset = searchable.indexOf(idleMarker, offset)) >= 0) {
-          this.#ptyIdleMarkerCount++;
-          const databaseRevision = this.#activeStreamPoller?.captureDatabaseRevision() ?? null;
-          this.#lastPtyIdleMarkerRevision = databaseRevision === null
-            ? null
-            : { count: this.#ptyIdleMarkerCount, databaseRevision };
-          this.#ptyPermissionPanelVisible = false;
-          offset += idleMarker.length;
-        }
-        this.#ptyIdleMatchTail = searchable.slice(-(idleMarker.length - 1));
-
-        // Treat a transition into agy's permission panel as one occurrence.
-        // Arrow-key navigation redraws the same panel and must not re-arm the
-        // gate; consecutive identical gates transition through a non-panel
-        // render while the approved command segment runs.
         this.#ptyPermissionRender = (this.#ptyPermissionRender + data).slice(-16_384);
         if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
         this.#ptyPermissionRenderTimer = setTimeout(
@@ -516,12 +490,6 @@ export class AgyCliSession {
     let deadline = Date.now() + timeoutMs;
     let candidateRevision = -1;
     let seenRevision = -1;
-    // A newly spawned TUI first draws its initial idle prompt, then draws
-    // another when the submitted turn finishes. A reused TUI only owes the
-    // latter marker.
-    let requiredIdleMarkerCount = freshPty
-      ? 2
-      : this.#ptyIdleMarkerCount + 1;
     let lastActivityTime = Date.now();
     let failed = false;
     try {
@@ -538,12 +506,11 @@ export class AgyCliSession {
           lastActivityTime = Date.now();
         }
         if (Date.now() >= deadline) {
-          if (this.#ptyIdleMarkerCount >= requiredIdleMarkerCount && poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx) break;
           if (poller.turnCompleteCandidate && poller.lastStepIdx > this.#lastStepIdx) {
             await this.stopPty();
             break;
           }
-          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final idle marker was observed`, [this.config.agyPath], null, this.#ptyOutput);
+          throw new AgyCliError(`agy interactive turn timed out after ${this.config.printTimeout}; no final turn completion was observed`, [this.config.agyPath], null, this.#ptyOutput);
         }
         for (const update of updates) await this.raceTurnCallback(onUpdate(update), deadline);
         if (this.#cancelled) break;
@@ -655,9 +622,6 @@ export class AgyCliSession {
               if (!await this.writePermissionKeys(keys, deadline)) break;
             }
             gateMarkerCounts.set(id, this.#ptyPermissionMarkerCount);
-            // An idle marker printed before the decision cannot mean that the
-            // approved/rejected command has finished.
-            requiredIdleMarkerCount = this.#ptyIdleMarkerCount + 1;
             continue;
           }
 
@@ -717,12 +681,13 @@ export class AgyCliSession {
             }
           }
         }
-        const hasMatchedMarker = this.#ptyIdleMarkerCount >= requiredIdleMarkerCount;
         const hasQuiesced = (Date.now() - Math.max(lastActivityTime, this.#lastPtyActivityTime)) >= QUIESCENT_SETTLE_MS;
         const isIdleCandidate =
           poller.turnCompleteCandidate &&
           poller.lastStepIdx > this.#lastStepIdx &&
-          (hasMatchedMarker || (candidateRevision === poller.revision && poller.isConclusiveTurnEnd && hasQuiesced));
+          candidateRevision === poller.revision &&
+          poller.isConclusiveTurnEnd &&
+          hasQuiesced;
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
@@ -760,10 +725,6 @@ export class AgyCliSession {
       if (this.#activeStreamPoller === poller) this.#activeStreamPoller = undefined;
       if (this.#cancelled && !failed) await this.stopPty();
     }
-  }
-
-  private currentIdleMarkerRevision(): { count: number; databaseRevision: string } | null {
-    return this.#lastPtyIdleMarkerRevision;
   }
 
   private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
