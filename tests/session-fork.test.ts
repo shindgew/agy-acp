@@ -160,6 +160,36 @@ describe("forkConversation", () => {
     }
   });
 
+  it("rejects fork and discards dest db when cascade_id cannot be rebound", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-test-"));
+    const convDir = path.join(tmpDir, "conversations");
+    fs.mkdirSync(convDir, { recursive: true });
+
+    try {
+      const srcId = "src-bad-meta";
+      const targetId = "target-bad-meta";
+      const srcDb = createConversationDb(convDir, srcId);
+      srcDb.exec(`
+        CREATE TABLE trajectory_meta (foo text);
+        INSERT INTO trajectory_meta VALUES ('x');
+      `);
+      insertStep(srcDb, {
+        idx: 0,
+        stepType: 1,
+        status: 3,
+        stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+      });
+      srcDb.close();
+
+      await expect(forkConversation(convDir, srcId, targetId)).rejects.toThrow(
+        /Failed to rebind forked conversation database/
+      );
+      expect(fs.existsSync(path.join(convDir, `${targetId}.db`))).toBe(false);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects fork when source conversation db does not exist", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-test-"));
     try {

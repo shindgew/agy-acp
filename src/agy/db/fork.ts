@@ -44,7 +44,8 @@ export async function forkConversation(
   }
 
   // 2. Rebind trajectory_meta.cascade_id (agy identity for this file) and
-  //    read the snapshot cursor from the copied steps table.
+  //    read the snapshot cursor from the copied steps table. A child that
+  //    still carries the source cascade_id is not an independent conversation.
   let maxStepIdx = -1;
   try {
     const destDb = new Database(destDbPath);
@@ -58,18 +59,20 @@ export async function forkConversation(
       if (names.has("trajectory_meta")) {
         destDb.prepare("UPDATE trajectory_meta SET cascade_id = ?").run(targetConversationId);
       }
-      if (names.has("steps")) {
-        const row = destDb.prepare("SELECT MAX(idx) AS maxIdx FROM steps").get() as
-          | { maxIdx: number | null }
-          | undefined;
-        if (typeof row?.maxIdx === "number") maxStepIdx = row.maxIdx;
+      if (!names.has("steps")) {
+        throw new Error(`forked conversation database is missing steps table: ${targetConversationId}`);
       }
+      const row = destDb.prepare("SELECT MAX(idx) AS maxIdx FROM steps").get() as
+        | { maxIdx: number | null }
+        | undefined;
+      if (typeof row?.maxIdx === "number") maxStepIdx = row.maxIdx;
     } finally {
       destDb.close();
     }
   } catch (error) {
-    console.error(
-      `[agy-acp] WARN: failed to update trajectory_meta in forked db ${targetConversationId}: ${(error as Error).message}`
+    removeConversationFiles(destDbPath);
+    throw new Error(
+      `Failed to rebind forked conversation database ${targetConversationId}: ${(error as Error).message}`
     );
   }
 
@@ -90,4 +93,14 @@ export async function forkConversation(
   }
 
   return { maxStepIdx };
+}
+
+function removeConversationFiles(dbPath: string): void {
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    try {
+      fs.unlinkSync(`${dbPath}${suffix}`);
+    } catch {
+      // Sidecars are absent unless the copy used WAL/journal mode.
+    }
+  }
 }

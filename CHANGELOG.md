@@ -16,6 +16,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 ### Fixed
 
 - Serialize `session/fork` against `session/resume` and `session/load` for the same parent session ID — including persisted-but-inactive parents — and bind the child's `lastStepIdx` to the copied conversation snapshot so inherited agy step rows cannot be emitted as the child's first-turn output. (#58)
+- Fail `session/fork` and delete the partial child database when rebinding `trajectory_meta.cascade_id` or reading the snapshot cursor fails, instead of returning a child that still carries the source conversation identity. (#58)
 - Fix interactive turn completion hanging indefinitely until the 5-minute `printTimeout` expires when `agy` completes the turn, adding a 300ms quiescence settle window fallback and ANSI-resilient permission panel detection. (#113)
 - Refine `_busy` calculation in `StreamPoller` to evaluate `latestMeaningful` step status rather than raw trailing rows (such as lifecycle `stepType 101` or `gen_metadata` records), ensuring trailing metadata does not prevent clean turn completion. (#113)
 

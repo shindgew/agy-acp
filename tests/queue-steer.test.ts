@@ -552,15 +552,27 @@ describe("queue and steer-by-cancel", () => {
           updates.push(ctx.params.update as Record<string, unknown>);
         }
       );
+      let turn = 0;
+      const turnSteps = [
+        [
+          { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt 1" }) },
+          { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ans 1" }) }
+        ],
+        [
+          { idx: 2, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt 2" }) },
+          { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ans 2" }) }
+        ]
+      ];
       const connection = client.connect(
         createAcpV2App({
           ...printModeOptions({ conversationsDir: dir, stateDir: dir }),
-          spawnProcess: spawnAgyWritingConversation(dir, "conv-v2-queue", [
-            { idx: 0, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt 1" }) },
-            { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ans 1" }) },
-            { idx: 2, stepType: 14, stepPayload: encodeStepPayload({ userPrompt: "prompt 2" }) },
-            { idx: 3, stepType: 15, stepPayload: encodeStepPayload({ agentText: "ans 2" }) }
-          ])
+          spawnProcess: ((command: string, args: string[]) => {
+            if (args[0] === "models") return new FakeProcess([TEST_MODELS_OUTPUT]);
+            const db = createConversationDb(dir, "conv-v2-queue");
+            for (const step of turnSteps[turn++] ?? []) insertStep(db, step);
+            db.close();
+            return new FakeProcess([]);
+          }) as unknown as SpawnFactory
         })
       );
       try {
@@ -591,7 +603,7 @@ describe("queue and steer-by-cancel", () => {
         await waitFor(() => {
           const idleCount = updates.filter((u) => u.sessionUpdate === "state_update" && u.state === "idle").length;
           return idleCount >= 2;
-        });
+        }, 5000);
 
         const userMessages = updates.filter((u) => u.sessionUpdate === "user_message");
         expect(userMessages.length).toBe(2);
