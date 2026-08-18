@@ -79,7 +79,8 @@ export async function registerSession(
   sessionId: string,
   session: SessionState,
   sessions: Map<string, SessionState>,
-  maxActiveSessions: number
+  maxActiveSessions: number,
+  options?: { evictable?: ReadonlySet<string> }
 ): Promise<void> {
   const replaced = sessions.get(sessionId);
   if (replaced && replaced !== session) {
@@ -94,7 +95,9 @@ export async function registerSession(
   }
 
   while (sessions.size >= maxActiveSessions) {
-    const candidate = [...sessions].find(([, current]) => !sessionTurnBusy(current));
+    const candidate = [...sessions].find(
+      ([id, current]) => !sessionTurnBusy(current) || options?.evictable?.has(id)
+    );
     if (!candidate) break;
     const [evictedId, evicted] = candidate;
     sessions.delete(evictedId);
@@ -225,7 +228,13 @@ export async function forkSession(
         childSession = await buildSession(cwd, additionalDirectories, childStored, deps);
         claim?.throwIfAborted();
         childSession.sessionId = childSessionId;
-        await registerSession(childSessionId, childSession, deps.sessions, deps.maxActiveSessions);
+        await registerSession(
+          childSessionId,
+          childSession,
+          deps.sessions,
+          deps.maxActiveSessions,
+          activeParent ? { evictable: new Set([parentSessionId]) } : undefined
+        );
         await deps.persistSession(childSessionId, childSession);
         setupComplete = true;
 

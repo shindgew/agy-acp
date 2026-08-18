@@ -13,7 +13,7 @@ import {
   createAcpV2App
 } from "../src/agent.js";
 import { discardForkedConversation, forkConversation } from "../src/agy/db/fork.js";
-import { forkSession, persistSession } from "../src/acp/session/setup.js";
+import { forkSession, persistSession, reloadSession } from "../src/acp/session/setup.js";
 import { SessionStore } from "../src/acp/session/store.js";
 import { KeyedAsyncLock } from "../src/acp/session/setup-lock.js";
 import type { AgyCliBackend } from "../src/agy/cli.js";
@@ -455,6 +455,95 @@ describe("forkSession artifact cleanup", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it("evicts the claimed parent when forking at the active-session cap", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-cap-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(brainDir, { recursive: true });
+
+    const srcId = "src-cap";
+    const srcDb = createConversationDb(convDir, srcId);
+    insertStep(srcDb, {
+      idx: 0,
+      stepType: 1,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+    });
+    srcDb.close();
+
+    const parentId = "parent-cap";
+    const store = new SessionStore(stateDir);
+    await store.persist(parentId, {
+      cwd: "/workspace",
+      additionalDirectories: [],
+      conversationId: srcId,
+      lastStepIdx: 0,
+      model: "gemini-2.5-flash",
+      reasoningEffort: "",
+      v2UserMessageIdsByStep: {},
+      updatedAt: new Date().toISOString()
+    });
+
+    const closed: string[] = [];
+    const backend = {
+      startSession: async () => ({
+        conversationId: srcId,
+        lastStepIdx: 0,
+        config: { mode: "default" },
+        restoreConversation: () => {},
+        setModel: () => {},
+        setEffort: () => {},
+        setMode: () => {},
+        close: async () => {
+          closed.push("closed");
+        }
+      })
+    } as unknown as AgyCliBackend;
+
+    const activeSessions = new Map();
+    const { session: parentSession } = await reloadSession(parentId, "/workspace", [], {
+      env: process.env,
+      argv: ["--no-interactive-permissions"],
+      backend,
+      getModelOptions: async () => ["gemini-2.5-flash"],
+      conversationsDir: convDir,
+      store,
+      sessions: activeSessions,
+      maxActiveSessions: 1,
+      setupLocks: new KeyedAsyncLock()
+    });
+
+    try {
+      const forked = await forkSession(parentId, "/workspace", [], {
+        env: process.env,
+        argv: ["--no-interactive-permissions"],
+        backend,
+        getModelOptions: async () => ["gemini-2.5-flash"],
+        conversationsDir: convDir,
+        store,
+        sessions: activeSessions,
+        maxActiveSessions: 1,
+        persistSession: async () => {},
+        setupLocks: new KeyedAsyncLock()
+      });
+
+      expect(activeSessions.size).toBe(1);
+      expect(activeSessions.has(parentId)).toBe(false);
+      expect(activeSessions.get(forked.childSessionId)).toBe(forked.childSession);
+      expect(parentSession.closed).toBe(true);
+      expect(closed.length).toBeGreaterThan(0);
+    } finally {
+      for (const session of activeSessions.values()) {
+        session.closed = true;
+        await session.agy.close().catch(() => {});
+      }
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("KeyedAsyncLock", () => {
   it("runs same-key callbacks one at a time and leaves other keys concurrent", async () => {

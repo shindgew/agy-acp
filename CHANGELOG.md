@@ -25,6 +25,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Send alternate permission-menu choices without waiting for a PTY panel redraw; confirm the decision from the status-9 row and `permissions` blob. (#122)
 - Surface `SessionStore.persist` write failures to callers so `session/fork` can roll back a registered child instead of returning an unpersisted session ID. (#58)
 - Fail `session/fork` and discard the partial child when cloning brain-directory artifacts fails, instead of returning a child with an incomplete artifact tree. (#58)
+- Evict the forked parent when `maxActiveSessions` is already full so a fork claim cannot bypass the active-session cap. (#58)
 
 ## [0.5.1] - 2026-08-15
 
