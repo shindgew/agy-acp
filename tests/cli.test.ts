@@ -1172,6 +1172,123 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("keeps turn open when background task completes via task_details terminal row until assistant summary arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-task-row-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-task-row");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job &", output: "Started task-99" }) }),
+        task: encodeTaskDetails({ taskId: "task-99", logUri: "", description: "Long job" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running task in background..." })
+      });
+      db.close();
+
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Task finishes after 200ms with a terminal task_details row (no system message)
+        setTimeout(async () => {
+          const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-task-row.db"));
+          insertStep(db2, {
+            idx: 3,
+            stepType: 21,
+            status: 3,
+            stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "long_job", output: "Done with job" }) }),
+            task: encodeTaskDetails({ taskId: "task-99", logUri: "", description: "Long job" })
+          });
+          // Model takes another 250ms to generate the summary response
+          setTimeout(() => {
+            insertStep(db2, {
+              idx: 4,
+              stepType: 15,
+              status: 3,
+              stepPayload: encodeStepPayload({ agentText: "Long job finished successfully with output: Done with job" })
+            });
+            db2.close();
+            pty.emitData("? for shortcuts");
+          }, 250);
+        }, 200);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("run job", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some(u => JSON.stringify(u).includes("Long job finished successfully"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("keeps turn open when cancelled background task (status 6) is the latest meaningful step until assistant responds", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-bg-cancelled-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "bg-cancelled");
+      // Task launches
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "agy models | cat", output: "" }) }),
+        task: encodeTaskDetails({ taskId: "task-82", logUri: "", description: "agy models | cat" })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Running models query..." })
+      });
+      db.close();
+
+      setTimeout(() => {
+        pty.emitData("? for shortcuts");
+        // Task cancelled (status 6) after 200ms — this row IS the latest meaningful step
+        setTimeout(async () => {
+          const db2 = new (await import("better-sqlite3")).default(path.join(dir, "bg-cancelled.db"));
+          insertStep(db2, {
+            idx: 3,
+            stepType: 21,
+            status: 6,
+            stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "agy models | cat", output: "cancelled" }) }),
+            task: encodeTaskDetails({ taskId: "task-82", logUri: "", description: "agy models | cat" })
+          });
+          // Model responds 250ms later with summary
+          setTimeout(() => {
+            insertStep(db2, {
+              idx: 4,
+              stepType: 15,
+              status: 3,
+              stepPayload: encodeStepPayload({ agentText: "The background task was cancelled." })
+            });
+            db2.close();
+            pty.emitData("? for shortcuts");
+          }, 250);
+        }, 200);
+      }, 30);
+    });
+
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const outcome = await session.prompt("list models", async (update) => {
+      updates.push(update);
+    }, async () => "agy-allow-once");
+
+    expect(outcome.stopReason).toBe("end_turn");
+    expect(updates.some(u => JSON.stringify(u).includes("background task was cancelled"))).toBe(true);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("writes only the verbatim user prompt back to a reused interactive PTY", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-reuse-"));
     const pty = new FakePty(() => {

@@ -141,6 +141,7 @@ export class StreamPoller {
   private readonly observedUserStepIdxs = new Set<number>();
   private _lastUserStepIdx = -1;
   private _latestSystemMessageStepIdx = -1;
+  private _latestTaskCompletionStepIdx = -1;
   private _hasBackgroundWaiting = false;
   /** Launched background task id -> idx of the first row that carried it. */
   private readonly _launchedTaskIdxs = new Map<string, number>();
@@ -298,7 +299,8 @@ export class StreamPoller {
     // If a background completion wake has arrived but no follow-up assistant response
     // has been produced beyond that wake, do not treat the prior assistant response as conclusive.
     const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
-    if (this._latestSystemMessageStepIdx > (latestMeaningful?.idx ?? -1)) {
+    const latestWakeIdx = Math.max(this._latestSystemMessageStepIdx, this._latestTaskCompletionStepIdx);
+    if (latestWakeIdx >= (latestMeaningful?.idx ?? -1) && latestWakeIdx >= 0) {
       return false;
     }
     // Model provider errors end the turn conclusively.
@@ -346,6 +348,9 @@ export class StreamPoller {
       ) {
         if (isSystemMessage(text)) {
           this._latestSystemMessageStepIdx = Math.max(this._latestSystemMessageStepIdx, row.idx);
+        }
+        if (isTaskTerminalRow) {
+          this._latestTaskCompletionStepIdx = Math.max(this._latestTaskCompletionStepIdx, row.idx);
         }
         // Rows are re-read on every poll, so an id-less lifecycle row observed
         // before a later launch would otherwise close that newer task on the
