@@ -7,6 +7,13 @@ pre-1.0 caveat that minor versions may include breaking changes. Starting with
 `1.0.0-alpha.0`, package pre-releases track ACP v2 draft work; the wire protocol
 for draft v2 may still change before ACP v2 stabilizes.
 
+## [0.5.2] - Unreleased
+
+### Fixed
+
+- Fix interactive turn completion hanging indefinitely until the 5-minute `printTimeout` expires when `agy` completes the turn, adding a 300ms quiescence settle window fallback and ANSI-resilient permission panel detection. (#113)
+- Refine `_busy` calculation in `StreamPoller` to evaluate `latestMeaningful` step status rather than raw trailing rows (such as lifecycle `stepType 101` or `gen_metadata` records), ensuring trailing metadata does not prevent clean turn completion. (#113)
+
 ## [0.5.1] - 2026-08-15
 
 ### Added
