@@ -722,7 +722,7 @@ export class AgyCliSession {
         const isIdleCandidate =
           poller.turnCompleteCandidate &&
           poller.lastStepIdx > this.#lastStepIdx &&
-          (hasMatchedMarker || (candidateRevision === poller.revision && hasQuiesced));
+          (hasMatchedMarker || (candidateRevision === poller.revision && poller.isConclusiveTurnEnd && hasQuiesced));
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
