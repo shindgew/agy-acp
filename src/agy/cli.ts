@@ -44,8 +44,13 @@ const POLL_INTERVAL_MS = 200;
 const TRAILING_POLL_ATTEMPTS = 3;
 const TRAILING_POLL_DELAY_MS = 100;
 const PERMISSION_RENDER_SETTLE_MS = 20;
-const PERMISSION_REDRAW_TIMEOUT_MS = 2_000;
+const PERMISSION_REDRAW_TIMEOUT_MS = 2_500;
 const QUIESCENT_SETTLE_MS = 300;
+
+const ANSI_REGEX = /\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~]|\].*?(?:\x07|\x1B\\))/g;
+export function stripAnsi(text: string): string {
+  return text.replace(ANSI_REGEX, "");
+}
 
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
@@ -566,16 +571,6 @@ export class AgyCliSession {
               } catch {
                 // best effort
               }
-            }
-
-            if (interaction.toolName !== "ask_question" && !await this.waitForPermissionPanel(deadline)) {
-              if (this.#cancelled) break;
-              throw new AgyCliError(
-                "agy permission panel was not observed before requesting permission",
-                [this.config.agyPath],
-                null,
-                this.#ptyOutput
-              );
             }
 
             if (interaction.toolName === "ask_question") {
@@ -1139,6 +1134,7 @@ export class AgyCliSession {
       clean.includes("Yes, and always allow") ||
       clean.includes("Select option:") ||
       clean.includes("Allow this command?") ||
+      clean.includes("Allow this tool") ||
       clean.includes("Allow once") ||
       clean.includes("Allow this time");
     const visible = isPermissionContext && PERMISSION_MARKERS.some((marker) => clean.includes(marker));
@@ -1153,15 +1149,13 @@ export class AgyCliSession {
   }
 
   private async writePermissionKeys(keys: string, deadline: number): Promise<boolean> {
-    if (!await this.waitForPermissionPanel(deadline)) {
-      if (this.#cancelled) return false;
-      throw new AgyCliError(
-        "agy permission panel did not settle before applying the permission response",
-        [this.config.agyPath],
-        null,
-        this.#ptyOutput
-      );
+    if (this.#cancelled) return false;
+
+    // Allow in-flight panel renders to settle before capturing marker count
+    while (this.#ptyPermissionRenderTimer !== undefined && !this.#cancelled) {
+      await sleep(10);
     }
+    if (this.#cancelled) return false;
 
     const down = "\x1b[B";
     let offset = 0;
@@ -1183,26 +1177,24 @@ export class AgyCliSession {
     return true;
   }
 
-  private async waitForPermissionPanel(deadline: number): Promise<boolean> {
-    const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
-    while (
-      (!this.#ptyPermissionPanelVisible || this.#ptyPermissionRenderTimer !== undefined) &&
-      !this.#cancelled &&
-      Date.now() < expires
-    ) {
-      await sleep(5);
-    }
-    if (this.#ptyPermissionRenderTimer !== undefined) {
-      clearTimeout(this.#ptyPermissionRenderTimer);
-      this.flushPermissionRender();
-    }
-    return this.#ptyPermissionPanelVisible;
-  }
-
   private async waitForPermissionRenderAfter(renderCount: number, deadline: number): Promise<boolean> {
     const expires = Math.min(deadline, Date.now() + PERMISSION_REDRAW_TIMEOUT_MS);
     while (this.#ptyPermissionMarkerCount <= renderCount && !this.#cancelled && Date.now() < expires) {
+      if (this.#ptyPermissionRenderTimer !== undefined && this.#ptyPermissionRender.length > 0) {
+        const rawOutput = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
+        const cleanOutput = stripAnsi(rawOutput);
+        if (PERMISSION_MARKERS.some((marker) => cleanOutput.includes(marker))) {
+          if (this.#ptyPermissionRenderTimer) clearTimeout(this.#ptyPermissionRenderTimer);
+          this.flushPermissionRender();
+          if (this.#ptyPermissionMarkerCount > renderCount) break;
+        }
+      }
       await sleep(5);
+    }
+    if (this.#cancelled) return false;
+    if (this.#ptyPermissionRenderTimer !== undefined) {
+      clearTimeout(this.#ptyPermissionRenderTimer);
+      this.flushPermissionRender();
     }
     return this.#ptyPermissionMarkerCount > renderCount;
   }
@@ -1226,11 +1218,12 @@ function splitIncompleteAnsi(input: string): { completed: string; incomplete: st
 const PERMISSION_MARKERS = [
   "Yes, and always allow",
   "Always allow",
+  "Allow this tool",
+  "Allow this command",
   "Allow once",
   "Allow this time",
-  "Allow this command"
+  "Yes, allow"
 ] as const;
-
 function markerPrefixTail(output: string, marker: string): string {
   const max = Math.min(output.length, marker.length - 1);
   for (let length = max; length > 0; length--) {
@@ -1413,6 +1406,7 @@ export async function defaultPtyFactory(): Promise<PtyFactory> {
       }
     }
   }
+  // @ts-ignore optional runtime dependency
   const pty = await import("node-pty");
   return { spawn: (command, args, options) => pty.spawn(command, args, { ...options, name: "xterm-256color" }) };
 }
