@@ -13,7 +13,7 @@ import {
   createAcpV2App
 } from "../src/agent.js";
 import { discardForkedConversation, forkConversation } from "../src/agy/db/fork.js";
-import { forkSession } from "../src/acp/session/setup.js";
+import { forkSession, persistSession } from "../src/acp/session/setup.js";
 import { SessionStore } from "../src/acp/session/store.js";
 import { KeyedAsyncLock } from "../src/acp/session/setup-lock.js";
 import type { AgyCliBackend } from "../src/agy/cli.js";
@@ -353,7 +353,75 @@ describe("forkSession artifact cleanup", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
-});
+
+  it("rolls back a fork when SessionStore.persist cannot write the state directory", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-store-unwritable-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const brainDir = path.join(tmpDir, "brain");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(brainDir, { recursive: true });
+
+    const srcId = "src-unwritable";
+    const srcDb = createConversationDb(convDir, srcId);
+    insertStep(srcDb, {
+      idx: 0,
+      stepType: 1,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "prompt" })
+    });
+    srcDb.close();
+    fs.mkdirSync(path.join(brainDir, srcId), { recursive: true });
+    fs.writeFileSync(path.join(brainDir, srcId, "plan.md"), "# plan");
+
+    const parentId = "parent-unwritable";
+    const store = new SessionStore(stateDir);
+    await store.persist(parentId, {
+      cwd: "/workspace",
+      additionalDirectories: [],
+      conversationId: srcId,
+      lastStepIdx: 0,
+      model: "gemini-2.5-flash",
+      reasoningEffort: "",
+      v2UserMessageIdsByStep: {},
+      updatedAt: new Date().toISOString()
+    });
+
+    const activeSessions = new Map();
+    fs.chmodSync(stateDir, 0o555);
+    try {
+      await expect(
+        forkSession(parentId, "/workspace", [], {
+          env: process.env,
+          argv: ["--no-interactive-permissions"],
+          backend: {
+            startSession: async () => ({
+              restoreConversation: () => {},
+              setModel: () => {},
+              setEffort: () => {},
+              setMode: () => {},
+              close: async () => {}
+            })
+          } as unknown as AgyCliBackend,
+          getModelOptions: async () => ["gemini-2.5-flash"],
+          conversationsDir: convDir,
+          store,
+          sessions: activeSessions,
+          maxActiveSessions: 8,
+          persistSession: (sessionId, session) => persistSession(store, sessionId, session),
+          setupLocks: new KeyedAsyncLock()
+        })
+      ).rejects.toThrow();
+
+      expect(activeSessions.size).toBe(0);
+      const leftoverDbs = fs.readdirSync(convDir).filter((name) => name.endsWith(".db"));
+      expect(leftoverDbs).toEqual([`${srcId}.db`]);
+      expect(fs.readdirSync(brainDir)).toEqual([srcId]);
+    } finally {
+      try { fs.chmodSync(stateDir, 0o755); } catch {}
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 
 describe("KeyedAsyncLock", () => {
   it("runs same-key callbacks one at a time and leaves other keys concurrent", async () => {

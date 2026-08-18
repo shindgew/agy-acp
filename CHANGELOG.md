@@ -23,6 +23,7 @@ for draft v2 may still change before ACP v2 stabilizes.
 - Decode protobuf payload field 114 (task completion notifications) on lifecycle `stepType 101` rows and expand `isSystemMessage()` to recognize un-tagged message envelopes (`[Message]`, `[Notice]`, `[System]`, `sender=`), ensuring background task completions properly retire active tasks in `StreamPoller` without hanging turns. (#131)
 - Keep interactive turns open after failed or cancelled tools and background-task completion wakes until a conclusive SQLite follow-up row arrives, instead of idling on PTY silence. (#113, #115, #120)
 - Send alternate permission-menu choices without waiting for a PTY panel redraw; confirm the decision from the status-9 row and `permissions` blob. (#122)
+- Surface `SessionStore.persist` write failures to callers so `session/fork` can roll back a registered child instead of returning an unpersisted session ID. (#58)
 
 ## [0.5.1] - 2026-08-15
 
