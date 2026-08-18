@@ -4329,8 +4329,10 @@ describe("subagent_info metadata propagation", () => {
 });
 
 describe("isSystemMessage & isSystemMessagePrefix", () => {
-  it("buffers every accepted system-message prefix form", () => {
+  it("buffers every accepted system-message prefix form including untagged [Message] timestamp=", () => {
     const prefixes = [
+      "<",
+      "<system",
       "<SYSTEM_MESSAGE>",
       "<SYSTEM_MESSAGE>\n",
       "<SYSTEM_MESSAGE>\n[Mes",
@@ -4339,7 +4341,14 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
       "<SYSTEM_MESSAGE>\ncontent=hello",
       "<SYSTEM_MESSAGE>\ntimestamp=123",
       "<SYSTEM_MESSAGE>\npriority=high",
-      "<SYSTEM_MESSAGE>\ntask"
+      "<SYSTEM_MESSAGE>\ntask",
+      "[",
+      "[M",
+      "[Mess",
+      "[Message]",
+      "[Message] ",
+      "[Message] time",
+      "[Message] timestamp="
     ];
     for (const p of prefixes) {
       expect(isSystemMessagePrefix(p)).toBe(true);
@@ -4348,7 +4357,11 @@ describe("isSystemMessage & isSystemMessagePrefix", () => {
     const nonPrefixes = [
       "Hello world",
       "<SYSTEM_MESSAGE>\nHello world",
-      "<SYSTEM_MESSAGE>\nsome random text"
+      "<SYSTEM_MESSAGE>\nsome random text",
+      "[Notice] Note that this is read-only",
+      "[System] Architecture diagram",
+      "sender=user\nreceiver=agent",
+      "[Message] from the user"
     ];
     for (const p of nonPrefixes) {
       expect(isSystemMessagePrefix(p)).toBe(false);
