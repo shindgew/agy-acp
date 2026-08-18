@@ -3692,6 +3692,75 @@ describe("StreamPoller", () => {
     poller.close();
     db.close();
   });
+
+  it("does not retire current active tasks when receiving a notification for an unknown or older task id", () => {
+    const db = createConversationDb(dir, "conv-bg-unknown-task-notif");
+    // Current turn launches task-100
+    insertStep(db, {
+      idx: 1,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "long-job &", output: "Task task-100 launched" })
+      }),
+      task: encodeTaskDetails({ taskId: "task-100", logUri: "", description: "long-job" })
+    });
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        agentText: "Running long-job in background..."
+      })
+    });
+
+    const poller = new StreamPoller({
+      dir,
+      conversationId: "conv-bg-unknown-task-notif",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Delayed notification arrives from an older task (task-40) not in the current poller scope
+    insertStep(db, {
+      idx: 3,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:16:56Z sender=conv/task-40 content=Task id "task-40" finished with result: OK',
+          type: "task_notification"
+        })
+      })
+    });
+
+    poller.poll();
+    // task-100 MUST still be active and not prematurely closed by the unknown task notification
+    expect(poller.hasActiveBackgroundTasks).toBe(true);
+
+    // Now task-100 actually completes
+    insertStep(db, {
+      idx: 4,
+      stepType: 101,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        taskNotification: encodeTaskNotification({
+          message: '[Message] timestamp=2026-08-18T11:17:10Z sender=conv/task-100 content=Task id "task-100" finished with result: OK',
+          type: "task_notification"
+        })
+      })
+    });
+
+    poller.poll();
+    expect(poller.hasActiveBackgroundTasks).toBe(false);
+
+    poller.close();
+    db.close();
+  });
 });
 
 describe("ReplayCache", () => {
