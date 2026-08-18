@@ -1133,9 +1133,17 @@ export class AgyCliSession {
 
   private flushPermissionRender(): void {
     const raw = this.#ptyPermissionMarkerTail + this.#ptyPermissionRender;
-    const clean = raw.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g, "");
-    const visible = PERMISSION_MARKERS.some((marker) => raw.includes(marker) || clean.includes(marker));
-    this.#ptyPermissionMarkerTail = multiMarkerPrefixTail(clean, PERMISSION_MARKERS);
+    const { completed, incomplete } = splitIncompleteAnsi(raw);
+    const clean = completed.replace(/\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g, "");
+    const isPermissionContext =
+      clean.includes("Yes, and always allow") ||
+      clean.includes("Select option:") ||
+      clean.includes("Allow this command?") ||
+      clean.includes("Allow once") ||
+      clean.includes("Allow this time");
+    const visible = isPermissionContext && PERMISSION_MARKERS.some((marker) => clean.includes(marker));
+    const cleanTail = multiMarkerPrefixTail(clean, PERMISSION_MARKERS);
+    this.#ptyPermissionMarkerTail = cleanTail + incomplete;
     if (visible) {
       this.#ptyPermissionMarkerCount++;
       this.#ptyPermissionPanelVisible = true;
@@ -1202,6 +1210,17 @@ export class AgyCliSession {
   async close(): Promise<void> {
     await this.cancel();
   }
+}
+
+function splitIncompleteAnsi(input: string): { completed: string; incomplete: string } {
+  const match = input.match(/\x1b(?:\[[0-9;?]*|\][^\x07]*|[()][AB012]?)?$/);
+  if (match && match.index !== undefined && match[0].length > 0) {
+    return {
+      completed: input.slice(0, match.index),
+      incomplete: match[0]
+    };
+  }
+  return { completed: input, incomplete: "" };
 }
 
 const PERMISSION_MARKERS = [

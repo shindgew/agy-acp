@@ -28,7 +28,7 @@ import {
 } from "../src/acp/tool-calls/permissions.js";
 import { requestPermissionV1, requestPermissionV2 } from "../src/acp/session/request-permission.js";
 import { createConversationDb, insertGenMetadata, insertStep, updateStep } from "./fixtures/conversation-db.js";
-import { encodeCommandResult, encodeGenMetadata, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
+import { encodeCommandResult, encodeGenMetadata, encodeModelProviderError, encodePermissions, encodeStepPayload, encodeTaskDetails, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 
 /** Collects updates via the `onUpdate` callback `AgyCliSession.prompt` takes. */
 async function collectUpdates(
@@ -854,6 +854,85 @@ describe("permission bridge", () => {
     await new Promise((resolve) => setTimeout(resolve, 200));
     expect(pty.writes).toContain("\r");
     await session.cancel();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("detects permission markers when ANSI escape is split across PTY chunks", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-split-ansi-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "split-ansi");
+      insertStep(db, pendingToolRow("run_command"));
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    // Split ANSI sequence "\x1b[" across chunk boundaries: "Select option:\nAllow \x1b[" then "32monce\x1b[0m"
+    setTimeout(() => {
+      pty.emitData("Select option:\nAllow \x1b[");
+      setTimeout(() => {
+        pty.emitData("32monce\x1b[0m");
+      }, 30);
+    }, 50);
+
+    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(pty.writes).toContain("\r");
+    await session.cancel();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("does not trigger permission panel from generic labels in non-menu command output", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-generic-output-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "generic-output");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({ commandResult: encodeCommandResult({ command: "echo", output: "Please Allow once in your config file" }) })
+      });
+      insertStep(db, {
+        idx: 2,
+        stepType: 15,
+        status: 3,
+        stepPayload: encodeStepPayload({ agentText: "Done." })
+      });
+      db.close();
+    });
+    pty.emitPermissionPanelOnStart = false;
+    const session = interactiveSession(dir, pty);
+
+    // Normal command stdout contains phrase "Allow once" without menu context
+    pty.emitData("Please Allow once in your config file\nDone.\n");
+
+    const result = await session.prompt("check", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    // Should NOT have sent premature permission keys
+    expect(pty.writes).not.toContain("\r");
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("concludes turn promptly when terminal step is a modelProviderError (stepType 17)", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-provider-error-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "provider-error");
+      insertStep(db, {
+        idx: 1,
+        stepType: 17,
+        status: 3,
+        stepPayload: encodeStepPayload({ modelProviderError: encodeModelProviderError({ summary: "Rate limit exceeded" }) })
+      });
+      db.close();
+    });
+    const session = interactiveSession(dir, pty, "5s");
+    const start = Date.now();
+    const result = await session.prompt("ask", async () => {}, async () => "agy-allow-once");
+    const elapsed = Date.now() - start;
+    expect(result.stopReason).toBe("end_turn");
+    expect(elapsed).toBeLessThan(2_000);
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
