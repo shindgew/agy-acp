@@ -2908,10 +2908,43 @@ describe("StreamPoller", () => {
     expect(poller.turnCompleteCandidate).toBe(true);
     expect(poller.isConclusiveTurnEnd).toBe(true);
 
+    // 3. Model provider error wrapper (stepType 17, status 7) is also conclusive
+    const db3 = createConversationDb(dir, "conv-model-error-conclusive");
+    insertStep(db3, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Trigger model error" })
+    });
+    insertStep(db3, {
+      idx: 2,
+      stepType: 17,
+      status: 7,
+      stepPayload: encodeStepPayload({
+        modelProviderError: encodeModelProviderError({
+          summary: "Rate limit exceeded",
+          userMessage: "Rate limit exceeded",
+          responseJson: JSON.stringify({ error: { code: 429, status: "RESOURCE_EXHAUSTED", details: [{ reason: "QUOTA_EXHAUSTED" }] } })
+        })
+      })
+    });
+    const poller3 = new StreamPoller({
+      dir,
+      conversationId: "conv-model-error-conclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller3.poll()).toHaveLength(1);
+    expect(poller3.turnCompleteCandidate).toBe(true);
+    expect(poller3.isConclusiveTurnEnd).toBe(true);
+
     poller.close();
     poller2.close();
+    poller3.close();
     db.close();
     db2.close();
+    db3.close();
   });
 
   it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {

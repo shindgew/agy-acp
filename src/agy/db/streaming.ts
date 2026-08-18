@@ -295,11 +295,11 @@ export class StreamPoller {
     if (!this._latestStepTerminal || this._latestStepStatus === null || this._latestStepType === null) {
       return false;
     }
-    // Completed agent text (stepType 15) is the normal conclusive turn ending.
+    // Completed agent text (stepType 15) or model error wrapper (stepType 17) is the conclusive turn ending.
     // Tool steps (status 3/6/7) are turn-complete candidates but must not bypass
     // the idle marker / quiescence wait, allowing agy to emit trailing error
     // commentary or recovery explanations after failed (7) or cancelled (6) tools.
-    return this._latestStepType === 15 && isTerminalStepStatus(this._latestStepStatus);
+    return (this._latestStepType === 15 || this._latestStepType === 17) && isTerminalStepStatus(this._latestStepStatus);
   }
 
   /**
