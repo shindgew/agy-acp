@@ -13,6 +13,8 @@ import {
   createAcpV2App
 } from "../src/agent.js";
 import { forkConversation } from "../src/agy/db/fork.js";
+import { SessionStore } from "../src/acp/session/store.js";
+import { KeyedAsyncLock } from "../src/acp/session/setup-lock.js";
 import { createConversationDb, insertStep } from "./fixtures/conversation-db.js";
 import { encodeStepPayload, encodeToolCall, encodeToolRun } from "./fixtures/step-encoder.js";
 import * as installer from "../src/agy/installer.js";
@@ -122,7 +124,8 @@ describe("forkConversation", () => {
       fs.writeFileSync(path.join(srcBrainPath, "plan.md"), "# Initial Plan\n- [ ] Task 1");
 
       // 3. Fork conversation
-      await forkConversation(convDir, srcId, targetId, brainDir);
+      const forked = await forkConversation(convDir, srcId, targetId, brainDir);
+      expect(forked.maxStepIdx).toBe(1);
 
       // 4. Verify target conversation DB
       const targetDbPath = path.join(convDir, `${targetId}.db`);
@@ -166,6 +169,53 @@ describe("forkConversation", () => {
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("KeyedAsyncLock", () => {
+  it("runs same-key callbacks one at a time and leaves other keys concurrent", async () => {
+    const lock = new KeyedAsyncLock();
+    const order: string[] = [];
+    let releaseA: (() => void) | undefined;
+    const aGate = new Promise<void>((resolve) => {
+      releaseA = resolve;
+    });
+
+    const a = lock.run("same", async () => {
+      order.push("a-start");
+      await aGate;
+      order.push("a-end");
+      return "a";
+    });
+    const b = lock.run("same", async () => {
+      order.push("b");
+      return "b";
+    });
+    const other = lock.run("other", async () => {
+      order.push("other");
+      return "other";
+    });
+
+    await vi.waitFor(() => {
+      expect(order).toContain("a-start");
+      expect(order).toContain("other");
+    });
+    expect(order).not.toContain("b");
+
+    releaseA!();
+    await expect(Promise.all([a, b, other])).resolves.toEqual(["a", "b", "other"]);
+    expect(order.indexOf("b")).toBeGreaterThan(order.indexOf("a-end"));
+    expect(order).toContain("other");
+  });
+
+  it("still runs the next waiter after a rejected holder", async () => {
+    const lock = new KeyedAsyncLock();
+    const first = lock.run("k", async () => {
+      throw new Error("holder failed");
+    });
+    const second = lock.run("k", async () => "ok");
+    await expect(first).rejects.toThrow("holder failed");
+    await expect(second).resolves.toBe("ok");
   });
 });
 
@@ -320,8 +370,12 @@ describe("ACP v1 session/fork", () => {
       expect(fs.existsSync(forkedDbPath)).toBe(true);
 
       const forkedDb = new Database(forkedDbPath, { readonly: true });
-      const forkedSteps = forkedDb.prepare("SELECT idx, step_type FROM steps ORDER BY idx").all();
+      const forkedSteps = forkedDb.prepare("SELECT idx, step_type FROM steps ORDER BY idx").all() as Array<{
+        idx: number;
+      }>;
       expect(forkedSteps).toHaveLength(2);
+      const snapshotMaxIdx = Math.max(...forkedSteps.map((step) => step.idx));
+      expect(storeAfterFork.sessions[forked.sessionId].lastStepIdx).toBe(snapshotMaxIdx);
       forkedDb.close();
     } finally {
       installSpy.mockRestore();
@@ -491,6 +545,217 @@ describe("ACP v1 session/fork", () => {
       installSpy.mockRestore();
       connection.close();
       fs.rmSync(tmpStateDir, { recursive: true, force: true });
+    }
+  });
+
+  it("forks a persisted parent that is no longer in the active-session map", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-cold-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    const parentConvId = "cold-parent-conv";
+    const spawnProcess = spawnAgyWritingConversation(convDir, parentConvId, [
+      { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "cold parent" }) }
+    ]);
+
+    const agent = new AcpAgent({
+      stateDir,
+      conversationsDir: convDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const parent = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: "text", text: "seed history" }]
+      });
+
+      await connection.agent.request(methods.agent.session.close, {
+        sessionId: parent.sessionId
+      });
+
+      const forked = (await connection.agent.request(methods.agent.session.fork, {
+        sessionId: parent.sessionId,
+        cwd: "/workspace"
+      })) as V1ForkSessionResponse;
+      expect(forked.sessionId).not.toBe(parent.sessionId);
+
+      const storeAfterFork = JSON.parse(fs.readFileSync(path.join(stateDir, "sessions.json"), "utf-8"));
+      const forkedConvId = storeAfterFork.sessions[forked.sessionId].conversationId;
+      expect(forkedConvId).toBeDefined();
+      expect(forkedConvId).not.toBe(parentConvId);
+      expect(storeAfterFork.sessions[forked.sessionId].lastStepIdx).toBe(1);
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds the child cursor to the copied db when the stored parent cursor is stale", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-stale-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    const parentConvId = "stale-parent-conv";
+    const spawnProcess = spawnAgyWritingConversation(convDir, parentConvId, [
+      { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "one" }) },
+      { idx: 2, stepType: 15, stepPayload: encodeStepPayload({ agentText: "two" }) }
+    ]);
+
+    const agent = new AcpAgent({
+      stateDir,
+      conversationsDir: convDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const parent = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: "text", text: "seed history" }]
+      });
+      await connection.agent.request(methods.agent.session.close, {
+        sessionId: parent.sessionId
+      });
+
+      const storePath = path.join(stateDir, "sessions.json");
+      const store = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      store.sessions[parent.sessionId].lastStepIdx = 0;
+      fs.writeFileSync(storePath, JSON.stringify(store, null, 2));
+
+      const forked = (await connection.agent.request(methods.agent.session.fork, {
+        sessionId: parent.sessionId,
+        cwd: "/workspace"
+      })) as V1ForkSessionResponse;
+
+      const storeAfterFork = JSON.parse(fs.readFileSync(storePath, "utf-8"));
+      expect(storeAfterFork.sessions[forked.sessionId].lastStepIdx).toBe(2);
+    } finally {
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("serializes fork of a persisted parent against a concurrent resume", async () => {
+    const installSpy = vi.spyOn(installer, "ensureAgyInstalled").mockResolvedValue("/opt/homebrew/bin/agy");
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-fork-v1-lock-"));
+    const convDir = path.join(tmpDir, "conversations");
+    const stateDir = path.join(tmpDir, "state");
+    fs.mkdirSync(convDir, { recursive: true });
+    fs.mkdirSync(stateDir, { recursive: true });
+
+    const parentConvId = "locked-parent-conv";
+    const spawnProcess = spawnAgyWritingConversation(convDir, parentConvId, [
+      { idx: 1, stepType: 15, stepPayload: encodeStepPayload({ agentText: "locked" }) }
+    ]);
+
+    const agent = new AcpAgent({
+      stateDir,
+      conversationsDir: convDir,
+      argv: ["--no-interactive-permissions"],
+      spawnProcess
+    });
+    const connection = acpClient({ name: "test-client" }).connect(createAcpApp(agent));
+
+    let releaseRestore: (() => void) | undefined;
+    const restoreGate = new Promise<void>((resolve) => {
+      releaseRestore = resolve;
+    });
+    let restoreCalls = 0;
+    const originalRestore = SessionStore.prototype.restore;
+    let restoreSpy: ReturnType<typeof vi.spyOn> | undefined;
+
+    try {
+      await connection.agent.request(methods.agent.initialize, {
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {}
+      });
+
+      const parent = await connection.agent.request(methods.agent.session.new, {
+        cwd: "/workspace",
+        mcpServers: []
+      });
+      await flushDeferredNotifications();
+      await connection.agent.request(methods.agent.session.prompt, {
+        sessionId: parent.sessionId,
+        prompt: [{ type: "text", text: "seed history" }]
+      });
+      await connection.agent.request(methods.agent.session.close, {
+        sessionId: parent.sessionId
+      });
+
+      restoreSpy = vi.spyOn(SessionStore.prototype, "restore").mockImplementation(async function (
+        this: SessionStore,
+        sessionId: string
+      ) {
+        restoreCalls += 1;
+        if (restoreCalls === 1) await restoreGate;
+        return originalRestore.call(this, sessionId);
+      });
+
+      const forkPromise = connection.agent.request(methods.agent.session.fork, {
+        sessionId: parent.sessionId,
+        cwd: "/workspace"
+      });
+      await vi.waitFor(() => {
+        expect(restoreCalls).toBeGreaterThan(0);
+      });
+
+      let resumeSettled = false;
+      const resumePromise = connection.agent.request(methods.agent.session.resume, {
+        sessionId: parent.sessionId,
+        cwd: "/workspace",
+        mcpServers: []
+      }).then((result) => {
+        resumeSettled = true;
+        return result;
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(resumeSettled).toBe(false);
+      expect(restoreCalls).toBe(1);
+
+      releaseRestore!();
+      const forked = (await forkPromise) as V1ForkSessionResponse;
+      await resumePromise;
+      expect(forked.sessionId).not.toBe(parent.sessionId);
+      expect(resumeSettled).toBe(true);
+    } finally {
+      restoreSpy?.mockRestore();
+      installSpy.mockRestore();
+      connection.close();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 

@@ -102,6 +102,7 @@ import {
   reloadSession,
   replayConversation,
   persistSession,
+  KeyedAsyncLock,
   type SessionBuildDeps
 } from "./session/setup.js";
 import { deferAfterResponse, handleNewSessionV1, handleNewSessionV2, type NewSessionDeps } from "./session/new.js";
@@ -202,6 +203,7 @@ export class AcpAgent {
   readonly #argv: string[];
   readonly #backend: AgyCliBackend;
   readonly #sessions = new Map<string, SessionState>();
+  readonly #setupLocks = new KeyedAsyncLock();
   readonly #store: SessionStore;
   readonly #replayCache = new ReplayCache(REPLAY_CACHE_CAPACITY);
   readonly #modelCacheFile: string;
@@ -742,7 +744,8 @@ export class AcpAgent {
       ...this.sessionBuildDeps(),
       store: this.#store,
       sessions: this.#sessions,
-      maxActiveSessions: this.#maxActiveSessions
+      maxActiveSessions: this.#maxActiveSessions,
+      setupLocks: this.#setupLocks
     });
     this.reconcileSessionCatalog(result.session);
     return result;
@@ -758,7 +761,8 @@ export class AcpAgent {
       store: this.#store,
       sessions: this.#sessions,
       maxActiveSessions: this.#maxActiveSessions,
-      persistSession: (sessionId, session) => this.persistSession(sessionId, session)
+      persistSession: (sessionId, session) => this.persistSession(sessionId, session),
+      setupLocks: this.#setupLocks
     });
     this.reconcileSessionCatalog(result.childSession);
     return result;
