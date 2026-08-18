@@ -2939,12 +2939,62 @@ describe("StreamPoller", () => {
     expect(poller3.turnCompleteCandidate).toBe(true);
     expect(poller3.isConclusiveTurnEnd).toBe(true);
 
+    // 4. StepType 17 carrying a routed tool call (without modelProviderError) is NOT conclusive
+    const db4 = createConversationDb(dir, "conv-steptype17-tool-inconclusive");
+    insertStep(db4, {
+      idx: 1,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Generate an image" })
+    });
+    insertStep(db4, {
+      idx: 2,
+      stepType: 17,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        toolRun: encodeToolRun({
+          call: encodeToolCall({ callId: "c1", namePrimary: "generate_image", rawInputJson: '{"Prompt":"a test image"}' })
+        })
+      })
+    });
+    const poller4 = new StreamPoller({
+      dir,
+      conversationId: "conv-steptype17-tool-inconclusive",
+      baseStepIdx: -1,
+      skipNarration: false,
+      snapshot: null
+    });
+    expect(poller4.poll()).toHaveLength(1);
+    expect(poller4.turnCompleteCandidate).toBe(true);
+    expect(poller4.isConclusiveTurnEnd).toBe(false);
+
+    // 5. Earlier model error in conversation does not make subsequent intermediate tool steps conclusive
+    insertStep(db3, {
+      idx: 3,
+      stepType: 14,
+      status: 3,
+      stepPayload: encodeStepPayload({ userPrompt: "Follow up with tool" })
+    });
+    insertStep(db3, {
+      idx: 4,
+      stepType: 21,
+      status: 3,
+      stepPayload: encodeStepPayload({
+        commandResult: encodeCommandResult({ command: "ls", output: "file1" })
+      })
+    });
+    expect(poller3.poll()).toHaveLength(1);
+    expect(poller3.turnCompleteCandidate).toBe(true);
+    expect(poller3.isConclusiveTurnEnd).toBe(false);
+
     poller.close();
     poller2.close();
     poller3.close();
+    poller4.close();
     db.close();
     db2.close();
     db3.close();
+    db4.close();
   });
 
   it("does not treat empty stepType 15 (text: '' and no thought, status 3) as a turn completion candidate", () => {

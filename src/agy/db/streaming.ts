@@ -304,7 +304,9 @@ export class StreamPoller {
       return false;
     }
     // Model provider errors end the turn conclusively.
-    if (this._latestStepType === 17 || (this._latestStepStatus === 3 && this._lastObservedRows?.some((r) => r.stepPayload?.modelProviderError))) return true;
+    if (latestMeaningful?.stepPayload?.modelProviderError && isTerminalStepStatus(this._latestStepStatus)) {
+      return true;
+    }
     // Completed agent text (stepType 15) is the normal conclusive turn ending.
     // Tool steps (status 3/6/7) are turn-complete candidates but must not bypass
     // the idle marker / quiescence wait, allowing agy to emit trailing error
