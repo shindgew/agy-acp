@@ -300,7 +300,7 @@ export class StreamPoller {
     // has been produced beyond that wake, do not treat the prior assistant response as conclusive.
     const latestMeaningful = findLastMeaningfulStep(this._lastObservedRows ?? []);
     const latestWakeIdx = Math.max(this._latestSystemMessageStepIdx, this._latestTaskCompletionStepIdx);
-    if (latestWakeIdx > (latestMeaningful?.idx ?? -1)) {
+    if (latestWakeIdx >= (latestMeaningful?.idx ?? -1) && latestWakeIdx >= 0) {
       return false;
     }
     // Cancelled/failed terminal rows (notably denied commands) end the turn
