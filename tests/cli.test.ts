@@ -837,23 +837,28 @@ describe("permission bridge", () => {
       const db = createConversationDb(dir, "chunked-marker");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
+      // Split "Allow once" into two chunks: "\x1b[32mAllow " then "once\x1b[0m\nSelect option:"
+      setTimeout(() => {
+        pty.emitData("\x1b[32mAllow ");
+        setTimeout(() => {
+          pty.emitData("once\x1b[0m\nSelect option:");
+        }, 10);
+      }, 10);
     });
     pty.emitPermissionPanelOnStart = false;
     const session = interactiveSession(dir, pty);
 
-    // Split "Allow once" into two chunks: "\x1b[32mAllow " then "once\x1b[0m"
-    setTimeout(() => {
-      pty.emitData("\x1b[32mAllow ");
-      setTimeout(() => {
-        pty.emitData("once\x1b[0m\nSelect option:");
-      }, 30);
-    }, 50);
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "chunked-marker.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      return "agy-allow-once";
+    });
 
-    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
-    // Should successfully detect the permission panel and send Enter (\r)
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await result).stopReason).toBe("end_turn");
     expect(pty.writes).toContain("\r");
-    await session.cancel();
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -863,22 +868,28 @@ describe("permission bridge", () => {
       const db = createConversationDb(dir, "split-ansi");
       insertStep(db, pendingToolRow("run_command"));
       db.close();
+      // Split ANSI sequence "\x1b[" across chunk boundaries: "Select option:\nAllow \x1b[" then "32monce\x1b[0m"
+      setTimeout(() => {
+        pty.emitData("Select option:\nAllow \x1b[");
+        setTimeout(() => {
+          pty.emitData("32monce\x1b[0m");
+        }, 10);
+      }, 10);
     });
     pty.emitPermissionPanelOnStart = false;
     const session = interactiveSession(dir, pty);
 
-    // Split ANSI sequence "\x1b[" across chunk boundaries: "Select option:\nAllow \x1b[" then "32monce\x1b[0m"
-    setTimeout(() => {
-      pty.emitData("Select option:\nAllow \x1b[");
-      setTimeout(() => {
-        pty.emitData("32monce\x1b[0m");
-      }, 30);
-    }, 50);
+    const result = session.prompt("go", async () => {}, async () => {
+      const db = new (await import("better-sqlite3")).default(path.join(dir, "split-ansi.db"));
+      updateStep(db, 1, { status: 3 });
+      insertStep(db, { idx: 2, stepType: 15, status: 3, stepPayload: encodeStepPayload({ agentText: "done" }) });
+      db.close();
+      return "agy-allow-once";
+    });
 
-    const pending = session.prompt("go", async () => {}, async () => "agy-allow-once");
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect((await result).stopReason).toBe("end_turn");
     expect(pty.writes).toContain("\r");
-    await session.cancel();
+    await session.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
