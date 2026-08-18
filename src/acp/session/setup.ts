@@ -161,6 +161,9 @@ export async function forkSession(
   }
 ): Promise<{ childSession: SessionState; cwd: string; childSessionId: string }> {
   const activeParent = deps.sessions.get(parentSessionId);
+  if (activeParent && sessionTurnBusy(activeParent)) {
+    throw new Error(`Cannot fork session while a turn is active: ${parentSessionId}`);
+  }
   const parentStored = activeParent
     ? sessionRecord(activeParent)
     : await deps.store.restore(parentSessionId);
