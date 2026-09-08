@@ -107,17 +107,29 @@ function decodeGenerationMetadataBody(bytes: Uint8Array): GenerationMetadataBody
     {
       4: (m, r) => (m.stats = readSubmessage(r, decodeModelUsageStats)),
       9: (m, r) => {
-        const f9 = readSubmessage(r, decodeField9Submessage);
-        if (f9.contextWindowSize) m.contextWindowSize = f9.contextWindowSize;
+        // agy 1.1.27 repurposed field 9: it now includes an unsigned
+        // 64-bit sentinel that the protobuf reader cannot safely skip as a
+        // signed JS number. Context-window metadata is optional, so retain
+        // the model usage record when this newer shape is encountered.
+        try {
+          const f9 = readSubmessage(r, decodeField9Submessage);
+          if (f9.contextWindowSize) m.contextWindowSize = f9.contextWindowSize;
+        } catch {
+          // Unknown field-9 layouts are metadata-only and must not discard
+          // otherwise valid usage or prevent terminal-turn detection.
+        }
       },
       15: (m, r) => {
         const f15 = readSubmessage(r, decodeField15Submessage);
         if (f15.maxOutputTokens) m.maxOutputTokens = f15.maxOutputTokens;
       },
       17: (m, r) => {
-        // Fallback: if field 4 was not populated, read stats from field 17.2
+        // Always consume field 17. agy 1.1.27 writes it alongside field 4;
+        // leaving it unread makes the next protobuf tag come from its payload.
+        const field17 = r.bytes();
+        // Fallback: if field 4 was not populated, read stats from field 17.2.
         if (!m.stats) {
-          readMessage(r.bytes(), {}, {
+          readMessage(field17, {}, {
             2: (_m2, r2) => (m.stats = readSubmessage(r2, decodeModelUsageStats))
           });
         }
