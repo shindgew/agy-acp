@@ -50,6 +50,15 @@ Add `agy-acp` as a custom agent in Zed:
 |---|---|
 | `PATH` | Must include `agy` if the editor doesn't inherit your shell `PATH` |
 | `AGY_BIN` | Override the `agy` binary path |
+| `AGY_PRINT_TIMEOUT` | Maximum print-mode turn duration (default `30m`); override with `--print-timeout 1h` |
+
+Permission bypass (`--dangerously-skip-permissions`) uses the CLI's print mode.
+The adapter allows 30 minutes for that turn by default, so reviews can finish
+beyond the CLI's five-minute default. Set `--print-timeout <duration>` (or
+`--print-timeout=<duration>`) to override it; durations must be positive, such
+as `30m`, `1h`, or `1h30m`. Cancellation still stops the current turn immediately.
+If the configured deadline is reached, the adapter reports the CLI's timeout
+instead of treating its partial output and zero exit code as a completed turn.
 
 ## Architecture
 

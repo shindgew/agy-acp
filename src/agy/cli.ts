@@ -38,6 +38,7 @@ import {
 } from "../acp/tool-calls/permissions.js";
 import type { ClientElicitationCapability } from "../acp/tool-calls/elicitation.js";
 export const DEFAULT_AGY_MODEL_LIST_TIMEOUT_MS = 15_000;
+export const DEFAULT_AGY_PRINT_TIMEOUT = "30m";
 export const DEFAULT_CONVERSATIONS_DIR = path.join(os.homedir(), ".gemini", "antigravity-cli", "conversations");
 const POLL_INTERVAL_MS = 200;
 /** Trailing polls after the process exits, to catch rows flushed right around exit. */
@@ -936,8 +937,14 @@ export class AgyCliSession {
         if (attempt < TRAILING_POLL_ATTEMPTS - 1) await sleep(TRAILING_POLL_DELAY_MS);
       }
 
+      const stderr = Buffer.concat(stderrChunks).toString("utf8");
+      // agy 1.2.1 returns exit code 0 (and even status SUCCESS) when its
+      // print deadline interrupts an active turn. Its stderr is authoritative.
+      const printTimeout = stderr.match(/^\[agy\] print timeout after [^\r\n]+/m);
+      if (printTimeout && !this.#cancelled) {
+        throw new AgyCliError(printTimeout[0], command, exitCode, stderr);
+      }
       if (exitCode && !this.#cancelled) {
-        const stderr = Buffer.concat(stderrChunks).toString("utf8");
         throw new AgyCliError(
           `agy exited with status ${exitCode}: ${stderr.trim() || "<no stderr>"}`,
           command,
@@ -1299,6 +1306,20 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
   const interactiveDisabled = argv.includes("--no-interactive-permissions");
   const interactivePermissions = !skipPermissions && !interactiveDisabled;
 
+  let printTimeout = optional(env.AGY_PRINT_TIMEOUT) ?? DEFAULT_AGY_PRINT_TIMEOUT;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === "--print-timeout") {
+      printTimeout = argv[++i] ?? "";
+    } else if (argv[i].startsWith("--print-timeout=")) {
+      printTimeout = argv[i].slice("--print-timeout=".length);
+    }
+  }
+  if (!/^(?:\d+(?:\.\d+)?(?:ms|h|m|s))+$/.test(printTimeout) ||
+      !Number.isFinite(parsePrintTimeoutMs(printTimeout)) ||
+      !/[1-9]/.test(printTimeout)) {
+    throw new Error("--print-timeout / AGY_PRINT_TIMEOUT must be a positive duration, e.g. 30m or 1h");
+  }
+
   let mode: SessionModeId = "default";
   const modeFlagIdx = argv.indexOf("--mode");
   if (modeFlagIdx >= 0) {
@@ -1316,7 +1337,7 @@ export function configFromEnv(input: AgyCliConfigInput): AgyCliConfig {
     effort: undefined,
     mode,
     project: undefined,
-    printTimeout: "5m0s",
+    printTimeout,
     sandbox,
     skipPermissions,
     interactivePermissions,

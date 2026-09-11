@@ -2287,6 +2287,23 @@ describe("permission bridge", () => {
 });
 
 describe("configFromEnv", () => {
+  it("allows long print turns and passes the configured deadline to agy", () => {
+    const config = configFromEnv({ cwd: "/repo", env: {}, argv: ["--dangerously-skip-permissions"] });
+    expect(config.printTimeout).toBe("30m");
+    expect(flagValue(new AgyCliSession(config).commandForPrompt("review"), "--print-timeout")).toBe("30m");
+    expect(configFromEnv({ cwd: "/repo", env: { AGY_PRINT_TIMEOUT: "1h" } }).printTimeout).toBe("1h");
+    for (const argv of [["--print-timeout", "45m"], ["--print-timeout=45m"]]) {
+      const override = configFromEnv({ cwd: "/repo", env: { AGY_PRINT_TIMEOUT: "1h" }, argv });
+      expect(flagValue(new AgyCliSession(override).commandForPrompt("review"), "--print-timeout")).toBe("45m");
+    }
+  });
+
+  it("rejects invalid deadlines instead of silently using the CLI five-minute default", () => {
+    for (const value of ["", "0s", "-1s", "later", "5m junk", "1e10s"]) {
+      expect(() => configFromEnv({ cwd: "/repo", argv: ["--print-timeout", value] })).toThrow(/positive duration/);
+    }
+    expect(() => configFromEnv({ cwd: "/repo", argv: ["--print-timeout"] })).toThrow(/positive duration/);
+  });
   it("always invokes agy by name and relies on PATH resolution", () => {
     const config = configFromEnv({
       cwd: "/repo",
@@ -2363,6 +2380,14 @@ claude-opus-4-6-thinking
 });
 
 describe("prompt", () => {
+  it("does not report end_turn when agy returns partial output and exits zero on timeout", async () => {
+    const fake = new FakeProcess(["partial"], {
+      stderr: ["[agy] print time", "out after 5m0s with turn in progress; returning partial output\n"],
+      exitCode: 0
+    });
+    const session = new AgyCliSession(defaultConfig(), fake.spawnFactory([]));
+    await expect(collectUpdates(session, "review")).rejects.toThrow(/print timeout after 5m0s/);
+  });
   it("runs the prompt in argv mode and drains stdout without reading it", async () => {
     const fake = new FakeProcess(["hello ", "world"]);
     const calls: SpawnCall[] = [];
