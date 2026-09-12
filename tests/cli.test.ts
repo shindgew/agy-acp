@@ -620,6 +620,82 @@ describe("permission bridge", () => {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  it("keeps a successful tool-only turn open while the TUI spinner animates, then delivers the follow-up text", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-tool-spinner-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-spinner-followup");
+      // A successful command step (status 3): a turn-complete candidate, but agy
+      // has not yet produced its follow-up narration.
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "ls -la", output: "a.txt\nb.txt\n" })
+        })
+      });
+      db.close();
+    });
+    // No idle hint yet — agy is still mid-turn.
+    pty.emitIdleMarkerOnStart = false;
+    const session = interactiveSession(dir, pty);
+    const updates: any[] = [];
+    const result = session.prompt("list files", async (u) => { updates.push(u); }, async () => "agy-allow-once");
+
+    // The TUI is animating its braille spinner: the model is still producing.
+    // Emit after setup so the pty's onData listener is already attached.
+    setTimeout(() => pty.emitData("\x1b[2A⣯  Running command...\n"), 30);
+
+    // The follow-up assistant text lands well after the 300ms DB-quiescence
+    // window. On the old code the tool-only shortcut concludes at ~300ms and
+    // drops this text; the spinner gate must hold the turn open until it lands.
+    await new Promise((resolve) => setTimeout(resolve, 450));
+    const db = new (await import("better-sqlite3")).default(path.join(dir, "tool-spinner-followup.db"));
+    insertStep(db, {
+      idx: 2,
+      stepType: 15,
+      status: 3,
+      stepPayload: encodeStepPayload({ agentText: "There are 2 files: a.txt and b.txt." })
+    });
+    db.close();
+    setTimeout(() => pty.emitData("? for shortcuts"), 60);
+
+    expect((await result).stopReason).toBe("end_turn");
+    const text = updates
+      .filter((u) => u.sessionUpdate === "agent_message_chunk")
+      .map((u) => u.content?.text ?? "")
+      .join("");
+    expect(text).toContain("There are 2 files");
+
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("still concludes a successful tool-only turn once the TUI is idle and no follow-up text arrives", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-tool-idle-"));
+    const pty = new FakePty(() => {
+      const db = createConversationDb(dir, "tool-idle-notext");
+      insertStep(db, {
+        idx: 1,
+        stepType: 21,
+        status: 3,
+        stepPayload: encodeStepPayload({
+          commandResult: encodeCommandResult({ command: "touch marker", output: "" })
+        })
+      });
+      db.close();
+    });
+    // Idle hint present from the start (spinner already stopped): a genuine
+    // tool-only turn with no narration must still conclude promptly, not hang.
+    const session = interactiveSession(dir, pty, "60s");
+    const start = Date.now();
+    const result = await session.prompt("touch marker", async () => {}, async () => "agy-allow-once");
+    expect(result.stopReason).toBe("end_turn");
+    expect(Date.now() - start).toBeLessThan(5000);
+    await session.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
   it("captures assistant explanation after a cancelled permission check without premature turn cutoff", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-pty-"));
     const pty = new FakePty(() => {
