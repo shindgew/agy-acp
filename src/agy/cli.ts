@@ -47,6 +47,13 @@ const PERMISSION_RENDER_SETTLE_MS = 20;
 const PERMISSION_KEY_DELAY_MS = 50;
 const QUIESCENT_SETTLE_MS = 300;
 
+/** Strips ANSI/OSC/charset escapes so raw TUI output can be matched as text. */
+const ANSI_ESCAPE_RE = /\x1b\[[0-9;?]*[a-zA-Z]|\x1b\].*?\x07|\x1b[()][AB012]/g;
+/** agy's TUI animates a braille spinner (U+2800–U+28FF) while a turn is working. */
+const SPINNER_FRAME_RE = /[⠀-⣿]/;
+/** agy's TUI shows this idle hint once a turn is fully done. */
+const TUI_IDLE_MARKER = "for shortcuts";
+
 /** Signature of the permission decision agy has recorded for a gated step.
  *  A re-armed status-9 prompt (e.g. the next segment of `a && b`) changes this
  *  even though the toolCallId is unchanged, letting the turn loop tell a fresh
@@ -680,7 +687,14 @@ export class AgyCliSession {
           poller.lastStepIdx > this.#lastStepIdx &&
           candidateRevision === poller.revision &&
           hasQuiesced &&
-          (poller.isConclusiveTurnEnd || poller.isSuccessfulToolOnlyEnd);
+          // A successful tool step is a turn-complete candidate, but the DB can
+          // fall quiet for a beat between that step and the model's follow-up
+          // text — concluding then drops the final answer. agy's TUI is the
+          // ground truth: it animates a spinner while still producing and shows
+          // the idle hint when the turn is really over. Only take the tool-only
+          // shortcut when the TUI is not mid-spinner. The conclusive path (a
+          // completed agent-text step, stepType 15) still ends the turn at once.
+          (poller.isConclusiveTurnEnd || (poller.isSuccessfulToolOnlyEnd && !this.ptyLooksBusy()));
         if (isIdleCandidate) {
           // Background work can finish after the TUI looks idle. Stay on this
           // user turn and keep polling — do not inject a synthetic "continue".
@@ -718,6 +732,18 @@ export class AgyCliSession {
       if (this.#activeStreamPoller === poller) this.#activeStreamPoller = undefined;
       if (this.#cancelled && !failed) await this.stopPty();
     }
+  }
+
+  /**
+   * True while agy's TUI is still mid-turn (a spinner frame is the latest thing
+   * on screen and the idle hint has not returned). Used to hold a successful
+   * tool-only turn open until the model's follow-up text lands, instead of
+   * concluding in the quiet beat right after the tool step.
+   */
+  private ptyLooksBusy(): boolean {
+    const tail = this.#ptyOutput.slice(-2048).replace(ANSI_ESCAPE_RE, "");
+    if (tail.includes(TUI_IDLE_MARKER)) return false;
+    return SPINNER_FRAME_RE.test(tail);
   }
 
   private async raceTurnCallback<T>(callback: Promise<T>, deadline?: number): Promise<T | "cancelled"> {
