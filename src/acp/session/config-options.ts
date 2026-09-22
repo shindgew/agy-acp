@@ -97,9 +97,9 @@ export async function applyConfigOption(
     let matchedEffort: string | undefined;
 
     if (efforts.length === 0) {
-      if (value.toLowerCase() === "n/a" || value.toLowerCase() === "none") {
-        matchedEffort = "none";
-      }
+      // Model has no effort variants (e.g. thinking models) — silently
+      // accept any value the client may carry over from a previous model.
+      matchedEffort = "none";
     } else {
       matchedEffort = efforts.find(
         (e) =>
