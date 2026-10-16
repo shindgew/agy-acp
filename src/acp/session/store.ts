@@ -3,8 +3,11 @@
 // Docs: https://agentclientprotocol.com/protocol/v1/session-setup
 //
 // Writes are serialized through an in-process promise chain (so concurrent
-// persists can't clobber each other) and committed atomically via temp-file +
-// rename.
+// persists within one instance can't clobber each other) and committed
+// atomically via a unique temp file + rename. The temp file is unique per write
+// (not a fixed `${file}.tmp`) so separate instances and separate agy-acp
+// processes sharing one state dir can't rename each other's temp file away and
+// fail with ENOENT.
 //
 // Stored under its own directory (not the sibling `antigravity-acp` project's
 // `~/.agy-acp`) so the two tools can't collide if both happen to be installed.
@@ -110,7 +113,7 @@ export class SessionStore {
     const store = await this.load();
     store.sessions[sessionId] = session;
     await fs.promises.mkdir(this.dir, { recursive: true });
-    const tmp = `${this.file}.tmp`;
+    const tmp = this.#tmpFile();
     await fs.promises.writeFile(tmp, JSON.stringify(store, null, 2));
     await fs.promises.rename(tmp, this.file);
   }
@@ -122,10 +125,21 @@ export class SessionStore {
     }
     delete store.sessions[sessionId];
     await fs.promises.mkdir(this.dir, { recursive: true });
-    const tmp = `${this.file}.tmp`;
+    const tmp = this.#tmpFile();
     await fs.promises.writeFile(tmp, JSON.stringify(store, null, 2));
     await fs.promises.rename(tmp, this.file);
     return true;
+  }
+
+  /**
+   * Unique temp path per write. A fixed `${file}.tmp` is safe only while a
+   * single writer owns the directory; concurrent agy-acp processes (for
+   * example provider catalog refreshes) write to the same state dir, so a
+   * shared temp name lets one writer rename the other's temp file away first,
+   * producing an ENOENT on the second rename.
+   */
+  #tmpFile(): string {
+    return `${this.file}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   }
 }
 

@@ -49,4 +49,29 @@ describe("SessionStore.persist", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  it("does not clobber a shared temp file across concurrent store instances", async () => {
+    // Two SessionStore instances (as two agy-acp processes would be) sharing one
+    // state dir must not rename each other's temp file away. With a fixed
+    // `${file}.tmp` name some writes fail with ENOENT.
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "agy-acp-store-concurrent-"));
+    const a = new SessionStore(stateDir);
+    const b = new SessionStore(stateDir);
+    try {
+      const writes: Array<Promise<void>> = [];
+      for (let i = 0; i < 25; i += 1) {
+        writes.push(a.persist(`a-${i}`, sampleSession({ conversationId: `ca-${i}` })));
+        writes.push(b.persist(`b-${i}`, sampleSession({ conversationId: `cb-${i}` })));
+      }
+      await expect(Promise.all(writes)).resolves.toHaveLength(50);
+
+      const disk = JSON.parse(fs.readFileSync(path.join(stateDir, "sessions.json"), "utf-8")) as {
+        sessions: Record<string, unknown>;
+      };
+      expect(Object.keys(disk.sessions).length).toBeGreaterThan(0);
+      expect(fs.readdirSync(stateDir).filter((f) => f.endsWith(".tmp"))).toHaveLength(0);
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
 });
